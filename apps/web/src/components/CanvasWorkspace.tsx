@@ -49,7 +49,6 @@ import type {
   ApiWorkspace,
   CanvasEdgeRecord,
   CanvasNodeRecord,
-  CanvasPosition,
   ExplorerSnapshot,
   WorkspaceMember,
   WorkspaceMemberUpsert,
@@ -72,25 +71,38 @@ interface CanvasWorkspaceProps {
 
 interface NodeDragState {
   baseVersion: number;
-  element: HTMLButtonElement;
+  interactionId: number;
   nodeId: string;
   pointerId: number;
   startX: number;
   startY: number;
-  origin: CanvasPosition;
+  origin: CanvasNodeGeometry;
   moved: boolean;
 }
 
 interface NodeResizeState {
   baseVersion: number;
-  element: HTMLButtonElement;
-  handle: HTMLSpanElement;
+  interactionId: number;
   nodeId: string;
   pointerId: number;
   startX: number;
   startY: number;
-  origin: { width: number; height: number };
+  origin: CanvasNodeGeometry;
   moved: boolean;
+}
+
+export interface CanvasNodeGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface CanvasGeometryPreview {
+  baseVersion: number;
+  geometry: CanvasNodeGeometry;
+  interactionId: number;
+  nodeId: string;
 }
 
 interface AuthoringHistoryEntry {
@@ -179,6 +191,16 @@ function nodeDimensions(node: CanvasNodeRecord) {
   };
 }
 
+export function canvasNodeGeometry(node: CanvasNodeRecord): CanvasNodeGeometry {
+  const dimensions = nodeDimensions(node);
+  return {
+    x: node.position.x,
+    y: node.position.y,
+    width: dimensions.width,
+    height: dimensions.height,
+  };
+}
+
 function edgeLabel(edge: CanvasEdgeRecord, nodeMap: Map<string, CanvasNodeRecord>): string {
   const source = nodeMap.get(edge.source);
   const target = nodeMap.get(edge.target);
@@ -197,27 +219,25 @@ function previousNodeDataValue(node: CanvasNodeRecord, key: string): unknown {
   return "";
 }
 
-function edgePath(source: CanvasNodeRecord, target: CanvasNodeRecord): string {
-  const sourceSize = nodeDimensions(source);
-  const targetSize = nodeDimensions(target);
+export function edgePath(source: CanvasNodeGeometry, target: CanvasNodeGeometry): string {
   const sourceCenter = {
-    x: source.position.x + sourceSize.width / 2,
-    y: source.position.y + sourceSize.height / 2,
+    x: source.x + source.width / 2,
+    y: source.y + source.height / 2,
   };
   const targetCenter = {
-    x: target.position.x + targetSize.width / 2,
-    y: target.position.y + targetSize.height / 2,
+    x: target.x + target.width / 2,
+    y: target.y + target.height / 2,
   };
 
   if (Math.abs(targetCenter.y - sourceCenter.y) >= Math.abs(targetCenter.x - sourceCenter.x)) {
-    const sourceY = targetCenter.y >= sourceCenter.y ? source.position.y + sourceSize.height : source.position.y;
-    const targetY = targetCenter.y >= sourceCenter.y ? target.position.y : target.position.y + targetSize.height;
+    const sourceY = targetCenter.y >= sourceCenter.y ? source.y + source.height : source.y;
+    const targetY = targetCenter.y >= sourceCenter.y ? target.y : target.y + target.height;
     const middleY = (sourceY + targetY) / 2;
     return `M${sourceCenter.x} ${sourceY} C${sourceCenter.x} ${middleY} ${targetCenter.x} ${middleY} ${targetCenter.x} ${targetY}`;
   }
 
-  const sourceX = targetCenter.x >= sourceCenter.x ? source.position.x + sourceSize.width : source.position.x;
-  const targetX = targetCenter.x >= sourceCenter.x ? target.position.x : target.position.x + targetSize.width;
+  const sourceX = targetCenter.x >= sourceCenter.x ? source.x + source.width : source.x;
+  const targetX = targetCenter.x >= sourceCenter.x ? target.x : target.x + target.width;
   const middleX = (sourceX + targetX) / 2;
   return `M${sourceX} ${sourceCenter.y} C${middleX} ${sourceCenter.y} ${middleX} ${targetCenter.y} ${targetX} ${targetCenter.y}`;
 }
@@ -227,6 +247,32 @@ function createCanvasId(prefix: string): string {
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `${prefix}-${suffix}`;
+}
+
+function requestCanvasFrame(callback: FrameRequestCallback): number {
+  if (typeof window.requestAnimationFrame === "function") return window.requestAnimationFrame(callback);
+  return window.setTimeout(() => callback(performance.now()), 16);
+}
+
+function cancelCanvasFrame(frame: number): void {
+  if (typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(frame);
+  else window.clearTimeout(frame);
+}
+
+function movedNodeGeometry(origin: CanvasNodeGeometry, deltaX: number, deltaY: number, scale: number): CanvasNodeGeometry {
+  return {
+    ...origin,
+    x: Math.round(origin.x + deltaX / scale),
+    y: Math.round(origin.y + deltaY / scale),
+  };
+}
+
+function resizedNodeGeometry(origin: CanvasNodeGeometry, deltaX: number, deltaY: number, scale: number): CanvasNodeGeometry {
+  return {
+    ...origin,
+    width: clampDimension(origin.width + deltaX / scale, MIN_NODE_WIDTH, MAX_NODE_WIDTH),
+    height: clampDimension(origin.height + deltaY / scale, MIN_NODE_HEIGHT, MAX_NODE_HEIGHT),
+  };
 }
 
 function TelemetryChart({ snapshot }: { snapshot: ExplorerSnapshot | null }) {
@@ -254,9 +300,19 @@ function TelemetryChart({ snapshot }: { snapshot: ExplorerSnapshot | null }) {
   );
 }
 
-function PidPanel({ position }: { position: CanvasPosition }) {
+function PidPanel({ geometry }: { geometry: CanvasNodeGeometry }) {
   return (
-    <div className="canvas-panel canvas-pid-panel" style={{ left: position.x, top: position.y }} aria-label="Cooling Water System P and ID drawing">
+    <div
+      className="canvas-panel canvas-pid-panel"
+      style={{
+        left: 0,
+        top: 0,
+        width: geometry.width,
+        height: geometry.height,
+        transform: `translate3d(${geometry.x}px, ${geometry.y}px, 0)`,
+      }}
+      aria-label="Cooling Water System P and ID drawing"
+    >
       <div className="canvas-panel-header"><span>P&amp;ID — Cooling Water System</span><MoreDots /></div>
       <svg viewBox="0 0 480 330" role="img" aria-label="Cooling water system process drawing">
         <g className="pid-lines">
@@ -339,10 +395,14 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   const [conflictMessage, setConflictMessage] = useState("");
   const [undoStack, setUndoStack] = useState<AuthoringHistoryEntry[]>([]);
   const [redoStack, setRedoStack] = useState<AuthoringHistoryEntry[]>([]);
+  const [geometryPreview, setGeometryPreview] = useState<CanvasGeometryPreview | null>(null);
   const stageRef = useRef<HTMLElement | null>(null);
   const panRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const nodeDragRef = useRef<NodeDragState | null>(null);
   const nodeResizeRef = useRef<NodeResizeState | null>(null);
+  const geometryPreviewRef = useRef<CanvasGeometryPreview | null>(null);
+  const geometryFrameRef = useRef<number | null>(null);
+  const nextInteractionIdRef = useRef(0);
   const suppressClickRef = useRef<string | null>(null);
   const workspaceRef = useRef(workspace);
   const latestVersionRef = useRef(workspace?.version ?? 0);
@@ -350,6 +410,13 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   const nodes = workspace?.snapshot?.nodes ?? fallbackNodes;
   const edges = workspace?.snapshot?.edges ?? fallbackEdges;
   const nodeMap = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const geometryMap = useMemo(() => {
+    const next = new Map(nodes.map((node) => [node.id, canvasNodeGeometry(node)]));
+    if (geometryPreview && geometryPreview.baseVersion === workspace?.version && next.has(geometryPreview.nodeId)) {
+      next.set(geometryPreview.nodeId, geometryPreview.geometry);
+    }
+    return next;
+  }, [geometryPreview, nodes, workspace?.version]);
   const edgeMap = useMemo(() => new Map(edges.map((edge) => [edge.id, edge])), [edges]);
   const selectedNode = selection?.kind === "node" ? nodeMap.get(selection.id) ?? null : null;
   const selectedEdge = selection?.kind === "edge" ? edgeMap.get(selection.id) ?? null : null;
@@ -370,6 +437,37 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   workspaceRef.current = workspace;
   latestVersionRef.current = Math.max(latestVersionRef.current, workspace?.version ?? 0);
   canEditRef.current = canEdit;
+
+  const scheduleGeometryPreview = useCallback((preview: CanvasGeometryPreview) => {
+    geometryPreviewRef.current = preview;
+    if (geometryFrameRef.current !== null) return;
+    geometryFrameRef.current = requestCanvasFrame(() => {
+      geometryFrameRef.current = null;
+      setGeometryPreview(geometryPreviewRef.current);
+    });
+  }, []);
+
+  const flushGeometryPreview = useCallback((preview: CanvasGeometryPreview) => {
+    if (geometryFrameRef.current !== null) {
+      cancelCanvasFrame(geometryFrameRef.current);
+      geometryFrameRef.current = null;
+    }
+    geometryPreviewRef.current = preview;
+    setGeometryPreview(preview);
+  }, []);
+
+  const clearGeometryPreview = useCallback((interactionId?: number) => {
+    const pending = geometryPreviewRef.current;
+    if (interactionId !== undefined && pending?.interactionId !== interactionId) return;
+    if (geometryFrameRef.current !== null) {
+      cancelCanvasFrame(geometryFrameRef.current);
+      geometryFrameRef.current = null;
+    }
+    geometryPreviewRef.current = null;
+    setGeometryPreview((current) => (
+      interactionId === undefined || current?.interactionId === interactionId ? null : current
+    ));
+  }, []);
 
   const refreshMembers = useCallback(async (workspaceId: string): Promise<boolean> => {
     setMembersRefreshing(true);
@@ -449,6 +547,18 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     setSelection(entry.selectionAfter);
     return updated;
   }, [commitOperations]);
+
+  useEffect(() => () => {
+    if (geometryFrameRef.current !== null) cancelCanvasFrame(geometryFrameRef.current);
+  }, []);
+
+  useEffect(() => {
+    const preview = geometryPreviewRef.current;
+    if (!preview || !workspace || preview.baseVersion === workspace.version) return;
+    if (nodeDragRef.current?.interactionId === preview.interactionId) nodeDragRef.current = null;
+    if (nodeResizeRef.current?.interactionId === preview.interactionId) nodeResizeRef.current = null;
+    clearGeometryPreview(preview.interactionId);
+  }, [clearGeometryPreview, workspace?.id, workspace?.version]);
 
   useEffect(() => {
     if (!workspace) return;
@@ -654,15 +764,18 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     if (!canEditRef.current) return;
     const current = workspaceRef.current;
     if (!current) return;
+    if (nodeDragRef.current || nodeResizeRef.current || geometryPreviewRef.current) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    const interactionId = nextInteractionIdRef.current + 1;
+    nextInteractionIdRef.current = interactionId;
     nodeDragRef.current = {
       baseVersion: current.version,
-      element: event.currentTarget,
+      interactionId,
       nodeId: node.id,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      origin: node.position,
+      origin: geometryMap.get(node.id) ?? canvasNodeGeometry(node),
       moved: false,
     };
   }
@@ -670,12 +783,16 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   function onNodePointerMove(event: React.PointerEvent<HTMLButtonElement>) {
     const drag = nodeDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    const deltaX = (event.clientX - drag.startX) / scale;
-    const deltaY = (event.clientY - drag.startY) / scale;
-    drag.moved = drag.moved || Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2;
+    const deltaX = event.clientX - drag.startX;
+    const deltaY = event.clientY - drag.startY;
+    drag.moved = drag.moved || Math.abs(deltaX / scale) > 2 || Math.abs(deltaY / scale) > 2;
     if (!drag.moved) return;
-    drag.element.style.left = `${Math.round(drag.origin.x + deltaX)}px`;
-    drag.element.style.top = `${Math.round(drag.origin.y + deltaY)}px`;
+    scheduleGeometryPreview({
+      baseVersion: drag.baseVersion,
+      geometry: movedNodeGeometry(drag.origin, deltaX, deltaY, scale),
+      interactionId: drag.interactionId,
+      nodeId: drag.nodeId,
+    });
   }
 
   function onNodePointerUp(event: React.PointerEvent<HTMLButtonElement>) {
@@ -683,12 +800,27 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     const drag = nodeDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     nodeDragRef.current = null;
-    drag.element.releasePointerCapture?.(event.pointerId);
-    if (!drag.moved) return;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (!drag.moved) {
+      clearGeometryPreview(drag.interactionId);
+      return;
+    }
 
+    const finalGeometry = movedNodeGeometry(
+      drag.origin,
+      event.clientX - drag.startX,
+      event.clientY - drag.startY,
+      scale,
+    );
+    flushGeometryPreview({
+      baseVersion: drag.baseVersion,
+      geometry: finalGeometry,
+      interactionId: drag.interactionId,
+      nodeId: drag.nodeId,
+    });
     const position = {
-      x: Math.round(drag.origin.x + (event.clientX - drag.startX) / scale),
-      y: Math.round(drag.origin.y + (event.clientY - drag.startY) / scale),
+      x: finalGeometry.x,
+      y: finalGeometry.y,
     };
     suppressClickRef.current = drag.nodeId;
     window.setTimeout(() => { suppressClickRef.current = null; }, 0);
@@ -697,12 +829,25 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     void commitAuthoringAction({
       description,
       forward: [{ type: "moveNode", nodeId: drag.nodeId, position }],
-      inverse: [{ type: "moveNode", nodeId: drag.nodeId, position: drag.origin }],
+      inverse: [{ type: "moveNode", nodeId: drag.nodeId, position: { x: drag.origin.x, y: drag.origin.y } }],
       selectionBefore: nodeSelection,
       selectionAfter: nodeSelection,
     }, drag.baseVersion).then((updated) => {
       if (updated) onNotify(`Node moved · revision v${updated.version}`);
+    }).finally(() => {
+      clearGeometryPreview(drag.interactionId);
     });
+  }
+
+  function cancelNodeDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    const drag = nodeDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    nodeDragRef.current = null;
+    clearGeometryPreview(drag.interactionId);
+    if (drag.moved) {
+      suppressClickRef.current = drag.nodeId;
+      window.setTimeout(() => { suppressClickRef.current = null; }, 0);
+    }
   }
 
   function selectTool(nextTool: CanvasTool) {
@@ -800,20 +945,20 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     event.stopPropagation();
     if (!canEditRef.current || event.button !== 0) return;
     const current = workspaceRef.current;
-    const element = event.currentTarget.closest<HTMLButtonElement>(".canvas-node");
-    if (!current || !element) return;
-    const dimensions = nodeDimensions(node);
+    if (!current) return;
+    if (nodeDragRef.current || nodeResizeRef.current || geometryPreviewRef.current) return;
     setSelection({ kind: "node", id: node.id });
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    const interactionId = nextInteractionIdRef.current + 1;
+    nextInteractionIdRef.current = interactionId;
     nodeResizeRef.current = {
       baseVersion: current.version,
-      element,
-      handle: event.currentTarget,
+      interactionId,
       nodeId: node.id,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      origin: dimensions,
+      origin: geometryMap.get(node.id) ?? canvasNodeGeometry(node),
       moved: false,
     };
   }
@@ -822,12 +967,20 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     event.stopPropagation();
     const resize = nodeResizeRef.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
-    const width = clampDimension(resize.origin.width + (event.clientX - resize.startX) / scale, MIN_NODE_WIDTH, MAX_NODE_WIDTH);
-    const height = clampDimension(resize.origin.height + (event.clientY - resize.startY) / scale, MIN_NODE_HEIGHT, MAX_NODE_HEIGHT);
-    resize.moved = resize.moved || width !== resize.origin.width || height !== resize.origin.height;
+    const geometry = resizedNodeGeometry(
+      resize.origin,
+      event.clientX - resize.startX,
+      event.clientY - resize.startY,
+      scale,
+    );
+    resize.moved = resize.moved || geometry.width !== resize.origin.width || geometry.height !== resize.origin.height;
     if (!resize.moved) return;
-    resize.element.style.width = `${width}px`;
-    resize.element.style.height = `${height}px`;
+    scheduleGeometryPreview({
+      baseVersion: resize.baseVersion,
+      geometry,
+      interactionId: resize.interactionId,
+      nodeId: resize.nodeId,
+    });
   }
 
   function onResizePointerUp(event: React.PointerEvent<HTMLSpanElement>) {
@@ -835,11 +988,25 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     const resize = nodeResizeRef.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
     nodeResizeRef.current = null;
-    resize.handle.releasePointerCapture?.(event.pointerId);
-    if (!resize.moved) return;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (!resize.moved) {
+      clearGeometryPreview(resize.interactionId);
+      return;
+    }
 
-    const width = clampDimension(resize.origin.width + (event.clientX - resize.startX) / scale, MIN_NODE_WIDTH, MAX_NODE_WIDTH);
-    const height = clampDimension(resize.origin.height + (event.clientY - resize.startY) / scale, MIN_NODE_HEIGHT, MAX_NODE_HEIGHT);
+    const finalGeometry = resizedNodeGeometry(
+      resize.origin,
+      event.clientX - resize.startX,
+      event.clientY - resize.startY,
+      scale,
+    );
+    flushGeometryPreview({
+      baseVersion: resize.baseVersion,
+      geometry: finalGeometry,
+      interactionId: resize.interactionId,
+      nodeId: resize.nodeId,
+    });
+    const { width, height } = finalGeometry;
     const node = nodeMap.get(resize.nodeId);
     const nodeSelection: CanvasSelection = { kind: "node", id: resize.nodeId };
     suppressClickRef.current = resize.nodeId;
@@ -847,12 +1014,26 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     void commitAuthoringAction({
       description: `Resized ${node ? nodeLabel(node) : resize.nodeId}`,
       forward: [{ type: "updateNode", nodeId: resize.nodeId, patch: { data: { width, height } } }],
-      inverse: [{ type: "updateNode", nodeId: resize.nodeId, patch: { data: resize.origin } }],
+      inverse: [{ type: "updateNode", nodeId: resize.nodeId, patch: { data: { width: resize.origin.width, height: resize.origin.height } } }],
       selectionBefore: nodeSelection,
       selectionAfter: nodeSelection,
     }, resize.baseVersion).then((updated) => {
       if (updated) onNotify(`Node resized · revision v${updated.version}`);
+    }).finally(() => {
+      clearGeometryPreview(resize.interactionId);
     });
+  }
+
+  function cancelNodeResize(event: React.PointerEvent<HTMLSpanElement>) {
+    event.stopPropagation();
+    const resize = nodeResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    nodeResizeRef.current = null;
+    clearGeometryPreview(resize.interactionId);
+    if (resize.moved) {
+      suppressClickRef.current = resize.nodeId;
+      window.setTimeout(() => { suppressClickRef.current = null; }, 0);
+    }
   }
 
   async function saveNodeData(node: CanvasNodeRecord, data: Record<string, unknown>, baseVersion?: number) {
@@ -1050,18 +1231,25 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
         onPointerDown={onCanvasPointerDown}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
+        onPointerCancel={onCanvasPointerUp}
+        onLostPointerCapture={onCanvasPointerUp}
       >
         {conflictMessage && <div className="canvas-conflict-banner" role="alert"><AlertTriangle size={17} /><span>{conflictMessage}</span><button type="button" aria-label="Dismiss conflict message" onClick={() => setConflictMessage("")}><X size={15} /></button></div>}
         {tool === "connect" && <div className="canvas-connect-hint" role="status">{connectSource ? "Select a target node" : "Select the source node"}</div>}
         <div className="canvas-dots" style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }} onClick={(event) => { if (event.target === event.currentTarget && tool === "select") setSelection(null); }}>
-          {nodes.filter((node) => node.type === "diagram").map((node) => <PidPanel key={node.id} position={node.position} />)}
+          {nodes.filter((node) => node.type === "diagram").map((node) => {
+            const geometry = geometryMap.get(node.id);
+            return geometry ? <PidPanel key={node.id} geometry={geometry} /> : null;
+          })}
           <div className="canvas-panel canvas-chart-panel"><div className="canvas-panel-header"><span><Gauge size={17} /> Pressure psi</span><MoreDots /></div><div className="canvas-legend"><span className="legend-blue">●</span> P-101 Discharge Pressure <em>psi</em><span className="legend-green">●</span> P-101 Suction Pressure <em>psi</em></div><TelemetryChart snapshot={snapshot} /><div className="chart-ranges"><button>1H</button><button>6H</button><button className="is-active">1D</button><button>1W</button><button>1M</button><button>Custom</button></div><div className="chart-footer">Interval: 1 min <ChevronDown size={13} /><span>● Live <ChevronDown size={13} /></span></div></div>
           <svg className="canvas-edges" viewBox="0 0 1400 1000" aria-label="Canvas connections">
             {edges.map((edge) => {
               const source = nodeMap.get(edge.source);
               const target = nodeMap.get(edge.target);
-              if (!source || !target) return null;
-              const path = edgePath(source, target);
+              const sourceGeometry = geometryMap.get(edge.source);
+              const targetGeometry = geometryMap.get(edge.target);
+              if (!source || !target || !sourceGeometry || !targetGeometry) return null;
+              const path = edgePath(sourceGeometry, targetGeometry);
               const label = `Relationship ${edgeLabel(edge, nodeMap)}`;
               const isSelected = selection?.kind === "edge" && selection.id === edge.id;
               return (
@@ -1088,22 +1276,29 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
           </svg>
           {nodes.map((node) => {
             const kind = nodeKind(node);
-            if (!kind) return null;
+            const geometry = geometryMap.get(node.id);
+            if (!kind || !geometry) return null;
             return (
               <CanvasNode
                 key={node.id}
                 node={node}
+                geometry={geometry}
                 kind={kind}
                 selected={selection?.kind === "node" && selection.id === node.id}
                 connecting={connectSource === node.id}
+                previewing={geometryPreview !== null && geometryPreview.baseVersion === workspace?.version && geometryPreview.nodeId === node.id}
                 canResize={canEdit}
                 onClick={() => void activateNode(node)}
                 onPointerDown={(event) => onNodePointerDown(event, node)}
                 onPointerMove={onNodePointerMove}
                 onPointerUp={onNodePointerUp}
+                onPointerCancel={cancelNodeDrag}
+                onLostPointerCapture={cancelNodeDrag}
                 onResizePointerDown={(event) => onResizePointerDown(event, node)}
                 onResizePointerMove={onResizePointerMove}
                 onResizePointerUp={onResizePointerUp}
+                onResizePointerCancel={cancelNodeResize}
+                onResizeLostPointerCapture={cancelNodeResize}
               />
             );
           })}
@@ -1268,48 +1463,69 @@ function NodeIcon({ kind }: { kind: NodeKind }) {
 
 function CanvasNode({
   node,
+  geometry,
   kind,
   selected,
   connecting,
+  previewing,
   canResize,
   onClick,
   onPointerDown,
   onPointerMove,
   onPointerUp,
+  onPointerCancel,
+  onLostPointerCapture,
   onResizePointerDown,
   onResizePointerMove,
   onResizePointerUp,
+  onResizePointerCancel,
+  onResizeLostPointerCapture,
 }: {
   node: CanvasNodeRecord;
+  geometry: CanvasNodeGeometry;
   kind: NodeKind;
   selected: boolean;
   connecting: boolean;
+  previewing: boolean;
   canResize: boolean;
   onClick: () => void;
   onPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
   onPointerMove: (event: React.PointerEvent<HTMLButtonElement>) => void;
   onPointerUp: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onPointerCancel: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onLostPointerCapture: (event: React.PointerEvent<HTMLButtonElement>) => void;
   onResizePointerDown: (event: React.PointerEvent<HTMLSpanElement>) => void;
   onResizePointerMove: (event: React.PointerEvent<HTMLSpanElement>) => void;
   onResizePointerUp: (event: React.PointerEvent<HTMLSpanElement>) => void;
+  onResizePointerCancel: (event: React.PointerEvent<HTMLSpanElement>) => void;
+  onResizeLostPointerCapture: (event: React.PointerEvent<HTMLSpanElement>) => void;
 }) {
   const label = nodeLabel(node);
-  const dimensions = nodeDimensions(node);
   return (
     <button
-      className={`canvas-node canvas-node-${kind}${selected ? " is-selected" : ""}${connecting ? " is-connecting" : ""}`}
-      style={{ left: node.position.x, top: node.position.y, width: dimensions.width, height: dimensions.height }}
+      className={`canvas-node canvas-node-${kind}${selected ? " is-selected" : ""}${connecting ? " is-connecting" : ""}${previewing ? " is-previewing" : ""}`}
+      style={{
+        left: 0,
+        top: 0,
+        width: geometry.width,
+        height: geometry.height,
+        transform: `translate3d(${geometry.x}px, ${geometry.y}px, 0)`,
+      }}
+      data-canvas-x={geometry.x}
+      data-canvas-y={geometry.y}
       type="button"
       aria-label={`${label} canvas node`}
       onClick={(event) => { event.stopPropagation(); onClick(); }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onLostPointerCapture={onLostPointerCapture}
     >
       <span className="canvas-node-icon"><NodeIcon kind={kind} /></span>
       <span className="canvas-node-copy"><strong>{label}</strong><span><i /> {nodeSubtitle(node, kind)}</span><em>{nodeTypeLabel(kind)}</em></span>
       <MoreDots />
-      {selected && canResize ? <span className="canvas-node-resize-handle" aria-hidden="true" onPointerDown={onResizePointerDown} onPointerMove={onResizePointerMove} onPointerUp={onResizePointerUp} /> : null}
+      {selected && canResize ? <span className="canvas-node-resize-handle" aria-hidden="true" onPointerDown={onResizePointerDown} onPointerMove={onResizePointerMove} onPointerUp={onResizePointerUp} onPointerCancel={onResizePointerCancel} onLostPointerCapture={onResizeLostPointerCapture} /> : null}
     </button>
   );
 }

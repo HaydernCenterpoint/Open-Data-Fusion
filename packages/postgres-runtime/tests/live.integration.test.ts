@@ -22,6 +22,27 @@ if (connectionString) {
         tenantDataPlanePresent: true,
       });
     });
+
+    it("finds the additional migration-003 production relations inside a scoped transaction", async () => {
+      const relations = await runtime.withTransaction({
+        tenantId: "00000000-0000-0000-0000-000000000000",
+        userId: "postgres-runtime-live-harness",
+      }, (transaction) => transaction.query({
+        text: [
+          "SELECT",
+          "  to_regclass('odf.projects') IS NOT NULL AS projects_present,",
+          "  to_regclass('odf.time_series_points') IS NOT NULL AS points_present,",
+          "  to_regclass('odf.quality_rules') IS NOT NULL AS quality_present,",
+          "  to_regclass('odf.writeback_requests') IS NOT NULL AS writeback_present",
+        ].join("\n"),
+      }));
+      expect(relations.rows[0]).toMatchObject({
+        projects_present: true,
+        points_present: true,
+        quality_present: true,
+        writeback_present: true,
+      });
+    });
   });
 } else {
   describe.skip("PostgreSQL runtime live harness", () => {

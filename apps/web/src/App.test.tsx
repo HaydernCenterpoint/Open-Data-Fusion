@@ -458,7 +458,9 @@ describe("Open Data Fusion workspace", () => {
   it("renders positions and edges from the workspace snapshot", async () => {
     render(<App />);
     const pump = await screen.findByRole("button", { name: "Pump P-101 canvas node" });
-    expect(pump).toHaveStyle({ left: "321px", top: "123px" });
+    expect(pump).toHaveStyle({ left: "0px", top: "0px", transform: "translate3d(321px, 123px, 0)" });
+    expect(pump).toHaveAttribute("data-canvas-x", "321");
+    expect(pump).toHaveAttribute("data-canvas-y", "123");
     expect(document.querySelector('[data-edge-id="canvas-p101-pressure"]')).toBeInTheDocument();
   });
 
@@ -499,18 +501,53 @@ describe("Open Data Fusion workspace", () => {
     await waitFor(() => expect(document.querySelector(`[data-edge-id="${operation.edge.id}"]`)).toBeInTheDocument());
   });
 
-  it("commits a node move on pointer release", async () => {
+  it("previews connected geometry during drag and commits one move on pointer release", async () => {
     render(<App />);
     const pump = await screen.findByRole("button", { name: "Pump P-101 canvas node" });
     await waitForEditor();
+    const edge = document.querySelector('[data-edge-id="canvas-p101-pressure"]') as SVGPathElement;
+    const initialPath = edge.getAttribute("d");
+
     fireEvent.pointerDown(pump, { pointerId: 7, button: 0, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(pump, { pointerId: 7, clientX: 150, clientY: 160 });
+    await waitFor(() => expect(edge.getAttribute("d")).not.toBe(initialPath));
+    expect(pump).toHaveAttribute("data-canvas-x", "371");
+    expect(pump).toHaveAttribute("data-canvas-y", "183");
+    expect(operationRequests()).toHaveLength(0);
+    const previewPath = edge.getAttribute("d");
+
     fireEvent.pointerUp(pump, { pointerId: 7, clientX: 150, clientY: 160 });
 
-    await waitFor(() => expect(operationRequest()).toBeDefined());
-    const [, init] = operationRequest()!;
+    await waitFor(() => expect(operationRequests()).toHaveLength(1));
+    const [, init] = operationRequests()[0];
     const body = JSON.parse(String(init?.body)) as { operations: WorkspaceOperation[] };
     expect(body.operations[0]).toEqual({ type: "moveNode", nodeId: "canvas-p101", position: { x: 371, y: 183 } });
+    await waitFor(() => expect(edge.getAttribute("d")).toBe(previewPath));
+  });
+
+  it("clears cancelled and lost-capture drag previews without committing", async () => {
+    render(<App />);
+    const pump = await screen.findByRole("button", { name: "Pump P-101 canvas node" });
+    await waitForEditor();
+    const edge = document.querySelector('[data-edge-id="canvas-p101-pressure"]') as SVGPathElement;
+    const initialPath = edge.getAttribute("d");
+
+    fireEvent.pointerDown(pump, { pointerId: 8, button: 0, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(pump, { pointerId: 8, clientX: 170, clientY: 160 });
+    await waitFor(() => expect(edge.getAttribute("d")).not.toBe(initialPath));
+    fireEvent.pointerCancel(pump, { pointerId: 8 });
+
+    await waitFor(() => expect(edge.getAttribute("d")).toBe(initialPath));
+    expect(pump).toHaveAttribute("data-canvas-x", "321");
+    expect(pump).toHaveAttribute("data-canvas-y", "123");
+
+    fireEvent.pointerDown(pump, { pointerId: 81, button: 0, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(pump, { pointerId: 81, clientX: 180, clientY: 170 });
+    await waitFor(() => expect(edge.getAttribute("d")).not.toBe(initialPath));
+    fireEvent.lostPointerCapture(pump, { pointerId: 81 });
+    await waitFor(() => expect(edge.getAttribute("d")).toBe(initialPath));
+
+    expect(operationRequests()).toHaveLength(0);
   });
 
   it("edits note content and size from the node inspector", async () => {
@@ -563,19 +600,27 @@ describe("Open Data Fusion workspace", () => {
     expect(screen.queryByRole("button", { name: "Relationship Pump P-101 to Pressure psi" })).not.toBeInTheDocument();
   });
 
-  it("resizes through the canvas handle and undo/redo emits inverse operations", async () => {
+  it("previews connected geometry during resize and commits once before undo/redo", async () => {
     render(<App />);
     const pump = await screen.findByRole("button", { name: "Pump P-101 canvas node" });
     await waitForEditor();
     await waitFor(() => expect(pump.querySelector(".canvas-node-resize-handle")).toBeInTheDocument());
     const handle = pump.querySelector(".canvas-node-resize-handle") as HTMLElement;
+    const edge = document.querySelector('[data-edge-id="canvas-p101-pressure"]') as SVGPathElement;
+    const initialPath = edge.getAttribute("d");
 
     fireEvent.pointerDown(handle, { pointerId: 9, button: 0, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(handle, { pointerId: 9, clientX: 160, clientY: 140 });
+    await waitFor(() => expect(edge.getAttribute("d")).not.toBe(initialPath));
+    expect(pump).toHaveStyle({ width: "245px", height: "140px" });
+    expect(operationRequests()).toHaveLength(0);
+    const previewPath = edge.getAttribute("d");
+
     fireEvent.pointerUp(handle, { pointerId: 9, clientX: 160, clientY: 140 });
     await waitFor(() => expect(operationRequests()).toHaveLength(1));
     let body = JSON.parse(String(operationRequests()[0][1]?.body)) as { operations: WorkspaceOperation[] };
     expect(body.operations).toEqual([{ type: "updateNode", nodeId: "canvas-p101", patch: { data: { width: 245, height: 140 } } }]);
+    await waitFor(() => expect(edge.getAttribute("d")).toBe(previewPath));
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Undo" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
@@ -641,6 +686,8 @@ describe("Open Data Fusion workspace", () => {
   it("shows presence and refreshes when SSE announces a newer version", async () => {
     render(<App />);
     await screen.findByRole("button", { name: "Pump P-101 canvas node" });
+    const edge = document.querySelector('[data-edge-id="canvas-p101-pressure"]') as SVGPathElement;
+    const initialPath = edge.getAttribute("d");
     await waitFor(() => expect(MockEventSource.instances).toHaveLength(1));
     const stream = MockEventSource.instances[0];
     expect(stream.url).toContain("/events?user=harper.dennis");
@@ -667,6 +714,9 @@ describe("Open Data Fusion workspace", () => {
     });
     serverWorkspace = workspaceFixture(2);
     serverWorkspace.snapshot.nodes[1].data.label = "Pump P-101 · remote update";
+    serverWorkspace.snapshot.nodes[1].position = { x: 421, y: 173 };
+    serverWorkspace.snapshot.nodes[1].data.width = 245;
+    serverWorkspace.snapshot.nodes[1].data.height = 140;
     stream.emit("workspace.updated", {
       workspaceId: serverWorkspace.id,
       version: 2,
@@ -677,7 +727,11 @@ describe("Open Data Fusion workspace", () => {
     });
 
     expect(await screen.findByText("2 online")).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Pump P-101 · remote update canvas node" })).toBeInTheDocument();
+    const updatedPump = await screen.findByRole("button", { name: "Pump P-101 · remote update canvas node" });
+    expect(updatedPump).toHaveAttribute("data-canvas-x", "421");
+    expect(updatedPump).toHaveAttribute("data-canvas-y", "173");
+    expect(updatedPump).toHaveStyle({ width: "245px", height: "140px" });
+    expect(edge.getAttribute("d")).not.toBe(initialPath);
   });
 
   it("lets an owner add, update, and remove workspace members", async () => {

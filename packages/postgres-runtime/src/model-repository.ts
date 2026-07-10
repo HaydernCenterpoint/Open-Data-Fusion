@@ -31,6 +31,15 @@ const MODEL_VIEW_COLUMNS = [
   "model_view_id, tenant_id, data_model_id, external_id, version, name, definition, created_at",
 ].join(" ");
 
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
+    return "{" + entries.map(([key, nested]) => JSON.stringify(key) + ":" + canonical(nested)).join(",") + "}";
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 function sameDataModel(row: DataModelRecord, input: CreateDataModelInput): boolean {
   return row.dataModelId === input.dataModelId
     && row.spaceId === input.spaceId
@@ -38,7 +47,8 @@ function sameDataModel(row: DataModelRecord, input: CreateDataModelInput): boole
     && row.version === input.version
     && row.name === input.name
     && row.description === (input.description ?? null)
-    && row.state === (input.state ?? "draft");
+    && row.state === (input.state ?? "draft")
+    && canonical(row.definition) === canonical(input.definition);
 }
 
 function sameModelView(row: ModelViewRecord, input: CreateModelViewInput): boolean {
@@ -46,7 +56,8 @@ function sameModelView(row: ModelViewRecord, input: CreateModelViewInput): boole
     && row.dataModelId === input.dataModelId
     && row.externalId === input.externalId
     && row.version === input.version
-    && row.name === input.name;
+    && row.name === input.name
+    && canonical(row.definition) === canonical(input.definition);
 }
 
 /** Immutable model/version operations and the graph instance anchor. */

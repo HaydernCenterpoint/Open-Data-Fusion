@@ -7,6 +7,14 @@ import {
 import { PostgresIngestionRepository } from "./ingestion-repository.js";
 import { PostgresQueueRepository } from "./queue-repository.js";
 import { PostgresWorkspaceRepository } from "./workspace-repository.js";
+import { PostgresCatalogRepository } from "./catalog-repository.js";
+import { PostgresIndustrialRepository } from "./industrial-repository.js";
+import { PostgresModelRepository } from "./model-repository.js";
+import { PostgresPipelineQualityRepository } from "./pipeline-quality-repository.js";
+import { PostgresSearchRepository } from "./search-repository.js";
+import { PostgresWritebackRepository } from "./writeback-repository.js";
+import { FailClosedProjectAccessResolver } from "./platform-support.js";
+import type { ProjectAccessResolver } from "./platform-types.js";
 import type {
   DatabaseHealth,
   DatabaseReadiness,
@@ -20,6 +28,11 @@ import type {
 } from "./types.js";
 
 export interface PostgresRuntimeOptions extends PostgresPoolOptions {}
+
+export interface PostgresRuntimeDependencies {
+  /** Required for project-scoped repositories; defaults to fail-closed. */
+  projectAccessResolver?: ProjectAccessResolver;
+}
 
 const DEFAULT_TRANSACTION_SETTINGS: RuntimePoolSettings = {
   lockTimeoutMillis: 5_000,
@@ -45,26 +58,44 @@ export class PostgresRuntime implements TransactionRunner {
   readonly workspaces: PostgresWorkspaceRepository;
   readonly ingestion: PostgresIngestionRepository;
   readonly queues: PostgresQueueRepository;
+  readonly catalog: PostgresCatalogRepository;
+  readonly industrial: PostgresIndustrialRepository;
+  readonly models: PostgresModelRepository;
+  readonly pipelines: PostgresPipelineQualityRepository;
+  readonly search: PostgresSearchRepository;
+  readonly writeback: PostgresWritebackRepository;
 
   constructor(
     private readonly pool: RuntimePool,
     private readonly settings: RuntimePoolSettings = DEFAULT_TRANSACTION_SETTINGS,
+    dependencies: PostgresRuntimeDependencies = {},
   ) {
+    const policy = dependencies.projectAccessResolver ?? new FailClosedProjectAccessResolver();
     this.workspaces = new PostgresWorkspaceRepository(this);
     this.ingestion = new PostgresIngestionRepository(this);
     this.queues = new PostgresQueueRepository(this);
+    this.catalog = new PostgresCatalogRepository(this, policy);
+    this.industrial = new PostgresIndustrialRepository(this, policy);
+    this.models = new PostgresModelRepository(this, policy);
+    this.pipelines = new PostgresPipelineQualityRepository(this, policy);
+    this.search = new PostgresSearchRepository(this, policy);
+    this.writeback = new PostgresWritebackRepository(this, policy);
   }
 
-  static connect(options: PostgresRuntimeOptions): PostgresRuntime {
+  static connect(options: PostgresRuntimeOptions, dependencies: PostgresRuntimeDependencies = {}): PostgresRuntime {
     const created = createPostgresPool(options);
-    return new PostgresRuntime(created.pool, created.settings);
+    return new PostgresRuntime(created.pool, created.settings, dependencies);
   }
 
-  static fromPool(pool: RuntimePool, settings: Partial<RuntimePoolSettings> = {}): PostgresRuntime {
+  static fromPool(
+    pool: RuntimePool,
+    settings: Partial<RuntimePoolSettings> = {},
+    dependencies: PostgresRuntimeDependencies = {},
+  ): PostgresRuntime {
     return new PostgresRuntime(pool, {
       ...DEFAULT_TRANSACTION_SETTINGS,
       ...settings,
-    });
+    }, dependencies);
   }
 
   async close(): Promise<void> {

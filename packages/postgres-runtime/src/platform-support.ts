@@ -37,7 +37,12 @@ export async function authorizeTenantManagement(
   scope: TenantScope,
 ): Promise<void> {
   assertTenantScope(scope);
-  const decision = await resolver.resolveTenantManagement?.(scope);
+  let decision: { canManageProjects: boolean } | null | undefined;
+  try {
+    decision = await resolver.resolveTenantManagement?.(scope);
+  } catch {
+    throw new ForbiddenError("Tenant policy cannot be resolved");
+  }
   if (!decision?.canManageProjects) {
     throw new ForbiddenError("Tenant policy does not permit project management");
   }
@@ -51,7 +56,12 @@ export async function authorizeProject(
   assertProjectScope(scope);
   // A resolver may be backed by an identity service. It is intentionally
   // called before a database transaction, keeping lock duration minimal.
-  const decision = await resolver.resolve(scope);
+  let decision: { role: ProjectRole } | null;
+  try {
+    decision = await resolver.resolve(scope);
+  } catch {
+    throw new ForbiddenError("Project policy cannot be resolved");
+  }
   if (!decision || !allowedRoles.includes(decision.role)) {
     throw new ForbiddenError("Project policy does not permit this operation");
   }

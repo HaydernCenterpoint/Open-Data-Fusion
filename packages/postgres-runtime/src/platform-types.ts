@@ -40,6 +40,12 @@ export interface NumericCursor {
   value: string;
 }
 
+export interface UnifiedSearchCursor {
+  timestamp: string;
+  entityType: UnifiedSearchResult["entityType"];
+  entityId: string;
+}
+
 export interface TenantRecord {
   tenantId: string;
   slug: string;
@@ -459,6 +465,7 @@ export interface CreateGraphInstanceInput {
 }
 
 export interface CreateAssetInput extends Omit<CreateGraphInstanceInput, "instanceKind" | "correlationId"> {
+  parentAssetId?: string | null;
   assetKind: AssetRecord["assetKind"];
   assetType: string;
   name: string;
@@ -614,7 +621,7 @@ export interface RecordWritebackApprovalInput {
 
 export interface CompleteWritebackInput {
   writebackRequestId: string;
-  expectedState: "approved" | "executing";
+  expectedState: "executing";
   succeeded: boolean;
   correlationId: string;
 }
@@ -668,6 +675,7 @@ export interface IndustrialRepository {
   listDocuments(scope: ProjectScope, limit: number, cursor?: TimestampIdCursor): Promise<KeysetPage<DocumentRecord, TimestampIdCursor>>;
   linkDocumentAsset(scope: ProjectScope, documentId: string, assetId: string, relationType: string, correlationId: string): Promise<DocumentAssetLinkRecord>;
   createRelation(scope: ProjectScope, input: CreateRelationInput): Promise<RelationRecord>;
+  listRelations(scope: ProjectScope, limit: number, cursor?: TimestampIdCursor): Promise<KeysetPage<RelationRecord, TimestampIdCursor>>;
   createRelationCandidate(scope: ProjectScope, input: CreateRelationCandidateInput): Promise<RelationCandidateRecord>;
   listRelationCandidates(scope: ProjectScope, limit: number, cursor?: TimestampIdCursor): Promise<KeysetPage<RelationCandidateRecord, TimestampIdCursor>>;
   reviewRelationCandidate(scope: ProjectScope, candidateId: string, input: ReviewRelationCandidateInput): Promise<RelationCandidateRecord>;
@@ -684,6 +692,7 @@ export interface DiagramMatchingSpatialRepository {
 
 export interface WritebackRepository {
   createWritebackRequest(scope: ProjectScope, input: CreateWritebackRequestInput): Promise<WritebackRequestRecord>;
+  listWritebackRequests(scope: ProjectScope, limit: number, cursor?: TimestampIdCursor): Promise<KeysetPage<WritebackRequestRecord, TimestampIdCursor>>;
   recordWritebackApproval(scope: ProjectScope, input: RecordWritebackApprovalInput): Promise<WritebackRequestRecord>;
   beginWriteback(scope: ProjectScope, requestId: string, correlationId: string): Promise<WritebackRequestRecord>;
   completeWriteback(scope: ProjectScope, input: CompleteWritebackInput): Promise<WritebackRequestRecord>;
@@ -691,5 +700,5 @@ export interface WritebackRepository {
 }
 
 export interface SearchRepository {
-  search(scope: ProjectScope, query: string, limit: number, cursor?: TimestampIdCursor): Promise<KeysetPage<UnifiedSearchResult, TimestampIdCursor>>;
+  search(scope: ProjectScope, query: string, limit: number, cursor?: UnifiedSearchCursor): Promise<KeysetPage<UnifiedSearchResult, UnifiedSearchCursor>>;
 }

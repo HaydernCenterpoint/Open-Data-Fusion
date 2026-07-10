@@ -151,6 +151,42 @@ services:
       retries: 3
       start_period: 15s
 
+  pipeline-worker:
+    profiles: ["workers"]
+    build:
+      context: .
+      dockerfile: Dockerfile.pipeline
+    restart: unless-stopped
+    environment:
+      # Use a dedicated application login, never the migrator/superuser URL.
+      ODF_POSTGRES_URL: "${ODF_PIPELINE_POSTGRES_URL:-}"
+      # JSON array of explicit tenantId/projectId UUID pairs. Empty fails closed.
+      ODF_PIPELINE_SCOPES: "${ODF_PIPELINE_SCOPES:-[]}"
+      ODF_PIPELINE_ACTOR_ID: "${ODF_PIPELINE_ACTOR_ID:-pipeline-worker}"
+      # Disabled is the safe default; opt in to the bounded built-in DAG only.
+      ODF_PIPELINE_EXECUTOR: "${ODF_PIPELINE_EXECUTOR:-disabled}"
+      ODF_PIPELINE_DB_POOL_SIZE: "${ODF_PIPELINE_DB_POOL_SIZE:-10}"
+      ODF_PIPELINE_BATCH_SIZE: "${ODF_PIPELINE_BATCH_SIZE:-20}"
+      ODF_PIPELINE_MAX_SCOPES_PER_POLL: "${ODF_PIPELINE_MAX_SCOPES_PER_POLL:-1}"
+      ODF_PIPELINE_CONCURRENCY: "${ODF_PIPELINE_CONCURRENCY:-4}"
+      ODF_PIPELINE_QUALITY_RULE_PAGE_SIZE: "${ODF_PIPELINE_QUALITY_RULE_PAGE_SIZE:-100}"
+      ODF_PIPELINE_MAX_QUALITY_RULES: "${ODF_PIPELINE_MAX_QUALITY_RULES:-1000}"
+      ODF_PIPELINE_POLL_MS: "${ODF_PIPELINE_POLL_MS:-1000}"
+      ODF_PIPELINE_RETRY_BASE_MS: "${ODF_PIPELINE_RETRY_BASE_MS:-250}"
+      ODF_PIPELINE_RETRY_MAX_MS: "${ODF_PIPELINE_RETRY_MAX_MS:-30000}"
+      ODF_PIPELINE_SHUTDOWN_GRACE_MS: "${ODF_PIPELINE_SHUTDOWN_GRACE_MS:-30000}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      odf-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
   edge-agent:
     profiles: ["edge"]
     build:

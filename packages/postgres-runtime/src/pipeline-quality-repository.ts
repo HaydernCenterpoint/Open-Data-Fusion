@@ -111,7 +111,9 @@ export class PostgresPipelineQualityRepository extends PolicyAwareRepository imp
         values: [scope.tenantId, scope.projectId, input.pipelineVersionId],
       });
       const versionRow = version.rows[0];
-      if (!versionRow || canonical(pipelineVersionFromRow(versionRow).definition) !== canonical(input.definition)) {
+      const initialVersion = versionRow ? pipelineVersionFromRow(versionRow) : null;
+      if (!initialVersion || initialVersion.pipelineId !== input.pipelineId || initialVersion.version !== 1
+        || canonical(initialVersion.definition) !== canonical(input.definition) || initialVersion.schedule !== (input.schedule ?? null)) {
         throw new ConflictError("Pipeline initial version identifier is already bound to different input");
       }
       return pipeline;
@@ -193,8 +195,15 @@ export class PostgresPipelineQualityRepository extends PolicyAwareRepository imp
     return this.write(scope, async (transaction) => {
       const version = await transaction.query({
         text: [
-          "SELECT version FROM odf.pipeline_versions",
-          "WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND pipeline_id = $3::uuid AND version = $4::integer",
+          "SELECT pipeline_version.version",
+          "FROM odf.pipeline_versions AS pipeline_version",
+          "JOIN odf.pipelines AS pipeline",
+          "  ON pipeline.tenant_id = pipeline_version.tenant_id",
+          " AND pipeline.project_id = pipeline_version.project_id",
+          " AND pipeline.pipeline_id = pipeline_version.pipeline_id",
+          "WHERE pipeline_version.tenant_id = $1::uuid AND pipeline_version.project_id = $2::uuid",
+          "  AND pipeline_version.pipeline_id = $3::uuid AND pipeline_version.version = $4::integer",
+          "  AND pipeline.enabled = true",
         ].join("\n"),
         values: [scope.tenantId, scope.projectId, input.pipelineId, input.pipelineVersion],
       });
@@ -233,7 +242,8 @@ export class PostgresPipelineQualityRepository extends PolicyAwareRepository imp
       const existingRow = existing.rows[0];
       if (!existingRow) throw new ConflictError("Pipeline run idempotency record could not be resolved");
       const run = pipelineRunV2FromRow(existingRow);
-      if (run.pipelineId !== input.pipelineId || run.pipelineVersion !== input.pipelineVersion || run.triggerType !== input.triggerType || run.correlationId !== input.correlationId) {
+      if (run.pipelineId !== input.pipelineId || run.pipelineVersion !== input.pipelineVersion || run.triggerType !== input.triggerType
+        || run.correlationId !== input.correlationId || canonical(run.summary) !== canonical(input.summary ?? {})) {
         throw new ConflictError("Pipeline run identifier is already bound to different input");
       }
       return run;
@@ -337,7 +347,10 @@ export class PostgresPipelineQualityRepository extends PolicyAwareRepository imp
       const existingRow = existing.rows[0];
       if (!existingRow) throw new ConflictError("Quality rule idempotency record could not be resolved");
       const rule = qualityRuleFromRow(existingRow);
-      if (rule.externalId !== input.externalId || rule.version !== (input.version ?? 1) || rule.name !== input.name || rule.ruleKind !== input.ruleKind) {
+      if (rule.externalId !== input.externalId || rule.version !== (input.version ?? 1) || rule.name !== input.name
+        || rule.ruleKind !== input.ruleKind || rule.targetModelExternalId !== input.targetModelExternalId
+        || rule.fieldName !== (input.fieldName ?? null) || rule.severity !== input.severity
+        || rule.enabled !== (input.enabled ?? true) || canonical(rule.configuration) !== canonical(input.configuration)) {
         throw new ConflictError("Quality rule identifier is already bound to different input");
       }
       return rule;

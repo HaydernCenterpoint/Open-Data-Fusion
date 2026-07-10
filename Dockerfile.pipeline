@@ -1,0 +1,36 @@
+# Durable pipeline worker. Runtime credentials and the tenant/project allowlist
+# are injected by the deployment; the image contains no connection strings.
+FROM node:24-alpine AS build
+
+WORKDIR /workspace
+
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/edge-agent/package.json apps/edge-agent/package.json
+COPY apps/outbox-worker/package.json apps/outbox-worker/package.json
+COPY apps/pipeline-worker/package.json apps/pipeline-worker/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/platform-core/package.json packages/platform-core/package.json
+COPY packages/postgres-runtime/package.json packages/postgres-runtime/package.json
+RUN npm ci --workspace @open-data-fusion/pipeline-worker --include-workspace-root
+
+COPY tsconfig.base.json ./
+COPY packages/postgres-runtime ./packages/postgres-runtime
+COPY apps/pipeline-worker ./apps/pipeline-worker
+RUN npm run build --workspace @open-data-fusion/pipeline-worker
+RUN npm prune --omit=dev
+
+FROM node:24-alpine AS runtime
+
+ENV NODE_ENV=production
+WORKDIR /workspace
+
+COPY --from=build --chown=node:node /workspace/node_modules ./node_modules
+COPY --from=build --chown=node:node /workspace/packages/postgres-runtime/package.json ./packages/postgres-runtime/package.json
+COPY --from=build --chown=node:node /workspace/packages/postgres-runtime/dist ./packages/postgres-runtime/dist
+COPY --from=build --chown=node:node /workspace/apps/pipeline-worker/package.json ./apps/pipeline-worker/package.json
+COPY --from=build --chown=node:node /workspace/apps/pipeline-worker/dist ./apps/pipeline-worker/dist
+
+USER node
+CMD ["node", "apps/pipeline-worker/dist/src/server.js"]

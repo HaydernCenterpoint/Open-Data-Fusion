@@ -11,6 +11,7 @@
     "dev": "concurrently --names api,web --prefix-colors cyan,blue \"npm run dev --workspace @open-data-fusion/api\" \"npm run dev --workspace @open-data-fusion/web\"",
     "dev:edge": "npm run dev --workspace @open-data-fusion/edge-agent",
     "dev:outbox": "npm run dev --workspace @open-data-fusion/outbox-worker",
+    "dev:pipeline": "npm run dev --workspace @open-data-fusion/pipeline-worker",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",

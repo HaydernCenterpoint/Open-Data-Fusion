@@ -1,0 +1,27 @@
+{
+  "name": "@open-data-fusion/pipeline-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/server.js",
+  "scripts": {
+    "predev": "npm --prefix ../.. run build --workspace @open-data-fusion/postgres-runtime",
+    "dev": "tsx watch src/server.ts",
+    "prebuild": "npm --prefix ../.. run build --workspace @open-data-fusion/postgres-runtime",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "pretest": "npm --prefix ../.. run build --workspace @open-data-fusion/postgres-runtime",
+    "test": "vitest run",
+    "pretypecheck": "npm --prefix ../.. run build --workspace @open-data-fusion/postgres-runtime",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@open-data-fusion/postgres-runtime": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.10",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.3",
+    "vitest": "4.1.10"
+  }
+}

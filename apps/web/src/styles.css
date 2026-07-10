@@ -1798,6 +1798,7 @@ textarea:focus-visible {
 .canvas-stage.tool-connect .canvas-node { cursor: crosshair; }
 .canvas-node:hover, .canvas-node.is-selected { border-color: #075fe5; box-shadow: 0 0 0 2px rgb(7 95 229 / 15%); }
 .canvas-node.is-connecting { border-color: #d89000; box-shadow: 0 0 0 3px rgb(216 144 0 / 20%); }
+.canvas-node.is-previewing { will-change: transform, width, height; }
 .canvas-node-resize-handle { position: absolute; right: -6px; bottom: -6px; z-index: 6; width: 14px; height: 14px; touch-action: none; background: #fff; border: 2px solid #075fe5; border-radius: 3px; box-shadow: 0 1px 3px rgb(7 95 229 / 20%); cursor: nwse-resize; }
 .canvas-node-series { width: 250px; }.canvas-node-system, .canvas-node-document, .canvas-node-note { width: 210px; }
 .canvas-node-icon { display: grid; flex: 0 0 42px; height: 42px; place-items: center; color: #075fe5; border: 1px solid #d0e1ff; border-radius: 5px; }.canvas-node-series .canvas-node-icon { color: #159779; border-color: #b7e2d8; }.canvas-node-system .canvas-node-icon { color: #075fe5; }.canvas-node-document .canvas-node-icon { color: #5934b5; border-color: #d9cdf4; }.canvas-node-note .canvas-node-icon { color: #a16b00; background: #fffaf0; border-color: #eed9aa; }

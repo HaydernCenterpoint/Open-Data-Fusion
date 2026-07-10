@@ -46,6 +46,15 @@ const SOURCE_CONNECTION_COLUMNS = [
   "endpoint, secret_ref, connector_config, last_successful_run_at, created_at, updated_at",
 ].join(" ");
 
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
+    return "{" + entries.map(([key, nested]) => JSON.stringify(key) + ":" + canonical(nested)).join(",") + "}";
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 function sameProject(row: ProjectRecord, input: CreateProjectInput): boolean {
   return row.projectId === input.projectId
     && row.slug === input.slug
@@ -78,7 +87,8 @@ function sameSourceConnection(row: SourceConnectionRecord, input: CreateSourceCo
     && row.connectorKind === input.connectorKind
     && row.state === (input.state ?? "draft")
     && row.endpoint === (input.endpoint ?? null)
-    && row.secretRef === (input.secretRef ?? null);
+    && row.secretRef === (input.secretRef ?? null)
+    && canonical(row.connectorConfig) === canonical(input.connectorConfig ?? {});
 }
 
 /**
