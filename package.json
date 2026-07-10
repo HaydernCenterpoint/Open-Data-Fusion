@@ -1,6 +1,7 @@
 {
   "name": "open-data-fusion",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "private": true,
   "description": "Open-source industrial data integration and contextualization platform.",
   "workspaces": [

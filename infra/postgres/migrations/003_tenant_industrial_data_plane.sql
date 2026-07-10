@@ -873,7 +873,7 @@ BEGIN
       AND writeback_request_id = NEW.writeback_request_id
       AND decision = 'approved';
 
-    IF approval_count < CASE WHEN NEW.risk IN ('high', 'critical') THEN 2 ELSE 1 END THEN
+    IF approval_count < (CASE WHEN NEW.risk IN ('high', 'critical') THEN 2 ELSE 1 END) THEN
       RAISE EXCEPTION USING
         ERRCODE = '23514',
         MESSAGE = 'writeback request has insufficient independent approvals',
