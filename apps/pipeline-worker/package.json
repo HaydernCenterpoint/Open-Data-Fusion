@@ -19,7 +19,7 @@
     "@open-data-fusion/postgres-runtime": "0.1.0"
   },
   "devDependencies": {
-    "@types/node": "^24.0.10",
+    "@types/node": "^26.1.1",
     "tsx": "^4.20.3",
     "typescript": "^5.9.3",
     "vitest": "4.1.10"
