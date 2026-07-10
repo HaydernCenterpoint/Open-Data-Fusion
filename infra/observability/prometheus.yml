@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: open-data-fusion
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: [otel-collector:9464]
+  # The API protects this endpoint in production. Docker Compose mounts the
+  # shared secret at this path; production maps the file from its secret store.
+  - job_name: open-data-fusion-api
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/odf_metrics_token
+    static_configs:
+      - targets: [api:4310]

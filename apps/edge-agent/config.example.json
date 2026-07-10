@@ -1,0 +1,112 @@
+{
+  "agent": {
+    "archiveDirectory": "./data/edge/raw",
+    "queuePath": "./data/edge/queue.db",
+    "actor": "edge-agent",
+    "pollIntervalMs": 5000,
+    "deliveryIntervalMs": 250,
+    "deliveryLeaseMs": 30000,
+    "shutdownDrainTimeoutMs": 15000,
+    "maxDrainBatch": 100,
+    "retry": {
+      "baseDelayMs": 1000,
+      "maxDelayMs": 300000,
+      "jitterRatio": 0.2
+    }
+  },
+  "delivery": {
+    "apiBaseUrl": "https://data-fusion.example.com",
+    "tenantId": "demo",
+    "projectId": "north-plant",
+    "requestTimeoutMs": 30000,
+    "token": {
+      "tokenUrl": "https://identity.example.com/realms/open-data-fusion/protocol/openid-connect/token",
+      "clientIdEnv": "ODF_EDGE_CLIENT_ID",
+      "clientSecretEnv": "ODF_EDGE_CLIENT_SECRET",
+      "scope": "openid",
+      "expirySkewSeconds": 30,
+      "requestTimeoutMs": 15000
+    }
+  },
+  "connectors": [
+    {
+      "type": "csv",
+      "sourceSystem": "csv-pilot",
+      "filePath": "./landing/telemetry.csv",
+      "delimiter": ",",
+      "batchSize": 1000,
+      "mapping": {
+        "timestampColumn": "timestamp",
+        "assets": [
+          { "externalId": "P-101", "name": "Pump 101", "type": "pump" }
+        ],
+        "timeSeries": [
+          {
+            "externalId": "P-101-PRESSURE",
+            "assetExternalId": "P-101",
+            "name": "Discharge pressure",
+            "unit": "bar",
+            "valueColumn": "pressure_bar",
+            "qualityColumn": "quality"
+          }
+        ]
+      }
+    },
+    {
+      "type": "postgres",
+      "sourceSystem": "historian-read-replica",
+      "connectionStringEnv": "ODF_EDGE_POSTGRES_URL",
+      "query": "SELECT id, observed_at, pressure_bar, quality FROM historian.telemetry WHERE id > $1 ORDER BY id ASC LIMIT $2",
+      "checkpointColumn": "id",
+      "initialCheckpoint": "0",
+      "batchSize": 1000,
+      "statementTimeoutMs": 30000,
+      "ssl": {
+        "rejectUnauthorized": true,
+        "caFile": "./certificates/postgres-ca.pem"
+      },
+      "mapping": {
+        "timestampColumn": "observed_at",
+        "assets": [
+          { "externalId": "P-101", "name": "Pump 101", "type": "pump" }
+        ],
+        "timeSeries": [
+          {
+            "externalId": "P-101-PRESSURE",
+            "assetExternalId": "P-101",
+            "name": "Discharge pressure",
+            "unit": "bar",
+            "valueColumn": "pressure_bar",
+            "qualityColumn": "quality"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcua",
+      "sourceSystem": "plc-line-1",
+      "endpointUrl": "opc.tcp://plc-line-1.example.com:4840",
+      "securityMode": "SignAndEncrypt",
+      "securityPolicy": "Basic256Sha256",
+      "certificateFile": "./certificates/edge-agent.der",
+      "privateKeyFile": "./certificates/edge-agent.pem",
+      "credentials": {
+        "type": "username",
+        "usernameEnv": "ODF_EDGE_OPCUA_USERNAME",
+        "passwordEnv": "ODF_EDGE_OPCUA_PASSWORD"
+      },
+      "assets": [
+        { "externalId": "P-101", "name": "Pump 101", "type": "pump" }
+      ],
+      "nodes": [
+        {
+          "nodeId": "ns=2;s=P101.DischargePressure",
+          "timeSeriesExternalId": "P-101-PRESSURE",
+          "assetExternalId": "P-101",
+          "name": "Discharge pressure",
+          "unit": "bar"
+        }
+      ]
+    }
+  ]
+}

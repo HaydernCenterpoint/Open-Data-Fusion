@@ -11,6 +11,7 @@ services:
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
       ODF_DEMO_USER_PASSWORD: "${ODF_DEMO_USER_PASSWORD:-change-this-local-demo-password}"
+      ODF_CONNECTOR_CLIENT_SECRET: "${ODF_CONNECTOR_CLIENT_SECRET:-change-this-local-connector-secret}"
     ports:
       - "127.0.0.1:${ODF_KEYCLOAK_PORT:-8080}:8080"
       - "127.0.0.1:${ODF_KEYCLOAK_MANAGEMENT_PORT:-9000}:9000"

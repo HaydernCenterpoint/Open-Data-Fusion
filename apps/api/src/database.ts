@@ -8,6 +8,8 @@ import type {
   AuditListQuery,
   IngestBundle,
   RelationReview,
+  TelemetryAggregateQuery,
+  TelemetryLatestQuery,
   TelemetryQuery,
   WorkspaceOperations,
   WorkspaceMemberUpsert,
@@ -953,6 +955,128 @@ export class FusionDatabase {
             value: Number(point.value),
             quality: String(point.quality),
           })),
+        };
+      }),
+    };
+  }
+
+  getLatestTelemetry(assetExternalId: string, query: TelemetryLatestQuery): Record<string, unknown> {
+    const asset = this.database.prepare('SELECT external_id FROM assets WHERE external_id = ?').get(assetExternalId);
+    if (!asset) throw new NotFoundError(`Asset '${assetExternalId}' was not found`);
+    const asOf = query.at ?? Date.now();
+    const seriesRows = query.timeSeriesExternalId
+      ? (this.database.prepare('SELECT * FROM time_series WHERE asset_external_id = ? AND external_id = ? ORDER BY name').all(assetExternalId, query.timeSeriesExternalId) as SqliteRow[])
+      : (this.database.prepare('SELECT * FROM time_series WHERE asset_external_id = ? ORDER BY name').all(assetExternalId) as SqliteRow[]);
+    if (query.timeSeriesExternalId && seriesRows.length === 0) {
+      throw new NotFoundError(`Time series '${query.timeSeriesExternalId}' was not found on asset '${assetExternalId}'`);
+    }
+    const latest = this.database.prepare(`
+      SELECT timestamp,value,quality FROM data_points
+      WHERE time_series_external_id=? AND timestamp<=?
+      ORDER BY timestamp DESC LIMIT 1
+    `);
+    return {
+      assetExternalId,
+      asOf: new Date(asOf).toISOString(),
+      series: seriesRows.map((seriesRow) => {
+        const point = latest.get(String(seriesRow.external_id), asOf) as SqliteRow | undefined;
+        const mappedPoint = point ? {
+          timestamp: new Date(Number(point.timestamp)).toISOString(),
+          value: Number(point.value),
+          quality: String(point.quality),
+        } : null;
+        return {
+          ...asTimeSeries(seriesRow),
+          point: mappedPoint,
+          points: mappedPoint ? [mappedPoint] : [],
+        };
+      }),
+    };
+  }
+
+  getAggregatedTelemetry(assetExternalId: string, query: TelemetryAggregateQuery): Record<string, unknown> {
+    const asset = this.database.prepare('SELECT external_id FROM assets WHERE external_id = ?').get(assetExternalId);
+    if (!asset) throw new NotFoundError(`Asset '${assetExternalId}' was not found`);
+    const from = query.from ?? Date.now() - 24 * 60 * 60 * 1_000;
+    const to = query.to ?? Date.now();
+    const seriesRows = query.timeSeriesExternalId
+      ? (this.database.prepare('SELECT * FROM time_series WHERE asset_external_id = ? AND external_id = ? ORDER BY name').all(assetExternalId, query.timeSeriesExternalId) as SqliteRow[])
+      : (this.database.prepare('SELECT * FROM time_series WHERE asset_external_id = ? ORDER BY name').all(assetExternalId) as SqliteRow[]);
+    if (query.timeSeriesExternalId && seriesRows.length === 0) {
+      throw new NotFoundError(`Time series '${query.timeSeriesExternalId}' was not found on asset '${assetExternalId}'`);
+    }
+    const aggregate = this.database.prepare(`
+      WITH filtered AS (
+        SELECT timestamp,value,quality,CAST(timestamp / ? AS INTEGER) * ? AS bucket_start
+        FROM data_points
+        WHERE time_series_external_id=? AND timestamp>=? AND timestamp<=?
+      ), ranked AS (
+        SELECT *,
+          ROW_NUMBER() OVER (PARTITION BY bucket_start ORDER BY timestamp ASC) AS first_rank,
+          ROW_NUMBER() OVER (PARTITION BY bucket_start ORDER BY timestamp DESC) AS last_rank
+        FROM filtered
+      )
+      SELECT * FROM (
+        SELECT bucket_start,COUNT(*) AS point_count,AVG(value) AS average_value,
+          MIN(value) AS minimum_value,MAX(value) AS maximum_value,SUM(value) AS sum_value,
+          MAX(CASE WHEN first_rank=1 THEN timestamp END) AS first_timestamp,
+          MAX(CASE WHEN first_rank=1 THEN value END) AS first_value,
+          MAX(CASE WHEN last_rank=1 THEN timestamp END) AS last_timestamp,
+          MAX(CASE WHEN last_rank=1 THEN value END) AS last_value,
+          CASE
+            WHEN SUM(CASE WHEN quality='bad' THEN 1 ELSE 0 END)>0 THEN 'bad'
+            WHEN SUM(CASE WHEN quality='uncertain' THEN 1 ELSE 0 END)>0 THEN 'uncertain'
+            ELSE 'good'
+          END AS quality
+        FROM ranked GROUP BY bucket_start ORDER BY bucket_start DESC LIMIT ?
+      ) ORDER BY bucket_start ASC
+    `);
+    const valueFor = (row: SqliteRow): number => {
+      switch (query.aggregation) {
+        case 'min': return Number(row.minimum_value);
+        case 'max': return Number(row.maximum_value);
+        case 'sum': return Number(row.sum_value);
+        case 'count': return Number(row.point_count);
+        default: return Number(row.average_value);
+      }
+    };
+    return {
+      assetExternalId,
+      range: { from: new Date(from).toISOString(), to: new Date(to).toISOString() },
+      bucketMs: query.bucketMs,
+      aggregation: query.aggregation,
+      series: seriesRows.map((seriesRow) => {
+        const rows = aggregate.all(
+          query.bucketMs,
+          query.bucketMs,
+          String(seriesRow.external_id),
+          from,
+          to,
+          query.limit,
+        ) as SqliteRow[];
+        const buckets = rows.map((row) => ({
+          timestamp: new Date(Number(row.bucket_start)).toISOString(),
+          endTimestamp: new Date(Math.min(Number(row.bucket_start) + query.bucketMs, to)).toISOString(),
+          value: valueFor(row),
+          count: Number(row.point_count),
+          min: Number(row.minimum_value),
+          max: Number(row.maximum_value),
+          avg: Number(row.average_value),
+          sum: Number(row.sum_value),
+          first: {
+            timestamp: new Date(Number(row.first_timestamp)).toISOString(),
+            value: Number(row.first_value),
+          },
+          last: {
+            timestamp: new Date(Number(row.last_timestamp)).toISOString(),
+            value: Number(row.last_value),
+          },
+          quality: String(row.quality),
+        }));
+        return {
+          ...asTimeSeries(seriesRow),
+          buckets,
+          points: buckets,
         };
       }),
     };

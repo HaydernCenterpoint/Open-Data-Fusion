@@ -1,0 +1,29 @@
+{
+  "allowedLicenses": [
+    "0BSD",
+    "Apache-2.0",
+    "BlueOak-1.0.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unlicense"
+  ],
+  "metadataExceptions": {
+    "dequeue@1.0.5": {
+      "license": "BSD-2-Clause",
+      "evidence": "LICENSE in the published npm package"
+    },
+    "humanize@0.0.9": {
+      "license": "MIT",
+      "evidence": "LICENSE in the published npm package"
+    },
+    "precond@0.2.3": {
+      "license": "MIT",
+      "evidence": "License section in the published npm README and upstream LICENSE"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+# Static web build. An ingress/proxy must route /api to the API service before
+# this image is used outside the compose preview profile.
+FROM node:24-alpine AS build
+
+WORKDIR /workspace
+
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/edge-agent/package.json apps/edge-agent/package.json
+COPY apps/outbox-worker/package.json apps/outbox-worker/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/platform-core/package.json packages/platform-core/package.json
+COPY packages/postgres-runtime/package.json packages/postgres-runtime/package.json
+RUN npm ci --workspace @open-data-fusion/web --include-workspace-root
+
+COPY tsconfig.base.json ./
+COPY apps/web ./apps/web
+COPY packages/contracts ./packages/contracts
+RUN npm run build --workspace @open-data-fusion/web
+
+FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+
+COPY --from=build --chown=101:101 /workspace/apps/web/dist /usr/share/nginx/html
+
+EXPOSE 8080

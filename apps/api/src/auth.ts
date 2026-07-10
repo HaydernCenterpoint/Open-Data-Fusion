@@ -10,7 +10,23 @@ export interface AuthenticatedIdentity {
   userId: string;
   displayName?: string;
   claims?: JWTPayload;
+  permissions: ReadonlySet<DataPlanePermission>;
 }
+
+export const DATA_PLANE_PERMISSIONS = [
+  'data:read',
+  'data:ingest',
+  'relations:review',
+  'audit:read',
+  'platform:admin',
+  'writeback:request',
+  'writeback:approve',
+  'writeback:execute',
+] as const;
+
+export type DataPlanePermission = (typeof DATA_PLANE_PERMISSIONS)[number];
+
+const allDataPlanePermissions: ReadonlySet<DataPlanePermission> = new Set(DATA_PLANE_PERMISSIONS);
 
 export interface AuthenticationContext {
   /**
@@ -49,7 +65,7 @@ export class DevelopmentIdentityProvider implements IdentityProvider {
   async authenticate(request: Request, context?: AuthenticationContext): Promise<AuthenticatedIdentity> {
     const hintedUser = context?.developmentUserHint;
     const userId = normalizedUserId(hintedUser ?? request.header('x-odf-user') ?? this.defaultUser);
-    return { userId, displayName: userId };
+    return { userId, displayName: userId, permissions: allDataPlanePermissions };
   }
 }
 
@@ -58,13 +74,50 @@ export interface OidcIdentityProviderConfig {
   audience: string;
   jwksUri: string;
   userClaim?: string;
+  permissionClaim?: string;
   algorithms?: string[];
+}
+
+function addPermissionValues(target: Set<string>, value: unknown): void {
+  if (typeof value === 'string') {
+    for (const item of value.split(/\s+/u)) {
+      if (item) target.add(item);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === 'string' && item.trim()) target.add(item.trim());
+    }
+  }
+}
+
+function oidcPermissions(payload: JWTPayload, audience: string, permissionClaim: string): ReadonlySet<DataPlanePermission> {
+  const granted = new Set<string>();
+  addPermissionValues(granted, payload.scope);
+  addPermissionValues(granted, payload.scp);
+  addPermissionValues(granted, payload[permissionClaim]);
+
+  const realmAccess = payload.realm_access;
+  if (realmAccess && typeof realmAccess === 'object' && 'roles' in realmAccess) {
+    addPermissionValues(granted, realmAccess.roles);
+  }
+  const resourceAccess = payload.resource_access;
+  if (resourceAccess && typeof resourceAccess === 'object') {
+    const audienceAccess = (resourceAccess as Record<string, unknown>)[audience];
+    if (audienceAccess && typeof audienceAccess === 'object' && 'roles' in audienceAccess) {
+      addPermissionValues(granted, audienceAccess.roles);
+    }
+  }
+
+  return new Set(DATA_PLANE_PERMISSIONS.filter((permission) => granted.has(permission)));
 }
 
 export class OidcIdentityProvider implements IdentityProvider {
   readonly mode = 'oidc' as const;
   private readonly keySet: JWTVerifyGetKey;
   private readonly userClaim: string;
+  private readonly permissionClaim: string;
   private readonly algorithms: string[];
 
   constructor(
@@ -73,6 +126,7 @@ export class OidcIdentityProvider implements IdentityProvider {
   ) {
     this.keySet = keySet ?? createRemoteJWKSet(new URL(config.jwksUri));
     this.userClaim = config.userClaim?.trim() || 'sub';
+    this.permissionClaim = config.permissionClaim?.trim() || 'permissions';
     this.algorithms = config.algorithms?.length ? [...config.algorithms] : ['RS256'];
   }
 
@@ -93,7 +147,12 @@ export class OidcIdentityProvider implements IdentityProvider {
         optionalClaim(payload, 'preferred_username') ??
         optionalClaim(payload, 'email') ??
         userId;
-      return { userId, displayName, claims: payload };
+      return {
+        userId,
+        displayName,
+        claims: payload,
+        permissions: oidcPermissions(payload, this.config.audience, this.permissionClaim),
+      };
     } catch (error) {
       if (error instanceof AuthenticationError) throw error;
       throw new AuthenticationError('A valid bearer access token is required');
@@ -133,6 +192,7 @@ export function createIdentityProviderFromEnvironment(
     audience: requiredEnvironmentValue(environment, 'ODF_OIDC_AUDIENCE'),
     jwksUri: requiredEnvironmentValue(environment, 'ODF_OIDC_JWKS_URI'),
     userClaim: environment.ODF_OIDC_USER_CLAIM?.trim() || 'sub',
+    permissionClaim: environment.ODF_OIDC_PERMISSION_CLAIM?.trim() || 'permissions',
     algorithms,
   });
 }

@@ -1,20 +1,36 @@
 import { randomUUID } from 'node:crypto';
 
 import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler } from 'express';
+import type { WritebackSafetyPolicy } from '@open-data-fusion/platform-core';
 import { z, ZodError } from 'zod';
 
 import {
   AuthenticationError,
   DevelopmentIdentityProvider,
+  type DataPlanePermission,
   type IdentityProvider,
 } from './auth.js';
+import { registerAdvancedPlatformRoutes } from './advanced-platform-routes.js';
+import {
+  AdvancedPlatformCatalog,
+  type IndustrialWritebackExecutor,
+} from './advanced-platform.js';
 import { WorkspaceEventHub } from './collaboration.js';
 import { ConflictError, DataIntegrityError, ForbiddenError, FusionDatabase, NotFoundError } from './database.js';
+import { createApiObservability } from './observability.js';
+import { registerGovernedObjectRoutes } from './object-routes.js';
+import { GovernedObjectStore } from './object-store.js';
+import { registerPlatformRoutes } from './platform-routes.js';
+import { cursorListQuerySchema, platformContextSchema, platformIdSchema, type PlatformContext } from './platform-schemas.js';
+import { PlatformCatalog } from './platform.js';
+import { RawLandingStore } from './raw-landing.js';
 import {
   assetListQuerySchema,
   auditListQuerySchema,
   ingestBundleSchema,
   relationReviewSchema,
+  telemetryAggregateQuerySchema,
+  telemetryLatestQuerySchema,
   telemetryQuerySchema,
   workspaceIdSchema,
   workspaceMemberUpsertSchema,
@@ -69,6 +85,19 @@ async function requireWorkspaceOwner(database: FusionDatabase, identityProvider:
   return identity;
 }
 
+async function requireDataPlanePermission(
+  identityProvider: IdentityProvider,
+  request: Request,
+  permission: DataPlanePermission,
+) {
+  const identity = await identityProvider.authenticate(request);
+  const userId = parse(workspaceUserIdSchema, identity.userId);
+  if (!identity.permissions.has(permission)) {
+    throw new ForbiddenError(`Permission '${permission}' is required`);
+  }
+  return { ...identity, userId };
+}
+
 const correlationMiddleware: RequestHandler = (request, response, next) => {
   const supplied = request.header('x-correlation-id')?.trim();
   const correlationId = supplied && supplied.length <= 255 ? supplied : randomUUID();
@@ -79,6 +108,12 @@ const correlationMiddleware: RequestHandler = (request, response, next) => {
 
 export interface CreateAppOptions {
   identityProvider?: IdentityProvider;
+  metricsToken?: string;
+  rawLandingDirectory?: string;
+  writebackPolicy?: WritebackSafetyPolicy;
+  writebackExecutor?: IndustrialWritebackExecutor;
+  objectStorePath?: string;
+  objectStoreMaxBytes?: number;
 }
 
 export function createApp(
@@ -87,9 +122,25 @@ export function createApp(
   options: CreateAppOptions = {},
 ): Express {
   const identityProvider = options.identityProvider ?? new DevelopmentIdentityProvider();
+  const platformCatalog = new PlatformCatalog(database.database);
+  const advancedPlatformCatalog = new AdvancedPlatformCatalog(database.database, {
+    ...(options.writebackPolicy ? { writebackPolicy: options.writebackPolicy } : {}),
+  });
+  const governedObjectStore = options.objectStorePath
+    ? new GovernedObjectStore(database.database, platformCatalog, {
+        rootPath: options.objectStorePath,
+        ...(options.objectStoreMaxBytes !== undefined ? { maxObjectBytes: options.objectStoreMaxBytes } : {}),
+      })
+    : null;
+  const rawLanding = options.rawLandingDirectory
+    ? new RawLandingStore(database.database, options.rawLandingDirectory)
+    : null;
+  const observability = createApiObservability(options.metricsToken);
   const app = express();
   app.disable('x-powered-by');
   app.use(correlationMiddleware);
+  app.use(observability.middleware);
+  registerGovernedObjectRoutes(app, platformCatalog, governedObjectStore, identityProvider);
   app.use(express.json({ limit: '10mb', strict: true }));
 
   const healthHandler: RequestHandler = (_request, response) => {
@@ -97,32 +148,99 @@ export function createApp(
   };
   app.get('/health', healthHandler);
   app.get('/api/health', healthHandler);
+  app.get('/ready', (_request, response) => {
+    const health = database.health();
+    response.status(health.status === 'ok' ? 200 : 503).json({
+      ...health,
+      readiness: health.status === 'ok' ? 'ready' : 'not_ready',
+    });
+  });
+  app.get('/metrics', observability.metricsHandler);
 
-  app.get('/api/v1/assets', (request, response) => {
+  const platformContext = (request: Request): PlatformContext => parse(platformContextSchema, {
+    tenantId: request.header('x-odf-tenant-id') ?? 'demo',
+    projectId: request.header('x-odf-project-id') ?? 'north-plant',
+  });
+
+  app.get('/api/v1/assets', async (request, response) => {
+    await requireDataPlanePermission(identityProvider, request, 'data:read');
     const query = parse(assetListQuerySchema, request.query);
     response.json(database.listAssets(query));
   });
 
-  app.get('/api/v1/assets/:externalId/telemetry', (request, response) => {
+  app.get('/api/v1/assets/:externalId/telemetry', async (request, response) => {
+    await requireDataPlanePermission(identityProvider, request, 'data:read');
     const externalId = parse(z.string().trim().min(1).max(255), request.params.externalId);
     const query = parse(telemetryQuerySchema, request.query);
     response.json(database.getTelemetry(externalId, query));
   });
 
-  app.get('/api/v1/assets/:externalId', (request, response) => {
+  app.get('/api/v1/assets/:externalId/telemetry/latest', async (request, response) => {
+    const identity = await requireDataPlanePermission(identityProvider, request, 'data:read');
+    const context = parse(platformContextSchema, {
+      tenantId: request.header('x-odf-tenant-id'),
+      projectId: request.header('x-odf-project-id'),
+    });
+    platformCatalog.assertProjectAccess(context, identity.userId);
+    const externalId = parse(z.string().trim().min(1).max(255), request.params.externalId);
+    platformCatalog.assertAssetVisible(context, externalId);
+    response.json(database.getLatestTelemetry(externalId, parse(telemetryLatestQuerySchema, request.query)));
+  });
+
+  app.get([
+    '/api/v1/assets/:externalId/telemetry/aggregate',
+    '/api/v1/assets/:externalId/telemetry/buckets',
+  ], async (request, response) => {
+    const identity = await requireDataPlanePermission(identityProvider, request, 'data:read');
+    const context = parse(platformContextSchema, {
+      tenantId: request.header('x-odf-tenant-id'),
+      projectId: request.header('x-odf-project-id'),
+    });
+    platformCatalog.assertProjectAccess(context, identity.userId);
+    const externalId = parse(z.string().trim().min(1).max(255), request.params.externalId);
+    platformCatalog.assertAssetVisible(context, externalId);
+    response.json(database.getAggregatedTelemetry(externalId, parse(telemetryAggregateQuerySchema, request.query)));
+  });
+
+  app.get('/api/v1/assets/:externalId', async (request, response) => {
+    await requireDataPlanePermission(identityProvider, request, 'data:read');
     const externalId = parse(z.string().trim().min(1).max(255), request.params.externalId);
     response.json(database.getAsset(externalId));
   });
 
-  const ingestHandler: RequestHandler = (request, response) => {
+  const ingestHandler: RequestHandler = async (request, response) => {
+    const identity = await requireDataPlanePermission(identityProvider, request, 'data:ingest');
     const bundle = parse(ingestBundleSchema, request.body);
-    const result = database.ingest(bundle, response.locals.correlationId);
-    response.status(result.status === 'already_processed' ? 200 : 201).json(result);
+    const authorizedBundle = {
+      ...bundle,
+      source: { ...bundle.source, runId: bundle.source.runId ?? randomUUID(), actor: identity.userId },
+    };
+    let rawRecord: Awaited<ReturnType<RawLandingStore['archive']>> | null = null;
+    let context: PlatformContext | null = null;
+    if (rawLanding) {
+      context = platformContext(request);
+      platformCatalog.assertProjectAccess(context, identity.userId, ['owner', 'editor']);
+      rawRecord = await rawLanding.archive(context, authorizedBundle, identity.userId, response.locals.correlationId);
+    }
+    try {
+      const result = database.ingest(authorizedBundle, response.locals.correlationId);
+      if (rawLanding && rawRecord && context) rawLanding.complete(context, rawRecord.id, 'accepted');
+      response.status(result.status === 'already_processed' ? 200 : 201).json({
+        ...result,
+        ...(rawRecord ? { rawObjectId: rawRecord.id, rawSha256: rawRecord.sha256 } : {}),
+      });
+    } catch (error) {
+      if (rawLanding && rawRecord && context) {
+        rawLanding.complete(context, rawRecord.id, 'failed', error instanceof Error ? error.message : 'Unknown ingestion failure');
+      }
+      throw error;
+    }
   };
   app.post('/api/ingest', ingestHandler);
   app.post('/api/v1/ingest/bundle', ingestHandler);
 
-  app.get('/api/v1/relations', (request, response) => {
+  app.get('/api/v1/relations', async (request, response) => {
+    await requireDataPlanePermission(identityProvider, request, 'data:read');
     const query = parse(
       z.object({
         status: z.enum(['proposed', 'accepted', 'rejected', 'superseded']).optional(),
@@ -133,15 +251,55 @@ export function createApp(
     response.json(database.listRelations(query.status, query.limit));
   });
 
-  app.post('/api/v1/relations/:id/review', (request, response) => {
+  app.post('/api/v1/relations/:id/review', async (request, response) => {
+    const identity = await requireDataPlanePermission(identityProvider, request, 'relations:review');
     const id = parse(z.string().trim().min(1).max(255), request.params.id);
     const review = parse(relationReviewSchema, request.body);
-    response.json(database.reviewRelation(id, review, response.locals.correlationId));
+    const authorizedReview = { ...review, reviewer: identity.userId };
+    response.json(database.reviewRelation(id, authorizedReview, response.locals.correlationId));
   });
 
-  app.get('/api/v1/audit', (request, response) => {
+  app.get('/api/v1/audit', async (request, response) => {
+    await requireDataPlanePermission(identityProvider, request, 'audit:read');
     const query = parse(auditListQuerySchema, request.query);
     response.json(database.listAudit(query));
+  });
+
+  registerPlatformRoutes(app, platformCatalog, identityProvider);
+  registerAdvancedPlatformRoutes(app, platformCatalog, advancedPlatformCatalog, identityProvider, {
+    ...(options.writebackExecutor ? { writebackExecutor: options.writebackExecutor } : {}),
+  });
+
+  app.get('/api/v1/platform/ingestion/raw', async (request, response) => {
+    const identity = await requireDataPlanePermission(identityProvider, request, 'audit:read');
+    const context = platformContext(request);
+    platformCatalog.assertProjectAccess(context, identity.userId);
+    if (!rawLanding) {
+      response.status(503).json({ error: { code: 'raw_landing_unavailable', message: 'Raw landing storage is not configured', correlationId: response.locals.correlationId } });
+      return;
+    }
+    const query = parse(cursorListQuerySchema, request.query);
+    response.json(rawLanding.list(context, query.limit, query.cursor));
+  });
+
+  app.post('/api/v1/platform/ingestion/raw/:rawId/replay', async (request, response) => {
+    const identity = await requireDataPlanePermission(identityProvider, request, 'data:ingest');
+    const context = platformContext(request);
+    platformCatalog.assertProjectAccess(context, identity.userId, ['owner', 'editor']);
+    if (!rawLanding) {
+      response.status(503).json({ error: { code: 'raw_landing_unavailable', message: 'Raw landing storage is not configured', correlationId: response.locals.correlationId } });
+      return;
+    }
+    const rawId = parse(platformIdSchema, request.params.rawId);
+    const sourceBundle = await rawLanding.replayBundle(context, rawId);
+    const replayRunId = `replay-${Date.now()}-${rawId.slice(0, 48)}`;
+    const bundle = {
+      ...sourceBundle,
+      source: { ...sourceBundle.source, runId: replayRunId, actor: identity.userId },
+    };
+    const result = database.ingest(bundle, response.locals.correlationId);
+    const rawObject = rawLanding.markReplayed(context, rawId, replayRunId);
+    response.status(201).json({ ...result, replayedFromRawObjectId: rawId, rawObject });
   });
 
   app.get('/api/v1/workspaces/:id', async (request, response) => {

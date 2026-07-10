@@ -1,0 +1,61 @@
+# Source-control and editor metadata
+.git/
+.gitmodules
+.gitattributes
+.vscode/
+.idea/
+*.code-workspace
+*.suo
+*.user
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local secrets and certificates. The example is intentionally kept so builds
+# can document configuration without receiving real credentials.
+.env
+.env.*
+.envrc
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Dependency, test, and build artifacts are recreated inside the image.
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+coverage/
+**/coverage/
+.vite/
+**/.vite/
+*.tsbuildinfo
+*.log
+
+# Local serving state and untrusted/raw landed data must not enter a build
+# context. Production raw data belongs in governed object storage.
+data/
+apps/*/data/
+raw/
+raw-archives/
+archives/
+apps/*/raw/
+apps/*/raw-archives/
+apps/*/archives/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite
+**/*.sqlite3
+
+# Non-redistributable visual reference material is not part of product builds.
+docs/design/cognite-demo-reference.png
+docs/design/reference/

@@ -1,0 +1,11 @@
+groups:
+  - name: open-data-fusion-infrastructure
+    rules:
+      - alert: OdfTelemetryCollectorDown
+        expr: up{job="otel-collector"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Open Data Fusion telemetry collector is unreachable
+          runbook: Investigate the collector deployment, OTLP client errors, and network policy before relying on observability data.

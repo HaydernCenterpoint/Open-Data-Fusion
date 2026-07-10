@@ -11,7 +11,11 @@ npm install
 npm run dev
 ```
 
-The API listens on `http://localhost:4310` by default. Set `PORT`, `ODF_DATABASE_PATH`, or `ODF_SEED=false` to override runtime defaults. Authentication profiles and OIDC variables are documented in [`docs/security/authentication.md`](../../docs/security/authentication.md).
+The API listens on `http://localhost:4310` by default. Set `PORT`,
+`ODF_DATABASE_PATH`, `ODF_OBJECT_STORE_PATH`, or `ODF_SEED=false` to override
+runtime defaults. Production requires an explicit `ODF_OBJECT_STORE_PATH`.
+Authentication profiles and OIDC variables are documented in
+[`docs/security/authentication.md`](../../docs/security/authentication.md).
 
 ## API
 
@@ -19,6 +23,8 @@ The API listens on `http://localhost:4310` by default. Set `PORT`, `ODF_DATABASE
 - `GET /api/v1/assets?q=&type=&limit=&offset=`
 - `GET /api/v1/assets/:externalId`
 - `GET /api/v1/assets/:externalId/telemetry?from=&to=&timeSeriesExternalId=&limit=`
+- `GET /api/v1/assets/:externalId/telemetry/latest?timeSeriesExternalId=&at=`
+- `GET /api/v1/assets/:externalId/telemetry/aggregate?from=&to=&timeSeriesExternalId=&bucketMs=&aggregation=&limit=`
 - `POST /api/ingest` and `POST /api/v1/ingest/bundle`
 - `GET /api/v1/relations?status=proposed`
 - `POST /api/v1/relations/:id/review`
@@ -32,6 +38,112 @@ The API listens on `http://localhost:4310` by default. Set `PORT`, `ODF_DATABASE
 - `DELETE /api/v1/workspaces/:id/members/:userId` (owner-only)
 - `POST /api/v1/workspaces/:id/operations` with `baseVersion`, `changeSummary`, and semantic operations
 - `GET /api/v1/workspaces/:id/events?user=` as a Server-Sent Events stream
+
+### Platform catalog APIs
+
+Project-scoped platform routes require both `x-odf-tenant-id` and
+`x-odf-project-id`. The API verifies the authenticated user is a member of that
+project before reading or writing any resource. New list endpoints use opaque
+keyset cursors through `?limit=&cursor=` and return `nextCursor`.
+
+- `GET|POST /api/v1/platform/tenants`
+- `GET|POST /api/v1/platform/tenants/:tenantId/projects`
+- `GET|POST /api/v1/platform/datasets`
+- `GET|POST /api/v1/platform/sources`
+- `GET|POST /api/v1/platform/connectors`
+- `GET /api/v1/platform/data-models`
+- `POST /api/v1/platform/data-models/:modelId/versions`
+- `GET|POST /api/v1/platform/pipelines`
+- `POST /api/v1/platform/pipelines/:pipelineId/runs`
+- `GET /api/v1/platform/pipeline-runs`
+- `GET|POST /api/v1/platform/quality-rules`
+- `GET /api/v1/platform/quality-results`
+- `GET|POST /api/v1/platform/contextualization/candidates`
+- `POST /api/v1/platform/contextualization/candidates/:candidateId/review`
+- `GET|POST /api/v1/platform/diagrams/tag-extractions`
+- `GET|POST /api/v1/platform/matching/evaluations`
+- `GET|POST /api/v1/platform/spatial/asset-links`
+- `POST /api/v1/platform/spatial/asset-links/:linkId/review`
+- `GET /api/v1/platform/project/members`
+- `PUT|DELETE /api/v1/platform/project/members/:userId` (project owner plus `platform:admin`)
+- `GET|POST /api/v1/platform/writeback/requests`
+- `POST /api/v1/platform/writeback/requests/:requestId/approvals`
+- `POST /api/v1/platform/writeback/requests/:requestId/execute`
+- `GET /api/v1/platform/writeback/requests/:requestId/events`
+- `GET /api/v1/platform/objects?limit=&cursor=`
+- `POST /api/v1/platform/objects/:objectId/versions` with the raw request body
+- `GET /api/v1/platform/objects/:objectId`
+- `GET /api/v1/platform/objects/:objectId/versions`
+- `GET|HEAD /api/v1/platform/objects/:objectId/content`
+- `GET|HEAD /api/v1/platform/objects/:objectId/versions/:version/content`
+- `GET /api/v1/platform/objects/:objectId/events`
+- `GET /api/v1/platform/search?q=`
+
+`data:read` allows project reads, `data:ingest` plus project owner/editor
+allows catalog writes and pipeline triggers, and `relations:review` plus
+owner/editor/reviewer allows candidate review. Creating tenants or projects
+requires the global `platform:admin` permission. Connector configuration rejects
+inline credential-shaped fields; store only secret references.
+
+The local seed creates tenant `demo`, project `north-plant`, and mirrors the
+four Canvas demo users into project roles. Existing seeded and newly ingested
+assets are projected into unified search for that project. Other projects do
+not inherit those assets.
+
+### Advanced contextualization and industrial write-back
+
+Diagram extraction stores the source-text SHA-256 and extracted P&ID tags, not
+the submitted text. Matching evaluation persists precision/recall/F1 plus
+score-ranked proposals; every ranked result remains `proposed` until a separate
+review workflow accepts it. Spatial links require a finite 4x4 transform with a
+non-zero homogeneous scale and permit one reviewer transition from `proposed`
+to `accepted` or `rejected`.
+
+Write-back uses independent verified permissions: `writeback:request`,
+`writeback:approve`, and `writeback:execute`. All requests require non-empty
+dry-run evidence. Operations must be allowlisted; the requester cannot approve
+their own request; high-risk operations require at least two distinct
+non-requester approvers; critical operations are always cancelled and cannot be
+executed. Approval and event ledgers are append-only at the database layer.
+
+The server profile is disabled by default. Configure policy with:
+
+- `ODF_WRITEBACK_ENABLED=true`
+- `ODF_WRITEBACK_ALLOWED_OPERATIONS=set.control_mode,reset.trip`
+- `ODF_WRITEBACK_MAXIMUM_RISK=high`
+- `ODF_WRITEBACK_REQUIRE_DRY_RUN=true` (cannot be disabled)
+- `ODF_WRITEBACK_APPROVALS_LOW=1`, `ODF_WRITEBACK_APPROVALS_MEDIUM=1`,
+  `ODF_WRITEBACK_APPROVALS_HIGH=2`
+
+Enabling policy does not enable execution. `createApp` must also receive an
+explicit `IndustrialWritebackExecutor`; otherwise the execution endpoint logs
+the blocked attempt, leaves an approved request retryable, and returns HTTP 503.
+
+### Governed objects and time-series serving
+
+Object uploads are streamed directly to a mode-`0600` temporary file under the
+configured store. The service enforces `ODF_OBJECT_STORE_MAX_BYTES`, calculates
+SHA-256 while streaming, calls `fsync`, and atomically renames the completed
+file to a server-generated scoped path. Client object IDs and file names never
+become filesystem paths. Each upload creates an immutable numbered version and
+append-only audit event; previous bytes remain addressable.
+
+Upload metadata is supplied through `Content-Type`, `x-odf-file-name`, and
+`x-odf-title`. Downloads return a strong hash ETag, support one bounded `bytes`
+Range (including suffix ranges), and require both `data:read` and project
+membership. Uploads require `data:ingest` plus project owner/editor role.
+
+Only conservative passive MIME types (`text/plain`, CSV/TSV, and JSON/NDJSON)
+are incrementally decoded as UTF-8 for search. HTML, SVG, scripts, XML, and
+other active formats are stored as opaque bytes and are never executed or
+parsed. Search uses SQLite FTS5 when available and automatically falls back to
+the existing scoped `LIKE` index.
+
+Latest and aggregate telemetry routes require `x-odf-tenant-id`,
+`x-odf-project-id`, verified `data:read`, and project membership. Aggregation
+uses epoch-aligned buckets and returns the selected `avg|min|max|sum|count`
+value together with count, min/max/avg/sum, first/last values, and worst bucket
+quality. The original raw telemetry endpoint and response remain unchanged.
 
 Example bundle:
 

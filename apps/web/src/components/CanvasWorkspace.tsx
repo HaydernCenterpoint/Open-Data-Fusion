@@ -13,6 +13,7 @@ import {
   Link2,
   LogOut,
   Maximize2,
+  MoreHorizontal,
   MousePointer2,
   Move,
   Plus,
@@ -105,6 +106,7 @@ const MAX_NODE_WIDTH = 600;
 const MIN_NODE_HEIGHT = 100;
 const MAX_NODE_HEIGHT = 420;
 const MAX_AUTHORING_HISTORY = 50;
+const REVISION_PAGE_SIZE = 50;
 const WORKSPACE_ROLES: WorkspaceRole[] = ["owner", "editor", "reviewer", "viewer"];
 
 const fallbackNodes: CanvasNodeRecord[] = [
@@ -278,6 +280,39 @@ function PidPanel({ position }: { position: CanvasPosition }) {
 
 function MoreDots() { return <span className="more-dots" aria-hidden="true">•••</span>; }
 
+function MobileCanvasMenu({ onOpenHistory, onToggleMembers }: { onOpenHistory: () => void; onToggleMembers: () => void }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnPointer = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOnPointer);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnPointer);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className="canvas-mobile-menu" ref={menuRef}>
+      <button type="button" aria-label="Mobile canvas actions" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}><MoreHorizontal size={18} /></button>
+      {open ? (
+        <div className="canvas-mobile-menu-popover" role="menu">
+          <button type="button" role="menuitem" onClick={() => { setOpen(false); onOpenHistory(); }}><Clock3 size={16} /> Revision history</button>
+          <button type="button" role="menuitem" onClick={() => { setOpen(false); onToggleMembers(); }}><Users size={16} /> Workspace members</button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpenExplorer, onNotify }: CanvasWorkspaceProps) {
   const authSession = useAuthSession();
   const activeUserId = authSession.identity?.userId ?? WORKSPACE_USER;
@@ -289,7 +324,9 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [historyOpen, setHistoryOpen] = useState(false);
   const [revisions, setRevisions] = useState<WorkspaceRevision[]>([]);
+  const [revisionTotal, setRevisionTotal] = useState(0);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [membersLoaded, setMembersLoaded] = useState(false);
@@ -529,12 +566,34 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      const history = await listWorkspaceRevisions(current.id, activeUserId);
+      const history = await listWorkspaceRevisions(current.id, { limit: REVISION_PAGE_SIZE, offset: 0 }, activeUserId);
       setRevisions(history.items);
+      setRevisionTotal(history.total);
     } catch {
+      setRevisions([]);
+      setRevisionTotal(0);
       setHistoryError("Revision history could not be loaded.");
     } finally {
       setHistoryLoading(false);
+    }
+  }
+
+  async function loadMoreHistory() {
+    const current = workspaceRef.current;
+    if (!current || historyLoadingMore || revisions.length >= revisionTotal) return;
+    setHistoryLoadingMore(true);
+    setHistoryError("");
+    try {
+      const history = await listWorkspaceRevisions(current.id, { limit: REVISION_PAGE_SIZE, offset: revisions.length }, activeUserId);
+      setRevisions((items) => {
+        const knownVersions = new Set(items.map((revision) => revision.version));
+        return [...items, ...history.items.filter((revision) => !knownVersions.has(revision.version))];
+      });
+      setRevisionTotal(history.total);
+    } catch {
+      setHistoryError("More revision history could not be loaded.");
+    } finally {
+      setHistoryLoadingMore(false);
     }
   }
 
@@ -967,7 +1026,7 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
           <ChevronDown size={12} />
         </button>
         {membersLoaded && !canEdit ? <span className="canvas-readonly-badge">{currentMember?.role ?? "no access"} · read only</span> : null}
-        <div className="canvas-top-actions"><button aria-label="Search"><Search size={18} /></button><button aria-label="Revision history" onClick={openHistory}><Clock3 size={18} /></button><button aria-label="Help"><CircleHelp size={18} /></button><button aria-label="Notifications"><Bell size={18} /></button><button aria-label="Settings"><Settings size={18} /></button>{authSession.enabled ? <button className="canvas-signout-button" type="button" aria-label={`Sign out ${authSession.identity?.displayName ?? activeUserId}`} title={`Signed in as ${authSession.identity?.displayName ?? activeUserId}`} onClick={() => void authSession.signOut().catch((error: unknown) => onNotify(error instanceof Error ? error.message : "Sign out failed"))}><span>{(authSession.identity?.displayName ?? activeUserId).split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span><LogOut size={15} /></button> : null}<button className="new-canvas-button" type="button" disabled={!canEdit} onClick={() => onNotify("New canvas created")}>New canvas <Plus size={17} /></button></div>
+        <div className="canvas-top-actions"><button aria-label="Search"><Search size={18} /></button><button aria-label="Revision history" onClick={openHistory}><Clock3 size={18} /></button><button aria-label="Help"><CircleHelp size={18} /></button><button aria-label="Notifications"><Bell size={18} /></button><button aria-label="Settings"><Settings size={18} /></button>{authSession.enabled ? <button className="canvas-signout-button" type="button" aria-label={`Sign out ${authSession.identity?.displayName ?? activeUserId}`} title={`Signed in as ${authSession.identity?.displayName ?? activeUserId}`} onClick={() => void authSession.signOut().catch((error: unknown) => onNotify(error instanceof Error ? error.message : "Sign out failed"))}><span>{(authSession.identity?.displayName ?? activeUserId).split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span><LogOut size={15} /></button> : null}<MobileCanvasMenu onOpenHistory={() => void openHistory()} onToggleMembers={() => { setHistoryOpen(false); setMembersOpen((open) => !open); }} /><button className="new-canvas-button" type="button" disabled={!canEdit} onClick={() => onNotify("New canvas created")}>New canvas <Plus size={17} /></button></div>
       </header>
       <aside className="canvas-tool-rail" aria-label="Canvas tools">
         <button className="canvas-tool-logo" type="button" onClick={onOpenExplorer} aria-label="Open Data Fusion Explorer">◈</button>
@@ -1097,7 +1156,16 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
           onRemove={(member) => void removeMember(member)}
         />
       ) : null}
-      {historyOpen && <section className="canvas-history-panel" aria-label="Revision history"><div className="history-panel-header"><div><strong>Revision history</strong><span>Rollback creates a new revision</span></div><button aria-label="Close revision history" onClick={() => setHistoryOpen(false)}><X size={17} /></button></div>{historyLoading && <p className="history-status">Loading revisions…</p>}{historyError && <p className="history-error">{historyError}</p>}{!historyLoading && !historyError && <ol className="revision-list">{revisions.map((revision) => <li key={revision.version}><div><strong>v{revision.version}</strong><span>{revision.changeSummary}</span><small>{revision.actor} · {new Date(revision.createdAt).toLocaleString()}</small></div><button type="button" disabled={!canEdit || revision.version === workspace?.version} title={!canEdit ? "Read-only role" : undefined} onClick={() => void restoreRevision(revision.version)}>{revision.version === workspace?.version ? "Current" : "Restore"}</button></li>)}</ol>}</section>}
+      {historyOpen ? (
+        <section className="canvas-history-panel" aria-label="Revision history">
+          <div className="history-panel-header"><div><strong>Revision history</strong><span>{revisions.length} loaded · {revisionTotal} total · rollback creates a new revision</span></div><button aria-label="Close revision history" onClick={() => setHistoryOpen(false)}><X size={17} /></button></div>
+          {historyLoading ? <p className="history-status">Loading revisions…</p> : null}
+          {historyError ? <p className="history-error" role="alert">{historyError}</p> : null}
+          {!historyLoading && revisions.length === 0 && !historyError ? <p className="history-status">No revisions are available.</p> : null}
+          {!historyLoading && revisions.length > 0 ? <ol className="revision-list">{revisions.map((revision) => <li key={revision.version}><div><strong>v{revision.version}</strong><span>{revision.changeSummary}</span><small>{revision.actor} · {new Date(revision.createdAt).toLocaleString()}</small></div><button type="button" disabled={!canEdit || revision.version === workspace?.version} title={!canEdit ? "Read-only role" : undefined} onClick={() => void restoreRevision(revision.version)}>{revision.version === workspace?.version ? "Current" : "Restore"}</button></li>)}</ol> : null}
+          {revisions.length < revisionTotal ? <button className="history-load-more" type="button" disabled={historyLoadingMore} onClick={() => void loadMoreHistory()}>{historyLoadingMore ? "Loading…" : `Load more (${revisionTotal - revisions.length})`}</button> : null}
+        </section>
+      ) : null}
     </div>
   );
 }

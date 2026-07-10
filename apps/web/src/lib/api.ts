@@ -1,10 +1,33 @@
 import type {
+  AssetListResponse,
   AssetDetailResponse,
   ApiWorkspace,
+  AuditListResponse,
   CanvasSnapshot,
   ExplorerSnapshot,
   IngestBundle,
   IngestResult,
+  CursorPage,
+  PlatformConnector,
+  PlatformContext,
+  PlatformContextCandidate,
+  PlatformDataModel,
+  PlatformDataset,
+  PlatformDiagramExtraction,
+  PlatformMatchGroundTruth,
+  PlatformMatchingEvaluation,
+  PlatformMatchPrediction,
+  PlatformPipeline,
+  PlatformPipelineRun,
+  PlatformProject,
+  PlatformQualityResult,
+  PlatformSearchResult,
+  PlatformSource,
+  PlatformSpatialLink,
+  PlatformTenant,
+  PlatformWritebackRequest,
+  PlatformWritebackRisk,
+  RelationListResponse,
   TelemetryResponse,
   WorkspaceMemberList,
   WorkspaceMember,
@@ -104,6 +127,256 @@ export async function getExplorerSnapshot(
     request<TelemetryResponse>(`/api/v1/assets/${encodedId}/telemetry?limit=500`, { signal }),
   ]);
   return { detail, telemetry };
+}
+
+export function listAssets(
+  query: { q?: string; type?: string; limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<AssetListResponse> {
+  const parameters = new URLSearchParams();
+  if (query.q) parameters.set("q", query.q);
+  if (query.type) parameters.set("type", query.type);
+  if (query.limit !== undefined) parameters.set("limit", String(query.limit));
+  if (query.offset !== undefined) parameters.set("offset", String(query.offset));
+  const suffix = parameters.size > 0 ? `?${parameters.toString()}` : "";
+  return request<AssetListResponse>(`/api/v1/assets${suffix}`, { signal });
+}
+
+export function listRelations(
+  query: { status?: "proposed" | "accepted" | "rejected" | "superseded"; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<RelationListResponse> {
+  const parameters = new URLSearchParams();
+  if (query.status) parameters.set("status", query.status);
+  if (query.limit !== undefined) parameters.set("limit", String(query.limit));
+  const suffix = parameters.size > 0 ? `?${parameters.toString()}` : "";
+  return request<RelationListResponse>(`/api/v1/relations${suffix}`, { signal });
+}
+
+export function listAudit(
+  query: { action?: string; entityType?: string; entityId?: string; limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<AuditListResponse> {
+  const parameters = new URLSearchParams();
+  if (query.action) parameters.set("action", query.action);
+  if (query.entityType) parameters.set("entityType", query.entityType);
+  if (query.entityId) parameters.set("entityId", query.entityId);
+  if (query.limit !== undefined) parameters.set("limit", String(query.limit));
+  if (query.offset !== undefined) parameters.set("offset", String(query.offset));
+  const suffix = parameters.size > 0 ? `?${parameters.toString()}` : "";
+  return request<AuditListResponse>(`/api/v1/audit${suffix}`, { signal });
+}
+
+function cursorSuffix(query: { limit?: number; cursor?: string }): string {
+  const parameters = new URLSearchParams();
+  if (query.limit !== undefined) parameters.set("limit", String(query.limit));
+  if (query.cursor) parameters.set("cursor", query.cursor);
+  return parameters.size > 0 ? `?${parameters.toString()}` : "";
+}
+
+function platformHeaders(context: PlatformContext): Record<string, string> {
+  return {
+    "x-odf-tenant-id": context.tenantId,
+    "x-odf-project-id": context.projectId,
+  };
+}
+
+function listPlatformScoped<T>(
+  resource: string,
+  context: PlatformContext,
+  query: { limit?: number; cursor?: string } = {},
+  signal?: AbortSignal,
+): Promise<CursorPage<T>> {
+  return request<CursorPage<T>>(`/api/v1/platform/${resource}${cursorSuffix(query)}`, {
+    signal,
+    headers: platformHeaders(context),
+  });
+}
+
+export function listPlatformTenants(
+  query: { limit?: number; cursor?: string } = {},
+  signal?: AbortSignal,
+): Promise<CursorPage<PlatformTenant>> {
+  return request<CursorPage<PlatformTenant>>(`/api/v1/platform/tenants${cursorSuffix(query)}`, { signal });
+}
+
+export function listPlatformProjects(
+  tenantId: string,
+  query: { limit?: number; cursor?: string } = {},
+  signal?: AbortSignal,
+): Promise<CursorPage<PlatformProject>> {
+  return request<CursorPage<PlatformProject>>(`/api/v1/platform/tenants/${encodeURIComponent(tenantId)}/projects${cursorSuffix(query)}`, { signal });
+}
+
+export function listPlatformDatasets(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformDataset>("datasets", context, query, signal);
+}
+
+export function listPlatformSources(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformSource>("sources", context, query, signal);
+}
+
+export function listPlatformConnectors(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformConnector>("connectors", context, query, signal);
+}
+
+export function listPlatformDataModels(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformDataModel>("data-models", context, query, signal);
+}
+
+export function listPlatformPipelines(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformPipeline>("pipelines", context, query, signal);
+}
+
+export function listPlatformPipelineRuns(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformPipelineRun>("pipeline-runs", context, query, signal);
+}
+
+export function listPlatformQualityResults(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformQualityResult>("quality-results", context, query, signal);
+}
+
+export function listPlatformCandidates(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformContextCandidate>("contextualization/candidates", context, query, signal);
+}
+
+export function triggerPlatformPipelineRun(
+  context: PlatformContext,
+  pipelineId: string,
+  body: { idempotencyKey: string; input: Record<string, unknown> },
+): Promise<PlatformPipelineRun> {
+  return request<PlatformPipelineRun>(`/api/v1/platform/pipelines/${encodeURIComponent(pipelineId)}/runs`, {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function reviewPlatformCandidate(
+  context: PlatformContext,
+  candidateId: string,
+  body: { decision: "accepted" | "rejected"; comment?: string | null },
+): Promise<PlatformContextCandidate> {
+  return request<PlatformContextCandidate>(`/api/v1/platform/contextualization/candidates/${encodeURIComponent(candidateId)}/review`, {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function searchPlatform(
+  context: PlatformContext,
+  query: { q: string; entityType?: string; limit?: number; cursor?: string },
+  signal?: AbortSignal,
+): Promise<CursorPage<PlatformSearchResult>> {
+  const parameters = new URLSearchParams({ q: query.q });
+  if (query.entityType) parameters.set("entityType", query.entityType);
+  if (query.limit !== undefined) parameters.set("limit", String(query.limit));
+  if (query.cursor) parameters.set("cursor", query.cursor);
+  return request<CursorPage<PlatformSearchResult>>(`/api/v1/platform/search?${parameters.toString()}`, {
+    signal,
+    headers: platformHeaders(context),
+  });
+}
+
+export function listPlatformDiagramExtractions(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformDiagramExtraction>("diagrams/tag-extractions", context, query, signal);
+}
+
+export function createPlatformDiagramExtraction(
+  context: PlatformContext,
+  body: { id?: string; documentExternalId: string; text: string; page?: number },
+): Promise<PlatformDiagramExtraction> {
+  return request<PlatformDiagramExtraction>("/api/v1/platform/diagrams/tag-extractions", {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function listPlatformMatchingEvaluations(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformMatchingEvaluation>("matching/evaluations", context, query, signal);
+}
+
+export function createPlatformMatchingEvaluation(
+  context: PlatformContext,
+  body: { id?: string; threshold: number; predictions: PlatformMatchPrediction[]; truth: PlatformMatchGroundTruth[] },
+): Promise<PlatformMatchingEvaluation> {
+  return request<PlatformMatchingEvaluation>("/api/v1/platform/matching/evaluations", {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function listPlatformSpatialLinks(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformSpatialLink>("spatial/asset-links", context, query, signal);
+}
+
+export function createPlatformSpatialLink(
+  context: PlatformContext,
+  body: { id?: string; assetExternalId: string; sceneExternalId: string; nodeExternalId: string; transform: number[]; confidence: number },
+): Promise<PlatformSpatialLink> {
+  return request<PlatformSpatialLink>("/api/v1/platform/spatial/asset-links", {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function reviewPlatformSpatialLink(
+  context: PlatformContext,
+  linkId: string,
+  body: { decision: "accepted" | "rejected"; comment?: string | null },
+): Promise<PlatformSpatialLink> {
+  return request<PlatformSpatialLink>(`/api/v1/platform/spatial/asset-links/${encodeURIComponent(linkId)}/review`, {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function listPlatformWritebackRequests(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformWritebackRequest>("writeback/requests", context, query, signal);
+}
+
+export function createPlatformWritebackRequest(
+  context: PlatformContext,
+  body: {
+    id?: string;
+    sourceId: string;
+    targetExternalId: string;
+    operation: string;
+    payload: Record<string, unknown>;
+    risk: PlatformWritebackRisk;
+    dryRunResult: { safe: boolean; evidence: unknown; performedAt?: string; summary?: string };
+  },
+): Promise<PlatformWritebackRequest> {
+  return request<PlatformWritebackRequest>("/api/v1/platform/writeback/requests", {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function approvePlatformWritebackRequest(
+  context: PlatformContext,
+  requestId: string,
+  body: { decision: "approved" | "rejected"; comment?: string | null },
+): Promise<PlatformWritebackRequest> {
+  return request<PlatformWritebackRequest>(`/api/v1/platform/writeback/requests/${encodeURIComponent(requestId)}/approvals`, {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function executePlatformWritebackRequest(context: PlatformContext, requestId: string): Promise<PlatformWritebackRequest> {
+  return request<PlatformWritebackRequest>(`/api/v1/platform/writeback/requests/${encodeURIComponent(requestId)}/execute`, {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify({}),
+  });
 }
 
 export function getWorkspace(id: string, signal?: AbortSignal, user = WORKSPACE_USER): Promise<ApiWorkspace> {
@@ -335,8 +608,16 @@ export function isConflictError(error: unknown): error is ApiRequestError {
   return error instanceof ApiRequestError && error.status === 409;
 }
 
-export function listWorkspaceRevisions(id: string, user = WORKSPACE_USER): Promise<WorkspaceRevisionList> {
-  return request<WorkspaceRevisionList>(`/api/v1/workspaces/${encodeURIComponent(id)}/revisions`, {
+export function listWorkspaceRevisions(
+  id: string,
+  query: { limit?: number; offset?: number } = {},
+  user = WORKSPACE_USER,
+): Promise<WorkspaceRevisionList> {
+  const parameters = new URLSearchParams();
+  if (query.limit !== undefined) parameters.set("limit", String(query.limit));
+  if (query.offset !== undefined) parameters.set("offset", String(query.offset));
+  const suffix = parameters.size > 0 ? `?${parameters.toString()}` : "";
+  return request<WorkspaceRevisionList>(`/api/v1/workspaces/${encodeURIComponent(id)}/revisions${suffix}`, {
     headers: { "x-odf-user": user },
   });
 }

@@ -1,5 +1,4 @@
 import { ChevronDown, EllipsisVertical } from "lucide-react";
-import { pressureValues } from "../data/demo";
 
 const yTicks = [120, 115, 110, 105, 100, 95, 90, 85, 80];
 const timeTicks = ["12:00", "15:00", "18:00", "21:00", "00:00", "03:00", "06:00", "09:00", "12:00"];
@@ -10,7 +9,7 @@ function linePath(values: number[]) {
   const plotWidth = 752;
   const plotHeight = 280;
   const points = values.map((value, index) => {
-    const x = plotLeft + (index / (values.length - 1)) * plotWidth;
+    const x = values.length === 1 ? plotLeft : plotLeft + (index / (values.length - 1)) * plotWidth;
     const y = plotTop + ((120 - value) / 40) * plotHeight;
     return [x, y] as const;
   });
@@ -29,21 +28,23 @@ interface PressureChartProps {
   live: boolean;
   onLiveToggle: () => void;
   values?: number[];
+  title?: string;
+  unit?: string;
 }
 
-export function PressureChart({ range, onRangeChange, live, onLiveToggle, values }: PressureChartProps) {
-  const chartValues = values && values.length > 1 ? values : pressureValues;
+export function PressureChart({ range, onRangeChange, live, onLiveToggle, values, title = "Pressure", unit = "psi" }: PressureChartProps) {
+  const chartValues = values ?? [];
   const path = linePath(chartValues);
   const finalValue = chartValues.at(-1) ?? 0;
-  const finalX = 790;
+  const finalX = chartValues.length === 1 ? 38 : 790;
   const finalY = 16 + ((120 - finalValue) / 40) * 280;
 
   return (
     <section className="chart-section" aria-labelledby="pressure-title">
       <div className="chart-header">
         <div>
-          <h2 id="pressure-title">Pressure ({range})</h2>
-          <div className="series-key"><span /> psi</div>
+          <h2 id="pressure-title">{title} ({range})</h2>
+          <div className="series-key"><span /> {unit}</div>
         </div>
         <div className="chart-actions">
           <button type="button" className={`live-control${live ? " active" : ""}`} onClick={onLiveToggle} aria-pressed={live}>
@@ -64,8 +65,8 @@ export function PressureChart({ range, onRangeChange, live, onLiveToggle, values
         </div>
       </div>
       <div className="chart-wrap">
-        <svg viewBox="0 0 812 332" role="img" aria-label={`Pressure fluctuates between 94 and 117 psi over ${range}, ending at ${finalValue} psi`}>
-          <title>Pressure time series for Pump P-101</title>
+        {chartValues.length === 0 ? <div className="chart-empty-state" role="status">No telemetry points are available for this range.</div> : <svg viewBox="0 0 812 332" role="img" aria-label={`${title} over ${range}, ending at ${finalValue} ${unit}`}>
+          <title>{title} time series</title>
           {yTicks.map((tick, index) => {
             const y = 16 + index * 35;
             return (
@@ -83,7 +84,7 @@ export function PressureChart({ range, onRangeChange, live, onLiveToggle, values
           <path className="pressure-line" d={path} />
           <circle className="final-ring" cx={finalX} cy={finalY} r="7" />
           <circle className="final-dot" cx={finalX} cy={finalY} r="3.7" />
-        </svg>
+        </svg>}
       </div>
     </section>
   );

@@ -25,6 +25,15 @@ ODF_OIDC_JWKS_URI=http://localhost:8080/realms/open-data-fusion/protocol/openid-
 ODF_OIDC_USER_CLAIM=preferred_username
 ```
 
+The realm defines API client roles for `data:read`, `data:ingest`,
+`relations:review`, `audit:read`, `platform:admin`, and three independent
+write-back roles. Demo users receive least-purpose role
+sets, while the `open-data-fusion-connector` confidential client has a service
+account limited to `data:read` and `data:ingest`. Override
+`ODF_CONNECTOR_CLIENT_SECRET` before importing the realm and use the client
+credentials grant only from a protected connector runtime; never ship that
+secret to the browser.
+
 Configure the browser client with:
 
 ```text

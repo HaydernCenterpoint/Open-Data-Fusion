@@ -9,10 +9,15 @@
   ],
   "scripts": {
     "dev": "concurrently --names api,web --prefix-colors cyan,blue \"npm run dev --workspace @open-data-fusion/api\" \"npm run dev --workspace @open-data-fusion/web\"",
+    "dev:edge": "npm run dev --workspace @open-data-fusion/edge-agent",
+    "dev:outbox": "npm run dev --workspace @open-data-fusion/outbox-worker",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "check": "npm run typecheck && npm run test && npm run build",
+    "check": "npm run typecheck && npm run test && npm run build && npm run infra:validate",
+    "check:release": "npm run check && npm audit --audit-level=high && npm ls --all",
+    "sbom": "npm sbom --sbom-format spdx",
+    "infra:validate": "python infra/postgres/scripts/validate_static.py",
     "infra:postgres": "docker compose up -d odf-postgres",
     "infra:migrate": "docker compose --profile migrate run --rm migrate",
     "infra:identity": "docker compose -f docker-compose.identity.yml up -d",
@@ -21,6 +26,11 @@
   "engines": {
     "node": ">=24.0.0",
     "npm": ">=11.0.0"
+  },
+  "overrides": {
+    "path-scurry@1.11.1": {
+      "lru-cache": "10.4.3"
+    }
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

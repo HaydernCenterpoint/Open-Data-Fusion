@@ -1,28 +1,94 @@
 import { PanelLeftOpen } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AssetTree } from "./components/AssetTree";
 import { AssetWorkspace } from "./components/AssetWorkspace";
+import { DiagramsWorkspace, MatchingWorkspace, SpatialWorkspace, WritebackWorkspace } from "./components/AdvancedPlatformWorkspaces";
 import { CanvasWorkspace } from "./components/CanvasWorkspace";
 import { IngestModal } from "./components/IngestModal";
 import { RelatedRail } from "./components/RelatedRail";
-import { Sidebar } from "./components/Sidebar";
+import {
+  ModelsWorkspace,
+  PipelinesWorkspace,
+  PlatformContextBar,
+  PlatformContextWorkspace,
+  SourcesWorkspace,
+  platformIssue,
+  type PlatformBootstrapState,
+} from "./components/PlatformWorkspaces";
+import { AuditWorkspace } from "./components/SectionWorkspaces";
+import { Sidebar, type NavigationLabel } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
-import { getExplorerSnapshot, getHealth, getWorkspace } from "./lib/api";
-import type { ApiWorkspace, ExplorerSnapshot } from "./types";
+import { getExplorerSnapshot, getHealth, getWorkspace, listAssets, listPlatformProjects, listPlatformTenants } from "./lib/api";
+import type { ApiAsset, ApiWorkspace, ExplorerSnapshot, PlatformContext, PlatformProject, PlatformSearchResult, PlatformTenant } from "./types";
+
+type ViewMode = "canvas" | "explorer" | "sources" | "pipelines" | "models" | "context" | "diagrams" | "matching" | "spatial" | "writeback" | "audit";
+
+const ASSET_PAGE_SIZE = 100;
+
+const viewByNavigation: Record<NavigationLabel, Exclude<ViewMode, "canvas">> = {
+  Explorer: "explorer",
+  Sources: "sources",
+  Pipelines: "pipelines",
+  Models: "models",
+  Context: "context",
+  Diagrams: "diagrams",
+  Matching: "matching",
+  Spatial: "spatial",
+  "Write-back": "writeback",
+  Audit: "audit",
+};
+
+const navigationByView: Record<Exclude<ViewMode, "canvas">, NavigationLabel> = {
+  explorer: "Explorer",
+  sources: "Sources",
+  pipelines: "Pipelines",
+  models: "Models",
+  context: "Context",
+  diagrams: "Diagrams",
+  matching: "Matching",
+  spatial: "Spatial",
+  writeback: "Write-back",
+  audit: "Audit",
+};
+
+type Captured<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+async function capture<T>(promise: Promise<T>): Promise<Captured<T>> {
+  try {
+    return { ok: true, value: await promise };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
 
 export default function App() {
   const [query, setQuery] = useState("");
-  const [viewMode, setViewMode] = useState<"canvas" | "explorer">("canvas");
-  const [treeVisible, setTreeVisible] = useState(() =>
-    typeof window.matchMedia !== "function"
-      ? true
-      : window.matchMedia("(min-width: 791px)").matches,
-  );
+  const [viewMode, setViewMode] = useState<ViewMode>("canvas");
+  const [treeVisible, setTreeVisible] = useState(() => typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 791px)").matches);
   const [ingestOpen, setIngestOpen] = useState(false);
   const [apiOnline, setApiOnline] = useState<boolean | null>(null);
+  const [assets, setAssets] = useState<ApiAsset[]>([]);
+  const [assetTotal, setAssetTotal] = useState(0);
+  const [assetsLoading, setAssetsLoading] = useState(true);
+  const [assetsLoadingMore, setAssetsLoadingMore] = useState(false);
+  const [assetsError, setAssetsError] = useState("");
+  const [selectedAssetId, setSelectedAssetId] = useState("");
   const [snapshot, setSnapshot] = useState<ExplorerSnapshot | null>(null);
+  const [explorerLoading, setExplorerLoading] = useState(false);
+  const [explorerError, setExplorerError] = useState("");
   const [workspace, setWorkspace] = useState<ApiWorkspace | null>(null);
+  const [platformTenants, setPlatformTenants] = useState<PlatformTenant[]>([]);
+  const [platformProjects, setPlatformProjects] = useState<PlatformProject[]>([]);
+  const [selectedTenantId, setSelectedTenantId] = useState("");
+  const [platformContext, setPlatformContext] = useState<PlatformContext | null>(null);
+  const [platformBootstrap, setPlatformBootstrap] = useState<PlatformBootstrapState>({ status: "loading", message: "Discovering accessible projects…" });
   const [toast, setToast] = useState("");
+  const explorerRequestRef = useRef<AbortController | null>(null);
+  const projectRequestRef = useRef<AbortController | null>(null);
 
   const notify = useCallback((message: string) => {
     setToast(message);
@@ -30,77 +96,234 @@ export default function App() {
   }, []);
 
   const acceptWorkspace = useCallback((nextWorkspace: ApiWorkspace) => {
-    setWorkspace((current) =>
-      !current || nextWorkspace.version >= current.version ? nextWorkspace : current,
-    );
+    setWorkspace((current) => !current || nextWorkspace.version >= current.version ? nextWorkspace : current);
   }, []);
+
+  const loadExplorerAsset = useCallback(async (externalId: string) => {
+    explorerRequestRef.current?.abort();
+    const controller = new AbortController();
+    explorerRequestRef.current = controller;
+    setSelectedAssetId(externalId);
+    setExplorerLoading(true);
+    setExplorerError("");
+    try {
+      const nextSnapshot = await getExplorerSnapshot(externalId, controller.signal);
+      if (!controller.signal.aborted) setSnapshot(nextSnapshot);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setSnapshot(null);
+        setExplorerError(errorMessage(error, `Asset '${externalId}' could not be loaded`));
+      }
+    } finally {
+      if (!controller.signal.aborted) setExplorerLoading(false);
+    }
+  }, []);
+
+  const openAsset = useCallback((externalId: string) => {
+    setViewMode("explorer");
+    setQuery("");
+    void loadExplorerAsset(externalId);
+  }, [loadExplorerAsset]);
+
+  const loadProjectsForTenant = useCallback(async (tenantId: string) => {
+    projectRequestRef.current?.abort();
+    const controller = new AbortController();
+    projectRequestRef.current = controller;
+    setSelectedTenantId(tenantId);
+    setPlatformContext(null);
+    setPlatformProjects([]);
+    setPlatformBootstrap({ status: "loading", message: `Loading projects for ${tenantId}…` });
+    try {
+      const page = await listPlatformProjects(tenantId, { limit: 100 }, controller.signal);
+      if (controller.signal.aborted) return;
+      setPlatformProjects(page.items);
+      if (page.items.length === 0) {
+        setPlatformBootstrap({ status: "empty", message: "No accessible projects were returned for this tenant." });
+        return;
+      }
+      const project = page.items.find((item) => item.id === "north-plant") ?? page.items[0];
+      setPlatformContext({ tenantId, projectId: project.id });
+      setPlatformBootstrap({ status: "ready", message: `${tenantId} / ${project.id}` });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const issue = platformIssue(error, "Projects could not be loaded");
+      setPlatformBootstrap({ status: issue.kind, message: issue.message });
+    }
+  }, []);
+
+  const retryPlatformBootstrap = useCallback(async () => {
+    setPlatformBootstrap({ status: "loading", message: "Discovering accessible projects…" });
+    try {
+      const page = await listPlatformTenants({ limit: 100 });
+      setPlatformTenants(page.items);
+      if (page.items.length === 0) {
+        setSelectedTenantId("");
+        setPlatformProjects([]);
+        setPlatformContext(null);
+        setPlatformBootstrap({ status: "empty", message: "No accessible tenants were returned for this identity." });
+        return;
+      }
+      const tenant = page.items.find((item) => item.id === "demo") ?? page.items[0];
+      void loadProjectsForTenant(tenant.id);
+    } catch (error) {
+      const issue = platformIssue(error, "Tenants could not be loaded");
+      setPlatformBootstrap({ status: issue.kind, message: issue.message });
+    }
+  }, [loadProjectsForTenant]);
 
   useEffect(() => {
     const controller = new AbortController();
-    getHealth(controller.signal).then(setApiOnline);
-    getExplorerSnapshot("P-101", controller.signal)
-      .then(setSnapshot)
-      .catch(() => {
-        // Keep the visual demo usable while the local API is starting.
-      });
-    getWorkspace("cooling-water-system", controller.signal)
-      .then(acceptWorkspace)
-      .catch(() => {
-        // Canvas remains available with its embedded seed while the API is starting.
-      });
-    return () => controller.abort();
-  }, [acceptWorkspace]);
+    setAssetsLoading(true);
+    void Promise.all([
+      getHealth(controller.signal),
+      capture(listAssets({ limit: ASSET_PAGE_SIZE, offset: 0 }, controller.signal)),
+      capture(getWorkspace("cooling-water-system", controller.signal)),
+      capture(listPlatformTenants({ limit: 100 }, controller.signal)),
+    ]).then(([online, assetResult, workspaceResult, tenantResult]) => {
+      if (controller.signal.aborted) return;
+      setApiOnline(online);
+      setAssetsLoading(false);
+      if (assetResult.ok) {
+        setAssets(assetResult.value.items);
+        setAssetTotal(assetResult.value.total);
+        setAssetsError("");
+        const preferredExternalId = workspaceResult.ok
+          ? workspaceResult.value.snapshot.nodes.find((node) => node.type === "asset" && typeof node.data.externalId === "string")?.data.externalId
+          : undefined;
+        const initialAsset = assetResult.value.items.find((asset) => asset.externalId === preferredExternalId) ?? assetResult.value.items[0];
+        if (initialAsset) void loadExplorerAsset(initialAsset.externalId);
+      } else {
+        setAssetsError(errorMessage(assetResult.error, "Assets could not be loaded"));
+      }
+      if (workspaceResult.ok) acceptWorkspace(workspaceResult.value);
+      if (tenantResult.ok) {
+        setPlatformTenants(tenantResult.value.items);
+        if (tenantResult.value.items.length === 0) {
+          setPlatformBootstrap({ status: "empty", message: "No accessible tenants were returned for this identity." });
+        } else {
+          const tenant = tenantResult.value.items.find((item) => item.id === "demo") ?? tenantResult.value.items[0];
+          void loadProjectsForTenant(tenant.id);
+        }
+      } else {
+        const issue = platformIssue(tenantResult.error, "Tenants could not be loaded");
+        setPlatformBootstrap({ status: issue.kind, message: issue.message });
+      }
+    });
+    return () => {
+      controller.abort();
+      explorerRequestRef.current?.abort();
+      projectRequestRef.current?.abort();
+    };
+  }, [acceptWorkspace, loadExplorerAsset, loadProjectsForTenant]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return undefined;
-
     const desktopViewport = window.matchMedia("(min-width: 791px)");
     const syncTreeVisibility = (event: MediaQueryListEvent) => setTreeVisible(event.matches);
     desktopViewport.addEventListener("change", syncTreeVisibility);
     return () => desktopViewport.removeEventListener("change", syncTreeVisibility);
   }, []);
 
-  const refreshExplorer = useCallback(() => {
-    getExplorerSnapshot("P-101")
-      .then(setSnapshot)
-      .catch(() => undefined);
-  }, []);
+  async function reloadAssets() {
+    setAssetsLoading(true);
+    setAssetsError("");
+    try {
+      const response = await listAssets({ limit: ASSET_PAGE_SIZE, offset: 0 });
+      setAssets(response.items);
+      setAssetTotal(response.total);
+      const preferred = response.items.find((asset) => asset.externalId === selectedAssetId) ?? response.items[0];
+      if (preferred) void loadExplorerAsset(preferred.externalId);
+    } catch (error) {
+      setAssetsError(errorMessage(error, "Assets could not be loaded"));
+    } finally {
+      setAssetsLoading(false);
+    }
+  }
 
-  function selectSearchResult(title: string) {
+  async function loadMoreAssets() {
+    if (assetsLoadingMore || assets.length >= assetTotal) return;
+    setAssetsLoadingMore(true);
+    setAssetsError("");
+    try {
+      const response = await listAssets({ limit: ASSET_PAGE_SIZE, offset: assets.length });
+      setAssets((current) => {
+        const knownIds = new Set(current.map((asset) => asset.externalId));
+        return [...current, ...response.items.filter((asset) => !knownIds.has(asset.externalId))];
+      });
+      setAssetTotal(response.total);
+    } catch (error) {
+      setAssetsError(errorMessage(error, "More assets could not be loaded"));
+    } finally {
+      setAssetsLoadingMore(false);
+    }
+  }
+
+  function navigate(label: NavigationLabel) {
+    setViewMode(viewByNavigation[label]);
+    if (label !== "Explorer") setTreeVisible(false);
+  }
+
+  function selectPlatformProject(projectId: string) {
+    if (!selectedTenantId) return;
+    setPlatformContext({ tenantId: selectedTenantId, projectId });
+    setPlatformBootstrap({ status: "ready", message: `${selectedTenantId} / ${projectId}` });
+  }
+
+  function selectSearchResult(result: PlatformSearchResult) {
     setQuery("");
-    notify(`${title} selected`);
+    if (result.entityType === "asset") {
+      openAsset(result.entityId);
+      return;
+    }
+    if (["pipeline", "pipelineRun", "qualityRule"].includes(result.entityType)) setViewMode("pipelines");
+    else if (result.entityType === "dataModel") setViewMode("models");
+    else if (["source", "connector", "dataset"].includes(result.entityType)) setViewMode("sources");
+    else if (result.entityType === "contextCandidate") setViewMode("context");
+    else if (result.entityType === "diagramExtraction") setViewMode("diagrams");
+    else if (result.entityType === "matchingEvaluation") setViewMode("matching");
+    else if (result.entityType === "spatialAssetLink") setViewMode("spatial");
+    else if (result.entityType === "writebackRequest") setViewMode("writeback");
+    else notify(`${result.title} selected`);
   }
 
   if (viewMode === "canvas") {
     return (
       <>
         <CanvasWorkspace snapshot={snapshot} workspace={workspace} onWorkspaceUpdated={acceptWorkspace} onOpenExplorer={() => setViewMode("explorer")} onNotify={notify} />
-        {toast && <div className="toast" role="status">{toast}</div>}
+        {toast ? <div className="toast" role="status">{toast}</div> : null}
       </>
     );
   }
 
+  const activeNavigation = navigationByView[viewMode];
+  const sectionView = viewMode !== "explorer";
+
   return (
-    <div className={`app-shell${treeVisible ? "" : " tree-collapsed"}`}>
-      <Sidebar onUnavailable={(label) => notify(`${label} is planned for the next milestone`)} />
-      <Topbar query={query} onQueryChange={setQuery} onResultSelect={selectSearchResult} apiOnline={apiOnline} />
-      {treeVisible ? (
-        <AssetTree onCollapse={() => setTreeVisible(false)} onSelect={(name) => name === "Pump P-101" ? notify(`${name} is already selected`) : notify(`${name} preview is coming next`)} />
-      ) : (
-        <button className="show-tree-button" type="button" onClick={() => setTreeVisible(true)} aria-label="Show asset hierarchy"><PanelLeftOpen size={20} /></button>
-      )}
+    <div className={`app-shell${treeVisible && viewMode === "explorer" ? "" : " tree-collapsed"}${sectionView ? " section-shell" : ""}`}>
+      <Sidebar active={activeNavigation} onNavigate={navigate} />
+      <Topbar query={query} onQueryChange={setQuery} onResultSelect={selectSearchResult} apiOnline={apiOnline} platformContext={platformContext} platformStatus={platformBootstrap.status} activeSection={activeNavigation} onSectionChange={navigate} />
+      {sectionView ? <PlatformContextBar tenants={platformTenants} projects={platformProjects} selectedTenantId={selectedTenantId} context={platformContext} state={platformBootstrap} onTenantChange={(tenantId) => void loadProjectsForTenant(tenantId)} onProjectChange={selectPlatformProject} onRetry={() => void retryPlatformBootstrap()} /> : null}
+      {viewMode === "explorer" ? (
+        <>
+          {treeVisible ? (
+            <AssetTree assets={assets} total={assetTotal} selectedExternalId={selectedAssetId} loading={assetsLoading} loadingMore={assetsLoadingMore} error={assetsError} onCollapse={() => setTreeVisible(false)} onSelect={(asset) => openAsset(asset.externalId)} onRetry={() => void reloadAssets()} onLoadMore={() => void loadMoreAssets()} />
+          ) : <button className="show-tree-button" type="button" onClick={() => setTreeVisible(true)} aria-label="Show asset hierarchy"><PanelLeftOpen size={20} /></button>}
+          <AssetWorkspace onIngest={() => setIngestOpen(true)} snapshot={snapshot} loading={explorerLoading} error={explorerError} onRetry={() => selectedAssetId && void loadExplorerAsset(selectedAssetId)} />
+          <RelatedRail snapshot={explorerLoading ? null : snapshot} onAction={notify} />
+        </>
+      ) : null}
+      {viewMode === "context" ? <PlatformContextWorkspace context={platformContext} onOpenAsset={openAsset} /> : null}
+      {viewMode === "audit" ? <AuditWorkspace /> : null}
+      {viewMode === "sources" ? <SourcesWorkspace context={platformContext} /> : null}
+      {viewMode === "pipelines" ? <PipelinesWorkspace context={platformContext} /> : null}
+      {viewMode === "models" ? <ModelsWorkspace context={platformContext} /> : null}
+      {viewMode === "diagrams" ? <DiagramsWorkspace context={platformContext} /> : null}
+      {viewMode === "matching" ? <MatchingWorkspace context={platformContext} /> : null}
+      {viewMode === "spatial" ? <SpatialWorkspace context={platformContext} /> : null}
+      {viewMode === "writeback" ? <WritebackWorkspace context={platformContext} /> : null}
       <button className="switch-canvas-button" type="button" onClick={() => setViewMode("canvas")}>Canvas <span>⌘K</span></button>
-      <AssetWorkspace onIngest={() => setIngestOpen(true)} snapshot={snapshot} />
-      <RelatedRail onAction={notify} />
-      <IngestModal
-        open={ingestOpen}
-        onClose={() => setIngestOpen(false)}
-        onComplete={(message) => {
-          notify(message);
-          refreshExplorer();
-        }}
-      />
-      {toast && <div className="toast" role="status">{toast}</div>}
+      <IngestModal open={ingestOpen} onClose={() => setIngestOpen(false)} onComplete={(message) => { notify(message); if (selectedAssetId) void loadExplorerAsset(selectedAssetId); }} />
+      {toast ? <div className="toast" role="status">{toast}</div> : null}
     </div>
   );
 }

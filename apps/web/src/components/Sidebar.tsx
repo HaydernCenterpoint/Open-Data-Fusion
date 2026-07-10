@@ -1,8 +1,12 @@
 import {
   Box,
   ChevronsLeft,
+  Cuboid,
   Database,
+  FileSearch,
+  GitCompareArrows,
   Network,
+  ShieldAlert,
   ShieldCheck,
   Tags,
   Workflow,
@@ -14,27 +18,35 @@ const navigation = [
   { label: "Pipelines", icon: Workflow },
   { label: "Models", icon: Box },
   { label: "Context", icon: Tags },
+  { label: "Diagrams", icon: FileSearch },
+  { label: "Matching", icon: GitCompareArrows },
+  { label: "Spatial", icon: Cuboid },
+  { label: "Write-back", icon: ShieldAlert },
   { label: "Audit", icon: ShieldCheck },
-];
+] as const;
+
+export type NavigationLabel = (typeof navigation)[number]["label"];
+export const navigationLabels: NavigationLabel[] = navigation.map(({ label }) => label);
 
 interface SidebarProps {
-  onUnavailable: (label: string) => void;
+  active: NavigationLabel;
+  onNavigate: (label: NavigationLabel) => void;
 }
 
-export function Sidebar({ onUnavailable }: SidebarProps) {
+export function Sidebar({ active, onNavigate }: SidebarProps) {
   return (
     <aside className="sidebar" aria-label="Primary navigation">
       <div className="brand">Open Data Fusion</div>
       <nav className="primary-nav">
         {navigation.map(({ label, icon: Icon }) => {
-          const active = label === "Explorer";
+          const isActive = label === active;
           return (
             <button
-              className={`nav-item${active ? " is-active" : ""}`}
+              className={`nav-item${isActive ? " is-active" : ""}`}
               key={label}
               type="button"
-              aria-current={active ? "page" : undefined}
-              onClick={() => !active && onUnavailable(label)}
+              aria-current={isActive ? "page" : undefined}
+              onClick={() => onNavigate(label)}
             >
               <Icon size={25} strokeWidth={1.65} aria-hidden="true" />
               <span>{label}</span>

@@ -164,20 +164,26 @@ describe('Open Data Fusion API vertical slice', () => {
   it('reviews a proposed relation once and exposes the audit event', async () => {
     const response = await request(app)
       .post('/api/v1/relations/rel-p101-manual/review')
+      .set('x-odf-user', 'domain.expert@example.com')
       .set('x-correlation-id', 'review-test')
-      .send({ decision: 'accepted', reviewer: 'domain.expert@example.com', comment: 'Tag and drawing agree' });
+      .send({ decision: 'accepted', reviewer: 'forged.reviewer@example.com', comment: 'Tag and drawing agree' });
 
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({ id: 'rel-p101-manual', status: 'accepted', reviewer: 'domain.expert@example.com' });
 
     const secondReview = await request(app)
       .post('/api/v1/relations/rel-p101-manual/review')
+      .set('x-odf-user', 'another.reviewer@example.com')
       .send({ decision: 'rejected', reviewer: 'another.reviewer@example.com' });
     expect(secondReview.status).toBe(409);
 
     const audit = await request(app).get('/api/v1/audit').query({ entityType: 'relation', entityId: 'rel-p101-manual' });
     expect(audit.status).toBe(200);
-    expect(audit.body.items[0]).toMatchObject({ action: 'relation.accepted', correlationId: 'review-test' });
+    expect(audit.body.items[0]).toMatchObject({
+      action: 'relation.accepted',
+      actor: 'domain.expert@example.com',
+      correlationId: 'review-test',
+    });
   });
 
   it('keeps immutable workspace revisions, rejects stale writes, and rolls back by appending a revision', async () => {

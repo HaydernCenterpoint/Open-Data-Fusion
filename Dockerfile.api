@@ -1,0 +1,40 @@
+# Production image for the API build context. The current application still
+# needs its PostgreSQL repository adapter before this image is promoted beyond
+# the compose preview profile.
+FROM node:24-alpine AS build
+
+WORKDIR /workspace
+
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/edge-agent/package.json apps/edge-agent/package.json
+COPY apps/outbox-worker/package.json apps/outbox-worker/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/platform-core/package.json packages/platform-core/package.json
+COPY packages/postgres-runtime/package.json packages/postgres-runtime/package.json
+RUN npm ci --workspace @open-data-fusion/api --include-workspace-root
+
+COPY tsconfig.base.json ./
+COPY apps/api ./apps/api
+COPY packages/contracts ./packages/contracts
+COPY packages/platform-core ./packages/platform-core
+RUN npm run build --workspace @open-data-fusion/api
+RUN npm prune --omit=dev
+
+FROM node:24-alpine AS runtime
+
+ENV NODE_ENV=production
+ENV PORT=4310
+ENV ODF_METRICS_TOKEN_FILE=/run/secrets/odf_metrics_token
+WORKDIR /workspace
+
+COPY --from=build --chown=node:node /workspace/node_modules ./node_modules
+COPY --from=build --chown=node:node /workspace/apps/api/package.json ./apps/api/package.json
+COPY --from=build --chown=node:node /workspace/apps/api/dist ./apps/api/dist
+COPY --from=build --chown=node:node /workspace/packages/platform-core/package.json ./packages/platform-core/package.json
+COPY --from=build --chown=node:node /workspace/packages/platform-core/dist ./packages/platform-core/dist
+
+USER node
+EXPOSE 4310
+CMD ["sh", "-ec", "if [ -r \"$ODF_METRICS_TOKEN_FILE\" ]; then export ODF_METRICS_TOKEN=\"$(cat \"$ODF_METRICS_TOKEN_FILE\")\"; fi; exec node apps/api/dist/src/server.js"]

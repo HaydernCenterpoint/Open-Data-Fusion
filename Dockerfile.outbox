@@ -1,0 +1,32 @@
+# Durable outbox publisher. The container has no embedded connection strings:
+# Compose/Kubernetes must inject the least-privilege PostgreSQL and Redis URLs.
+FROM node:24-alpine AS build
+
+WORKDIR /workspace
+
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/edge-agent/package.json apps/edge-agent/package.json
+COPY apps/outbox-worker/package.json apps/outbox-worker/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/platform-core/package.json packages/platform-core/package.json
+COPY packages/postgres-runtime/package.json packages/postgres-runtime/package.json
+RUN npm ci --workspace @open-data-fusion/outbox-worker --include-workspace-root
+
+COPY tsconfig.base.json ./
+COPY apps/outbox-worker ./apps/outbox-worker
+RUN npm run build --workspace @open-data-fusion/outbox-worker
+RUN npm prune --omit=dev
+
+FROM node:24-alpine AS runtime
+
+ENV NODE_ENV=production
+WORKDIR /workspace
+
+COPY --from=build --chown=node:node /workspace/node_modules ./node_modules
+COPY --from=build --chown=node:node /workspace/apps/outbox-worker/package.json ./apps/outbox-worker/package.json
+COPY --from=build --chown=node:node /workspace/apps/outbox-worker/dist ./apps/outbox-worker/dist
+
+USER node
+CMD ["node", "apps/outbox-worker/dist/src/server.js"]

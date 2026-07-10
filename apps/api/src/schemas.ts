@@ -36,6 +36,24 @@ export const telemetryQuerySchema = z
     message: '`from` must be before or equal to `to`',
   });
 
+export const telemetryLatestQuerySchema = z.object({
+  timeSeriesExternalId: externalId.optional(),
+  at: timestamp.optional(),
+});
+
+export const telemetryAggregateQuerySchema = z
+  .object({
+    from: timestamp.optional(),
+    to: timestamp.optional(),
+    timeSeriesExternalId: externalId.optional(),
+    bucketMs: z.coerce.number().int().min(1_000).max(30 * 24 * 60 * 60 * 1_000),
+    aggregation: z.enum(['avg', 'min', 'max', 'sum', 'count']).default('avg'),
+    limit: z.coerce.number().int().min(1).max(5_000).default(1_000),
+  })
+  .refine(({ from, to }) => from === undefined || to === undefined || from <= to, {
+    message: '`from` must be before or equal to `to`',
+  });
+
 export const auditListQuerySchema = z.object({
   action: z.string().trim().min(1).max(100).optional(),
   entityType: z.string().trim().min(1).max(100).optional(),
@@ -257,12 +275,14 @@ export const ingestBundleSchema = z
 
 export const relationReviewSchema = z.object({
   decision: z.enum(['accepted', 'rejected']),
-  reviewer: z.string().trim().min(1).max(255),
+  reviewer: z.string().trim().min(1).max(255).optional().default('authenticated-user'),
   comment: z.string().trim().max(2_000).nullable().optional(),
 });
 
 export type AssetListQuery = z.infer<typeof assetListQuerySchema>;
 export type TelemetryQuery = z.infer<typeof telemetryQuerySchema>;
+export type TelemetryLatestQuery = z.infer<typeof telemetryLatestQuerySchema>;
+export type TelemetryAggregateQuery = z.infer<typeof telemetryAggregateQuerySchema>;
 export type AuditListQuery = z.infer<typeof auditListQuerySchema>;
 export type IngestBundle = z.infer<typeof ingestBundleSchema>;
 export type RelationReview = z.infer<typeof relationReviewSchema>;

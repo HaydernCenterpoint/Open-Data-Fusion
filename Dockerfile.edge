@@ -1,0 +1,33 @@
+# Read-only industrial edge agent with durable local archive and queue storage.
+FROM node:24-alpine AS build
+
+WORKDIR /workspace
+
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/edge-agent/package.json apps/edge-agent/package.json
+COPY apps/outbox-worker/package.json apps/outbox-worker/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/platform-core/package.json packages/platform-core/package.json
+COPY packages/postgres-runtime/package.json packages/postgres-runtime/package.json
+RUN npm ci --workspace @open-data-fusion/edge-agent --include-workspace-root
+
+COPY tsconfig.base.json ./
+COPY apps/edge-agent ./apps/edge-agent
+RUN npm run build --workspace @open-data-fusion/edge-agent
+RUN npm prune --omit=dev
+
+FROM node:24-alpine AS runtime
+
+ENV NODE_ENV=production
+ENV ODF_EDGE_CONFIG=/etc/open-data-fusion/edge-agent.json
+WORKDIR /workspace
+
+COPY --from=build --chown=node:node /workspace/node_modules ./node_modules
+COPY --from=build --chown=node:node /workspace/apps/edge-agent/package.json ./apps/edge-agent/package.json
+COPY --from=build --chown=node:node /workspace/apps/edge-agent/dist ./apps/edge-agent/dist
+RUN mkdir -p /workspace/data/edge && chown node:node /workspace/data/edge
+
+USER node
+CMD ["node", "apps/edge-agent/dist/src/server.js"]

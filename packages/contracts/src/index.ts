@@ -245,3 +245,5 @@ export type WorkspaceLiveEvent =
       member: WorkspaceMember;
       occurredAt: string;
     };
+
+export * from "./platform.js";

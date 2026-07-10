@@ -1,0 +1,63 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm ls --all
+      - name: Enforce dependency license policy
+        run: node scripts/check-dependency-licenses.mjs
+      - run: npm audit --audit-level=high
+      - name: Generate SPDX SBOM
+        run: npm sbom --sbom-format spdx > open-data-fusion.spdx.json
+      - name: Validate SBOM
+        run: node -e "const fs=require('node:fs'); const sbom=JSON.parse(fs.readFileSync('open-data-fusion.spdx.json','utf8')); if(sbom.spdxVersion!=='SPDX-2.3'||!Array.isArray(sbom.packages)||sbom.packages.length===0) process.exit(1)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: open-data-fusion-spdx
+          path: open-data-fusion.spdx.json
+          if-no-files-found: error
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
+
+  codeql:
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: github/codeql-action/analyze@v4
