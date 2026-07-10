@@ -1,7 +1,7 @@
 # Production image for the API build context. The current application still
 # needs its PostgreSQL repository adapter before this image is promoted beyond
 # the compose preview profile.
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 
 WORKDIR /workspace
 
@@ -23,7 +23,7 @@ COPY packages/platform-core ./packages/platform-core
 RUN npm run build --workspace @open-data-fusion/api
 RUN npm prune --omit=dev
 
-FROM node:24-alpine AS runtime
+FROM node:26-alpine AS runtime
 
 ENV NODE_ENV=production
 ENV PORT=4310

@@ -1,5 +1,5 @@
 # Read-only industrial edge agent with durable local archive and queue storage.
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 
 WORKDIR /workspace
 
@@ -19,7 +19,7 @@ COPY apps/edge-agent ./apps/edge-agent
 RUN npm run build --workspace @open-data-fusion/edge-agent
 RUN npm prune --omit=dev
 
-FROM node:24-alpine AS runtime
+FROM node:26-alpine AS runtime
 
 ENV NODE_ENV=production
 ENV ODF_EDGE_CONFIG=/etc/open-data-fusion/edge-agent.json

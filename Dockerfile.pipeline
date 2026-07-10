@@ -1,6 +1,6 @@
 # Durable pipeline worker. Runtime credentials and the tenant/project allowlist
 # are injected by the deployment; the image contains no connection strings.
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 
 WORKDIR /workspace
 
@@ -21,7 +21,7 @@ COPY apps/pipeline-worker ./apps/pipeline-worker
 RUN npm run build --workspace @open-data-fusion/pipeline-worker
 RUN npm prune --omit=dev
 
-FROM node:24-alpine AS runtime
+FROM node:26-alpine AS runtime
 
 ENV NODE_ENV=production
 WORKDIR /workspace

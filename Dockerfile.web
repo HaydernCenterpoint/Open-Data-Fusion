@@ -1,6 +1,6 @@
 # Static web build. An ingress/proxy must route /api to the API service before
 # this image is used outside the compose preview profile.
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 
 WORKDIR /workspace
 

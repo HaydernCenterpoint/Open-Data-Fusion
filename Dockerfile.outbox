@@ -1,6 +1,6 @@
 # Durable outbox publisher. The container has no embedded connection strings:
 # Compose/Kubernetes must inject the least-privilege PostgreSQL and Redis URLs.
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 
 WORKDIR /workspace
 
@@ -20,7 +20,7 @@ COPY apps/outbox-worker ./apps/outbox-worker
 RUN npm run build --workspace @open-data-fusion/outbox-worker
 RUN npm prune --omit=dev
 
-FROM node:24-alpine AS runtime
+FROM node:26-alpine AS runtime
 
 ENV NODE_ENV=production
 WORKDIR /workspace
