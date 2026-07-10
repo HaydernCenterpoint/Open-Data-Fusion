@@ -1,0 +1,19 @@
+name: open-data-fusion-identity
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.6.4
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: "${KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME:-admin}"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:-change-this-local-admin-password}"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      ODF_DEMO_USER_PASSWORD: "${ODF_DEMO_USER_PASSWORD:-change-this-local-demo-password}"
+    ports:
+      - "127.0.0.1:${ODF_KEYCLOAK_PORT:-8080}:8080"
+      - "127.0.0.1:${ODF_KEYCLOAK_MANAGEMENT_PORT:-9000}:9000"
+    volumes:
+      - ./infra/keycloak/open-data-fusion-realm.json:/opt/keycloak/data/import/open-data-fusion-realm.json:ro
+    mem_limit: 1g

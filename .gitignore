@@ -1,0 +1,19 @@
+node_modules/
+dist/
+coverage/
+.vite/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.db-shm
+data/*.db-wal
+apps/api/data/
+
+# Clean-room research captures are local evidence, not redistributable product assets.
+docs/design/cognite-demo-reference.png
+docs/design/reference/

@@ -1,0 +1,55 @@
+name: open-data-fusion
+
+services:
+  odf-postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${ODF_POSTGRES_DB:-odf}"
+      POSTGRES_USER: "${ODF_POSTGRES_ADMIN_USER:-odf_migrator}"
+      POSTGRES_PASSWORD: "${ODF_POSTGRES_ADMIN_PASSWORD:?Set ODF_POSTGRES_ADMIN_PASSWORD via a secret manager or environment variable}"
+      POSTGRES_INITDB_ARGS: "--data-checksums --auth-host=scram-sha-256"
+      TZ: UTC
+    command:
+      - postgres
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - timezone=UTC
+      - -c
+      - log_timezone=UTC
+      - -c
+      - log_min_duration_statement=1000
+    ports:
+      - "127.0.0.1:${ODF_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - odf-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    shm_size: 256mb
+
+  migrate:
+    image: postgres:17-alpine
+    profiles: ["migrate"]
+    restart: "no"
+    depends_on:
+      odf-postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: odf-postgres
+      PGPORT: "5432"
+      PGDATABASE: "${ODF_POSTGRES_DB:-odf}"
+      PGUSER: "${ODF_POSTGRES_ADMIN_USER:-odf_migrator}"
+      PGPASSWORD: "${ODF_POSTGRES_ADMIN_PASSWORD:?Set ODF_POSTGRES_ADMIN_PASSWORD via a secret manager or environment variable}"
+      PGTZ: UTC
+    volumes:
+      - ./infra/postgres/migrations:/migrations:ro
+      - ./infra/postgres/scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/migrate.sh"]
+
+volumes:
+  odf-postgres-data:

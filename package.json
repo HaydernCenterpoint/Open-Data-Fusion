@@ -1,0 +1,29 @@
+{
+  "name": "open-data-fusion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-source industrial data integration and contextualization platform.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently --names api,web --prefix-colors cyan,blue \"npm run dev --workspace @open-data-fusion/api\" \"npm run dev --workspace @open-data-fusion/web\"",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "infra:postgres": "docker compose up -d odf-postgres",
+    "infra:migrate": "docker compose --profile migrate run --rm migrate",
+    "infra:identity": "docker compose -f docker-compose.identity.yml up -d",
+    "infra:identity:down": "docker compose -f docker-compose.identity.yml down"
+  },
+  "engines": {
+    "node": ">=24.0.0",
+    "npm": ">=11.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  }
+}
