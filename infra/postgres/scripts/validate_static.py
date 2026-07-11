@@ -37,7 +37,7 @@ def canonical_sql_digest(path: Path) -> str:
 
 def validate_manifest() -> list[Path]:
     migration_paths = sorted(MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql"))
-    require(migration_paths, "no numbered PostgreSQL migrations found")
+    require(bool(migration_paths), "no numbered PostgreSQL migrations found")
 
     manifest_path = MIGRATIONS / "SHA256SUMS"
     manifest_rows = [line.split() for line in read(manifest_path).splitlines() if line.strip()]
@@ -107,6 +107,20 @@ def validate_migrations(migration_paths: list[Path]) -> None:
 
     validate_tenant_foreign_keys(platform)
 
+    cutover = read(MIGRATIONS / "004_sqlite_cutover_role.sql")
+    for guardrail in [
+        "CREATE ROLE odf_cutover NOLOGIN NOSUPERUSER",
+        "ALTER ROLE odf_cutover WITH NOLOGIN NOSUPERUSER",
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA odf FROM odf_cutover",
+        "GRANT SELECT ON odf.schema_migrations TO odf_cutover",
+        "odf.workspaces",
+        "odf.workspace_revisions",
+        "odf.workspace_members",
+        "odf.audit_log",
+        "GRANT SELECT, UPDATE ON SEQUENCE odf.audit_log_id_seq TO odf_cutover",
+    ]:
+        require(guardrail in cutover, f"missing SQLite cutover role guardrail: {guardrail}")
+
 
 def validate_tenant_foreign_keys(sql: str) -> None:
     """Catch scope-breaking composite FKs before a migration reaches PostgreSQL.
@@ -117,13 +131,12 @@ def validate_tenant_foreign_keys(sql: str) -> None:
     unique key, which is especially important for tenant/project-scoped keys.
     """
 
-    tables = dict(
-        re.findall(
-            r"CREATE TABLE IF NOT EXISTS odf\.(\w+) \((.*?)\n\);",
-            sql,
-            flags=re.DOTALL,
-        )
+    table_matches: list[tuple[str, str]] = re.findall(
+        r"CREATE TABLE IF NOT EXISTS odf\.(\w+) \((.*?)\n\);",
+        sql,
+        flags=re.DOTALL,
     )
+    tables: dict[str, str] = dict(table_matches)
     require(len(tables) >= 30, "could not identify every data-plane table for FK validation")
 
     unique_keys: dict[str, set[tuple[str, ...]]] = {}
@@ -145,12 +158,13 @@ def validate_tenant_foreign_keys(sql: str) -> None:
         table_columns[table] = columns
         unique_keys[table] = keys
 
-    foreign_keys = re.compile(
+    foreign_keys: re.Pattern[str] = re.compile(
         r"FOREIGN KEY \(([^)]+)\)\s*\n\s*REFERENCES odf\.(\w+)\(([^)]+)\)"
     )
     for table, definition in tables.items():
         require("tenant_id" in table_columns[table], f"{table} is missing mandatory tenant_id")
-        for local_raw, referenced_table, referenced_raw in foreign_keys.findall(definition):
+        foreign_key_matches: list[tuple[str, str, str]] = foreign_keys.findall(definition)
+        for local_raw, referenced_table, referenced_raw in foreign_key_matches:
             local = tuple(column.strip() for column in local_raw.split(","))
             referenced = tuple(column.strip() for column in referenced_raw.split(","))
             missing = set(local) - table_columns[table]
@@ -162,12 +176,13 @@ def validate_tenant_foreign_keys(sql: str) -> None:
             )
 
     rls_table_names = re.search(
-        r"FOREACH table_name IN ARRAY ARRAY\[(.*?)\] LOOP\s+"
+        r"FOREACH table_name IN ARRAY ARRAY\[(.*?)\] LOOP\s+" +
         r"EXECUTE format\('ALTER TABLE odf\.\%I ENABLE ROW LEVEL SECURITY'",
         sql,
         flags=re.DOTALL,
     )
-    require(rls_table_names is not None, "could not identify the tenant RLS table list")
+    if rls_table_names is None:
+        raise AssertionError("could not identify the tenant RLS table list")
     rls_tables = set(re.findall(r"'(\w+)'", rls_table_names.group(1)))
     missing_rls = sorted(set(tables) - rls_tables)
     require(not missing_rls, f"tenant-scoped tables missing from RLS enforcement: {missing_rls}")
@@ -198,6 +213,8 @@ def validate_runtime_artifacts() -> None:
     web_dockerfile = read(ROOT / "Dockerfile.web")
     outbox_dockerfile = read(ROOT / "Dockerfile.outbox")
     require("USER node" in api_dockerfile, "API runtime image must not run as root")
+    require("COPY packages/postgres-runtime ./packages/postgres-runtime" in api_dockerfile, "API build must include the PostgreSQL runtime workspace")
+    require("/workspace/packages/postgres-runtime/dist ./packages/postgres-runtime/dist" in api_dockerfile, "API image must include the PostgreSQL runtime build")
     require("ODF_METRICS_TOKEN_FILE=/run/secrets/odf_metrics_token" in api_dockerfile, "API container must load its metrics token from the mounted secret")
     require("nginx-unprivileged" in web_dockerfile, "web runtime image must use an unprivileged server")
     require("USER node" in outbox_dockerfile, "outbox runtime image must not run as root")

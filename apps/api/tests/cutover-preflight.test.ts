@@ -9,7 +9,11 @@ import {
   runSqliteCutoverPreflightCli,
   writeSqliteCutoverPreflightBundle,
 } from '../src/cutover-preflight-cli.js';
-import { createSqliteCutoverPreflightReport, SqliteCutoverPreflightError } from '../src/cutover-preflight.js';
+import {
+  createSqliteCutoverPreflightReport,
+  parseSqliteCutoverPreflightReport,
+  SqliteCutoverPreflightError,
+} from '../src/cutover-preflight.js';
 import { FusionDatabase } from '../src/database.js';
 
 function reverseJsonObjectKeys(value: unknown): unknown {
@@ -140,6 +144,30 @@ describe('SQLite cutover preflight', () => {
       expect(checksum).toMatch(/^[a-f0-9]{64}$/u);
     }
     expect(JSON.parse(JSON.stringify(report))).toEqual(report);
+  });
+
+  it('validates a serialized preflight bundle before cutover import', () => {
+    const report = createSqliteCutoverPreflightReport(database.database, databasePath);
+
+    expect(parseSqliteCutoverPreflightReport(JSON.parse(JSON.stringify(report)) as unknown)).toEqual(report);
+  });
+
+  it('rejects a bundle whose declared counts do not match its records', () => {
+    const report = createSqliteCutoverPreflightReport(database.database, databasePath);
+    report.counts.revisions += 1;
+
+    expect(() => parseSqliteCutoverPreflightReport(report)).toThrow(
+      "SQLite cutover bundle count 'revisions' is 2, expected 1",
+    );
+  });
+
+  it('rejects timestamps that cannot round-trip losslessly through the importer', () => {
+    const report = createSqliteCutoverPreflightReport(database.database, databasePath);
+    report.workspaces[0]!.createdAt = '2026-07-10T00:00:00Z';
+
+    expect(() => parseSqliteCutoverPreflightReport(report)).toThrow(
+      "SQLite cutover bundle is invalid at 'workspaces.0.createdAt': Must be a canonical UTC ISO-8601 timestamp",
+    );
   });
 
   it('rejects a workspace whose revision history no longer starts at version one', () => {

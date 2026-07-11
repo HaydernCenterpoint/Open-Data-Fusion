@@ -13,7 +13,7 @@ This project is independently implemented. It is not affiliated with, endorsed b
 - Full semantic Canvas authoring for move, edit, resize, connect, delete, undo, and redo.
 - Workspace roles, owner-managed membership, live presence, and committed updates over SSE.
 - End-to-end OIDC login (Authorization Code + PKCE), JWT resource-server verification, authenticated SSE, and a reproducible local Keycloak realm.
-- PostgreSQL workspace/outbox migration foundation for the planned multi-instance cutover.
+- PostgreSQL workspace/outbox migration foundation plus a transactional SQLite cutover rehearsal/import workflow for the planned multi-instance cutover.
 - Responsive React Industrial Canvas plus an Asset Explorer data-detail view.
 - URL-synchronized views, assets, tenants, and projects with browser back/forward support.
 - Timestamp-aware telemetry charts with data-derived axes and honest latest-available fallbacks.
@@ -62,7 +62,27 @@ npm run cutover:preflight --workspace @open-data-fusion/api -- `
   --output "$env:TEMP\odf-cutover-preflight.json"
 ```
 
-The command opens SQLite read-only, validates workspace history and membership invariants, then writes the JSON bundle only when validation succeeds. It does not import into PostgreSQL, alter SQLite, or enable dual writes; it is a rehearsal input for the cutover described by [ADR 0005](docs/architecture/0005-postgresql-cutover-and-transactional-outbox.md).
+The command opens SQLite read-only, validates workspace history and membership invariants, then writes the JSON bundle only when validation succeeds. It does not alter SQLite or enable dual writes.
+
+After applying PostgreSQL migrations 001–004, connect with a dedicated login that inherits the non-login `odf_cutover` role. Keep the connection URL in the environment rather than a command argument:
+
+```powershell
+$env:ODF_POSTGRES_URL = "postgresql://odf_cutover_login:secret@localhost:5432/odf"
+npm run cutover:import --workspace @open-data-fusion/api -- `
+  --bundle "$env:TEMP\odf-cutover-preflight.json" `
+  --database data/open-data-fusion.db
+```
+
+The import command is a dry-run by default: it takes a PostgreSQL advisory lock, verifies the target is empty and current, inserts all four workspace-history datasets, validates counts, current revisions, owners, and canonical checksums, then rolls the transaction back. Add `--apply` only inside the planned maintenance window to commit the same verified transaction:
+
+```powershell
+npm run cutover:import --workspace @open-data-fusion/api -- `
+  --bundle "$env:TEMP\odf-cutover-preflight.json" `
+  --database data/open-data-fusion.db `
+  --apply
+```
+
+Legacy non-UUID correlation IDs are mapped deterministically to PostgreSQL UUIDs; the result reports the mapping checksum and remap count. The importer never creates historical outbox events and refuses a non-empty target. This completes an export/import rehearsal for [ADR 0005](docs/architecture/0005-postgresql-cutover-and-transactional-outbox.md); it still does not switch the API runtime from SQLite to PostgreSQL.
 
 ```powershell
 npm run check
@@ -73,8 +93,10 @@ npm run check
 ```text
 apps/api            Local API, SQLite schema, seed data, ingest, audit, workspace revisions
 apps/web            Responsive React/Vite Canvas, Explorer, and governed platform surfaces
-packages/contracts  Shared domain and API types
-infra/keycloak      Reproducible local OIDC realm and browser/API clients
+packages/contracts          Shared domain and API types
+packages/platform-core      Shared governed platform policies and domain logic
+packages/postgres-runtime   Typed PostgreSQL repositories and transaction boundary
+infra/keycloak              Reproducible local OIDC realm and browser/API clients
 infra/postgres      Production workspace, history, membership, audit, and outbox migration
 docs/design         Accepted UI concept and design system
 docs/architecture   Architecture decision records

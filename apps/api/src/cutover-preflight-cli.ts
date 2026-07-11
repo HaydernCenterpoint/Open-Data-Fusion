@@ -23,6 +23,22 @@ export function parsePreflightArguments(args: readonly string[]): { databasePath
   return { databasePath, outputPath };
 }
 
+export function readSqliteCutoverSource(databasePath: string): SqliteCutoverPreflightReport {
+  if (!existsSync(databasePath)) throw new Error(`SQLite database was not found: ${databasePath}`);
+
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    database.exec('BEGIN');
+    try {
+      return createSqliteCutoverPreflightReport(database, databasePath);
+    } finally {
+      database.exec('ROLLBACK');
+    }
+  } finally {
+    database.close();
+  }
+}
+
 export function writeSqliteCutoverPreflightBundle({
   databasePath,
   outputPath,
@@ -33,17 +49,11 @@ export function writeSqliteCutoverPreflightBundle({
   if (resolve(databasePath) === resolve(outputPath)) {
     throw new Error('Output path must not resolve to the supplied SQLite database');
   }
-  if (!existsSync(databasePath)) throw new Error(`SQLite database was not found: ${databasePath}`);
 
-  const database = new DatabaseSync(databasePath, { readOnly: true });
-  try {
-    const report = createSqliteCutoverPreflightReport(database, databasePath);
-    mkdirSync(dirname(outputPath), { recursive: true });
-    writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-    return report;
-  } finally {
-    database.close();
-  }
+  const report = readSqliteCutoverSource(databasePath);
+  mkdirSync(dirname(outputPath), { recursive: true });
+  writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  return report;
 }
 
 export function runSqliteCutoverPreflightCli(args: readonly string[]): SqliteCutoverPreflightReport {

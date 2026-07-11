@@ -17,6 +17,40 @@ runtime defaults. Production requires an explicit `ODF_OBJECT_STORE_PATH`.
 Authentication profiles and OIDC variables are documented in
 [`docs/security/authentication.md`](../../docs/security/authentication.md).
 
+## SQLite workspace cutover
+
+Generate the read-only source bundle first:
+
+```powershell
+npm run cutover:preflight -- `
+  --database data/open-data-fusion.db `
+  --output "$env:TEMP\odf-cutover-preflight.json"
+```
+
+Apply PostgreSQL migrations 001–004 and use a dedicated login that inherits the
+non-login `odf_cutover` role. `ODF_POSTGRES_URL` is required and is deliberately
+not accepted as a CLI argument. The command rejects superusers and verifies the
+login's table and audit-sequence privileges. Rehearsal is non-destructive by
+default:
+
+```powershell
+$env:ODF_POSTGRES_URL = "postgresql://odf_cutover_login:secret@localhost:5432/odf"
+npm run cutover:import -- `
+  --bundle "$env:TEMP\odf-cutover-preflight.json" `
+  --database data/open-data-fusion.db
+```
+
+The importer verifies the bundle, current SQLite source, required migrations,
+empty target tables, row counts, owner/revision invariants, and canonical target
+checksums inside one transaction, then rolls back. `--database` is mandatory
+with `--apply`, so the frozen source is checked again immediately before the
+PostgreSQL connection opens. Add `--apply` to commit that same transaction in
+the maintenance window. It preserves valid UUID correlation IDs and maps legacy
+text IDs with `open-data-fusion.uuidv8.sha256.v1`, reporting a mapping checksum
+for evidence.
+Historical outbox events are intentionally not synthesized. This command does
+not switch the API runtime to PostgreSQL.
+
 ## API
 
 - `GET /health` and `GET /api/health`
@@ -188,3 +222,8 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+The default suite uses a recording transaction client. To exercise the exact
+import SQL against a migrated, empty PostgreSQL database and a non-superuser
+cutover login, set `ODF_TEST_CUTOVER_POSTGRES_URL`; the live test still uses the
+rollback-only rehearsal path.

@@ -20,6 +20,7 @@ COPY tsconfig.base.json ./
 COPY apps/api ./apps/api
 COPY packages/contracts ./packages/contracts
 COPY packages/platform-core ./packages/platform-core
+COPY packages/postgres-runtime ./packages/postgres-runtime
 RUN npm run build --workspace @open-data-fusion/api
 RUN npm prune --omit=dev
 
@@ -35,6 +36,8 @@ COPY --from=build --chown=node:node /workspace/apps/api/package.json ./apps/api/
 COPY --from=build --chown=node:node /workspace/apps/api/dist ./apps/api/dist
 COPY --from=build --chown=node:node /workspace/packages/platform-core/package.json ./packages/platform-core/package.json
 COPY --from=build --chown=node:node /workspace/packages/platform-core/dist ./packages/platform-core/dist
+COPY --from=build --chown=node:node /workspace/packages/postgres-runtime/package.json ./packages/postgres-runtime/package.json
+COPY --from=build --chown=node:node /workspace/packages/postgres-runtime/dist ./packages/postgres-runtime/dist
 
 USER node
 EXPOSE 4310

@@ -35,7 +35,7 @@ proposals to `relation_candidates.evidence`, and write-back history to
 append-only `audit_log` plus the transactional outbox. Unified search is a
 bounded RLS-scoped `UNION`, not a search-index table.
 
-Create migration 004 before adding any of these as first-class contracts:
+Create a new numbered migration (005 or later) before adding any of these as first-class contracts:
 
 - Tenant-admin and project-membership persistence, including tenant creation
   grants and last-owner policy.

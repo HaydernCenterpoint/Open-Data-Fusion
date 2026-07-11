@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
-type JsonObject = { [key: string]: JsonValue };
-type JsonValue = boolean | null | number | string | JsonObject | JsonValue[];
+import { z, ZodError } from 'zod';
+
+export type JsonObject = { [key: string]: JsonValue };
+export type JsonValue = boolean | null | number | string | JsonObject | JsonValue[];
 type SqliteRow = Record<string, unknown>;
 
 const JSON_NUMBER_TOKEN = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
@@ -80,6 +82,85 @@ export interface SqliteCutoverPreflightReport {
   members: WorkspaceMemberCutoverExport[];
   auditEvents: AuditEventCutoverExport[];
 }
+
+const nonEmptyTextSchema = z.string().refine((value) => value.trim().length > 0, 'Must not be empty');
+const positiveSafeIntegerSchema = z.number().int().positive().safe();
+const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().safe();
+const timestampSchema = z.string().refine((value) => {
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}, 'Must be a canonical UTC ISO-8601 timestamp');
+const checksumSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const jsonNumberSchema = z.number()
+  .finite()
+  .min(Number.MIN_SAFE_INTEGER)
+  .max(Number.MAX_SAFE_INTEGER)
+  .refine((value) => !Object.is(value, -0), 'Must not be negative zero');
+const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
+  z.boolean(),
+  z.null(),
+  jsonNumberSchema,
+  z.string(),
+  z.array(jsonValueSchema),
+  z.record(jsonValueSchema),
+]));
+const jsonObjectSchema: z.ZodType<JsonObject> = z.record(jsonValueSchema);
+
+const cutoverPreflightReportSchema = z.object({
+  formatVersion: z.literal(SQLITE_CUTOVER_PREFLIGHT_FORMAT_VERSION),
+  source: z.object({
+    databasePath: nonEmptyTextSchema,
+    schemaVersion: nonEmptyTextSchema,
+  }).strict(),
+  counts: z.object({
+    workspaces: nonNegativeSafeIntegerSchema,
+    revisions: nonNegativeSafeIntegerSchema,
+    members: nonNegativeSafeIntegerSchema,
+    auditEvents: nonNegativeSafeIntegerSchema,
+  }).strict(),
+  checksums: z.object({
+    workspaces: checksumSchema,
+    revisions: checksumSchema,
+    members: checksumSchema,
+    auditEvents: checksumSchema,
+  }).strict(),
+  workspaces: z.array(z.object({
+    id: nonEmptyTextSchema,
+    name: nonEmptyTextSchema,
+    snapshot: jsonObjectSchema,
+    version: positiveSafeIntegerSchema,
+    createdBy: nonEmptyTextSchema,
+    createdAt: timestampSchema,
+    updatedBy: nonEmptyTextSchema,
+    updatedAt: timestampSchema,
+  }).strict()),
+  revisions: z.array(z.object({
+    workspaceId: nonEmptyTextSchema,
+    version: positiveSafeIntegerSchema,
+    snapshot: jsonObjectSchema,
+    changeSummary: nonEmptyTextSchema,
+    actor: nonEmptyTextSchema,
+    createdAt: timestampSchema,
+    correlationId: nonEmptyTextSchema,
+  }).strict()),
+  members: z.array(z.object({
+    workspaceId: nonEmptyTextSchema,
+    userId: nonEmptyTextSchema,
+    displayName: nonEmptyTextSchema,
+    role: z.enum(['owner', 'editor', 'reviewer', 'viewer']),
+    createdAt: timestampSchema,
+  }).strict()),
+  auditEvents: z.array(z.object({
+    id: positiveSafeIntegerSchema,
+    timestamp: timestampSchema,
+    actor: nonEmptyTextSchema,
+    action: nonEmptyTextSchema,
+    entityType: nonEmptyTextSchema,
+    entityId: z.string().nullable(),
+    details: jsonObjectSchema,
+    correlationId: nonEmptyTextSchema,
+  }).strict()),
+}).strict();
 
 interface NormalizedJsonNumber {
   sign: -1 | 0 | 1;
@@ -188,7 +269,7 @@ function parseJsonObject(value: unknown, field: string): JsonObject {
   return parsed as JsonObject;
 }
 
-function checksum(value: unknown): string {
+export function createCutoverChecksum(value: unknown): string {
   return createHash('sha256').update(canonicalJson(value)).digest('hex');
 }
 
@@ -261,6 +342,49 @@ function validateInvariants(
       throw new SqliteCutoverPreflightError(`Workspace '${workspace.id}' snapshot does not match its current revision`);
     }
   }
+}
+
+export function parseSqliteCutoverPreflightReport(value: unknown): SqliteCutoverPreflightReport {
+  let report: SqliteCutoverPreflightReport;
+  try {
+    report = cutoverPreflightReportSchema.parse(value) as SqliteCutoverPreflightReport;
+  } catch (error) {
+    if (error instanceof ZodError) {
+      const issue = error.issues[0];
+      const path = issue?.path.length ? issue.path.join('.') : 'bundle';
+      throw new SqliteCutoverPreflightError(`SQLite cutover bundle is invalid at '${path}': ${issue?.message ?? 'validation failed'}`);
+    }
+    throw error;
+  }
+
+  const expectedCounts = {
+    workspaces: report.workspaces.length,
+    revisions: report.revisions.length,
+    members: report.members.length,
+    auditEvents: report.auditEvents.length,
+  };
+  for (const key of Object.keys(expectedCounts) as Array<keyof typeof expectedCounts>) {
+    if (report.counts[key] !== expectedCounts[key]) {
+      throw new SqliteCutoverPreflightError(
+        `SQLite cutover bundle count '${key}' is ${report.counts[key]}, expected ${expectedCounts[key]}`,
+      );
+    }
+  }
+
+  const expectedChecksums = {
+    workspaces: createCutoverChecksum(report.workspaces),
+    revisions: createCutoverChecksum(report.revisions),
+    members: createCutoverChecksum(report.members),
+    auditEvents: createCutoverChecksum(report.auditEvents),
+  };
+  for (const key of Object.keys(expectedChecksums) as Array<keyof typeof expectedChecksums>) {
+    if (report.checksums[key] !== expectedChecksums[key]) {
+      throw new SqliteCutoverPreflightError(`SQLite cutover bundle checksum '${key}' does not match its records`);
+    }
+  }
+
+  validateInvariants(report.workspaces, report.revisions, report.members);
+  return report;
 }
 
 function readSchemaVersion(database: DatabaseSync): string {
@@ -340,9 +464,7 @@ export function createSqliteCutoverPreflightReport(
     correlationId: String(row.correlation_id),
   }));
 
-  validateInvariants(workspaceExports, revisionExports, memberExports);
-
-  return {
+  return parseSqliteCutoverPreflightReport({
     formatVersion: SQLITE_CUTOVER_PREFLIGHT_FORMAT_VERSION,
     source: { databasePath, schemaVersion: readSchemaVersion(database) },
     counts: {
@@ -352,14 +474,14 @@ export function createSqliteCutoverPreflightReport(
       auditEvents: auditEventExports.length,
     },
     checksums: {
-      workspaces: checksum(workspaceExports),
-      revisions: checksum(revisionExports),
-      members: checksum(memberExports),
-      auditEvents: checksum(auditEventExports),
+      workspaces: createCutoverChecksum(workspaceExports),
+      revisions: createCutoverChecksum(revisionExports),
+      members: createCutoverChecksum(memberExports),
+      auditEvents: createCutoverChecksum(auditEventExports),
     },
     workspaces: workspaceExports,
     revisions: revisionExports,
     members: memberExports,
     auditEvents: auditEventExports,
-  };
+  });
 }

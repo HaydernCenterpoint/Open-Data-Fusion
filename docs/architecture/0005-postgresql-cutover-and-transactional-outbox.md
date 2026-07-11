@@ -49,6 +49,16 @@ transaction-scoped advisory lock derived from the workspace ID. This makes the
 rows concurrently; the application still returns the user-facing conflict,
 while PostgreSQL remains the final invariant boundary.
 
+`004_sqlite_cutover_role.sql` creates a non-login `odf_cutover` role for the
+one-way maintenance import. It can select and insert the workspace, revision,
+membership, and audit tables and advance only the audit identity sequence. It
+cannot update/delete history, publish outbox events, or access migration-003
+tenant data-plane tables. Operators provision a separate login through their
+identity/secret system, grant this role only for the maintenance window, and
+remove that membership after cutover evidence is retained. The importer rejects
+superuser connections and checks all required table and sequence privileges in
+the dry-run before inserting records.
+
 ### Authoritative workspace write transaction
 
 The future PostgreSQL adapter must perform one short transaction, with no
@@ -133,26 +143,44 @@ The production cutover is a one-way, rehearsed migration, not an application
 dual-write. Independent SQLite and PostgreSQL writes would create two sources
 of truth and can produce revisions or events that cannot be ordered.
 
-1. Rehearse an export/import against a production-like copy; validate row
-   counts, workspace versions, member counts, revision hashes and audit counts.
-2. Put the SQLite writer into a short maintenance/read-only window and back up
+1. Generate a deterministic `cutover:preflight` bundle and run
+   `cutover:import` without `--apply` against a production-like copy. The dry-run
+   executes all inserts and verification in PostgreSQL, then rolls back.
+2. Validate source/target row counts, workspace versions, member counts,
+   canonical record checksums, revision continuity, current snapshots, owners,
+   and the deterministic correlation-ID mapping checksum. Legacy IDs use the
+   versioned `open-data-fusion.uuidv8.sha256.v1` mapping.
+3. Put the SQLite writer into a short maintenance/read-only window and back up
    the database file.
-3. Run the PostgreSQL foundation migration.
-4. Import `workspaces`, `workspace_revisions`, `workspace_members` and
-   `audit_log` in dependency order. Convert ISO-8601 text timestamps to
-   `timestamptz` and validate JSON before casting to `jsonb`.
-5. Validate that every current workspace has its matching current revision and
-   that every workspace version is contiguous.
-6. Deploy the future PostgreSQL API adapter, switch reads and writes together,
+4. Apply PostgreSQL migrations 001–004 and connect with a dedicated login that
+   inherits `odf_cutover`; the importer refuses missing migrations or non-empty
+   workspace-history target tables.
+5. Generate a final bundle from the frozen SQLite file and dry-run it. Every
+   source query runs in one SQLite read transaction. If this bundle differs from
+   the earlier rehearsal, retain both results and rehearse the final bundle
+   before proceeding.
+6. Run the final bundle with `--database <frozen-sqlite-path> --apply`. The CLI
+   reads the frozen source again and refuses any schema, count, or checksum
+   drift before opening PostgreSQL. It then imports `workspaces`,
+   `workspace_revisions`, `workspace_members` and `audit_log` in dependency
+   order, converts timestamps to `timestamptz`, validates JSON before `jsonb`,
+   preserves valid UUID correlation IDs, and maps legacy text correlation IDs
+   deterministically to UUIDs.
+7. Deploy the future PostgreSQL API adapter, switch reads and writes together,
    and smoke-test optimistic conflicts and event delivery.
-7. Retain the SQLite backup read-only until rollback criteria expire. Rollback
+8. Retain the SQLite backup read-only until rollback criteria expire. Rollback
    before accepting PostgreSQL writes is straightforward; after cutover, use a
    forward fix or an explicit export rather than silently replaying writes into
    SQLite.
 
-The foundation does not insert historical outbox rows during import. The API
+The importer and foundation do not insert historical outbox rows. The API
 adapter begins emitting events only for PostgreSQL commits made after cutover;
 downstream projections are backfilled explicitly from the canonical database.
+The import is all-or-nothing under a serializable transaction and a
+transaction-scoped advisory lock; dry-run is the default and `--apply` is the
+explicit commit gate. Because PostgreSQL sequence changes are not rolled back,
+dry-run never calls `setval`; the audit identity sequence advances only after
+all verification passes in the apply path, immediately before commit.
 
 ## Operations
 
@@ -171,6 +199,20 @@ Inspect the schema and migration record:
 ```powershell
 docker compose exec odf-postgres psql -U odf_migrator -d odf -c "\\dn+ odf"
 docker compose exec odf-postgres psql -U odf_migrator -d odf -c "TABLE odf.schema_migrations"
+```
+
+With the dedicated cutover login URL supplied through `ODF_POSTGRES_URL`, first
+run the full rollback rehearsal and retain its JSON result. Use `--apply` only
+after the SQLite writer is read-only and its backup is verified:
+
+```powershell
+npm run cutover:import --workspace @open-data-fusion/api -- `
+  --bundle "$env:TEMP\odf-cutover-preflight.json" `
+  --database data/open-data-fusion.db
+npm run cutover:import --workspace @open-data-fusion/api -- `
+  --bundle "$env:TEMP\odf-cutover-preflight.json" `
+  --database data/open-data-fusion.db `
+  --apply
 ```
 
 Back up and restore with PostgreSQL-native tools; test restores regularly:
@@ -194,6 +236,9 @@ foundation intentionally does not create login credentials in SQL.
 - PostgreSQL becomes the future production source of truth for workspace state
   and event intent; SQLite remains a local-development profile until the API
   adapter is introduced.
+- The export/import path is executable and transactionally rehearsable, but it
+  is not runtime cutover: production promotion still requires the API adapter
+  and post-switch event-delivery smoke tests.
 - The broker is a delivery mechanism, not a replacement for the transaction
   log. Publisher and consumer code must tolerate duplicate delivery.
 - Revision and audit rows are append-only at the database layer. Corrections
