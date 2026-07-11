@@ -1,16 +1,18 @@
-import { Activity, ArrowRight, FileText, GitBranch, ShieldCheck } from "lucide-react";
+import { Activity, ArrowRight, FileText, GitBranch, ShieldCheck, X } from "lucide-react";
 import type { ExplorerSnapshot } from "../types";
 
 interface RelatedRailProps {
   snapshot: ExplorerSnapshot | null;
   onAction: (message: string) => void;
+  onClose?: () => void;
+  open?: boolean;
 }
 
 function EmptyRailRow({ children }: { children: React.ReactNode }) {
   return <p className="rail-empty-row">{children}</p>;
 }
 
-export function RelatedRail({ snapshot, onAction }: RelatedRailProps) {
+export function RelatedRail({ snapshot, onAction, onClose, open = false }: RelatedRailProps) {
   const timeSeries = snapshot?.detail.timeSeries ?? [];
   const documents = snapshot?.detail.documents ?? [];
   const relations = snapshot?.detail.relations ?? [];
@@ -18,7 +20,8 @@ export function RelatedRail({ snapshot, onAction }: RelatedRailProps) {
   const telemetryById = new Map((snapshot?.telemetry.series ?? []).map((series) => [series.externalId, series]));
 
   return (
-    <aside className="related-rail" aria-label="Related data">
+    <aside className={`related-rail${open ? " is-open" : ""}`} aria-label="Related data">
+      <div className="related-rail-header"><strong>Related data</strong>{onClose ? <button type="button" aria-label="Close related data" onClick={onClose}><X size={18} /></button> : null}</div>
       <section className="rail-section">
         <h2><Activity size={19} /> Related time series ({timeSeries.length})</h2>
         {timeSeries.length === 0 ? <EmptyRailRow>No time series linked.</EmptyRailRow> : timeSeries.map((series) => {

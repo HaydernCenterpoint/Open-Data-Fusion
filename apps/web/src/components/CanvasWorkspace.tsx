@@ -1,10 +1,8 @@
 import {
   AlertTriangle,
-  Bell,
   Box,
   Cable,
   ChevronDown,
-  CircleHelp,
   Clock3,
   FileText,
   Gauge,
@@ -15,13 +13,11 @@ import {
   Maximize2,
   MoreHorizontal,
   MousePointer2,
-  Move,
+  PanelRightOpen,
   Plus,
   Redo2,
   RotateCcw,
   Save,
-  Search,
-  Settings,
   StickyNote,
   Trash2,
   UserPlus,
@@ -32,6 +28,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuthSession } from "./AuthBoundary";
+import { BrandLogo } from "./BrandLogo";
 import {
   WORKSPACE_USER,
   applyWorkspaceOperations,
@@ -98,6 +95,11 @@ export interface CanvasNodeGeometry {
   height: number;
 }
 
+interface EditableNodePatch {
+  data?: Record<string, unknown>;
+  position?: { x: number; y: number };
+}
+
 interface CanvasGeometryPreview {
   baseVersion: number;
   geometry: CanvasNodeGeometry;
@@ -120,6 +122,7 @@ const MAX_NODE_HEIGHT = 420;
 const MAX_AUTHORING_HISTORY = 50;
 const REVISION_PAGE_SIZE = 50;
 const WORKSPACE_ROLES: WorkspaceRole[] = ["owner", "editor", "reviewer", "viewer"];
+const CANVAS_CHART_GEOMETRY: CanvasNodeGeometry = { x: 770, y: 105, width: 345, height: 370 };
 
 const fallbackNodes: CanvasNodeRecord[] = [
   { id: "canvas-pid", type: "diagram", position: { x: 55, y: 135 }, data: { title: "P&ID — Cooling Water System" } },
@@ -329,14 +332,14 @@ function PidPanel({ geometry }: { geometry: CanvasNodeGeometry }) {
         </g>
         <g className="pid-labels"><text x="180" y="191">P-101</text><text x="168" y="207">COOLING WATER PUMP</text><text x="44" y="30">FROM PLANT HEADER</text><text x="340" y="30">TO PLANT HEADER</text></g>
       </svg>
-      <div className="pid-controls"><button aria-label="Fit drawing"><Maximize2 size={14} /></button><button aria-label="Zoom out"><ZoomOut size={14} /></button><button aria-label="Zoom in"><ZoomIn size={14} /></button></div>
+
     </div>
   );
 }
 
 function MoreDots() { return <span className="more-dots" aria-hidden="true">•••</span>; }
 
-function MobileCanvasMenu({ onOpenHistory, onToggleMembers }: { onOpenHistory: () => void; onToggleMembers: () => void }) {
+function MobileCanvasMenu({ hasSelection, onOpenHistory, onOpenInspector, onToggleMembers }: { hasSelection: boolean; onOpenHistory: () => void; onOpenInspector: () => void; onToggleMembers: () => void }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -361,6 +364,7 @@ function MobileCanvasMenu({ onOpenHistory, onToggleMembers }: { onOpenHistory: (
       <button type="button" aria-label="Mobile canvas actions" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}><MoreHorizontal size={18} /></button>
       {open ? (
         <div className="canvas-mobile-menu-popover" role="menu">
+          {hasSelection ? <button type="button" role="menuitem" onClick={() => { setOpen(false); onOpenInspector(); }}><PanelRightOpen size={16} /> Selection inspector</button> : null}
           <button type="button" role="menuitem" onClick={() => { setOpen(false); onOpenHistory(); }}><Clock3 size={16} /> Revision history</button>
           <button type="button" role="menuitem" onClick={() => { setOpen(false); onToggleMembers(); }}><Users size={16} /> Workspace members</button>
         </div>
@@ -379,6 +383,8 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [layersOpen, setLayersOpen] = useState(false);
   const [revisions, setRevisions] = useState<WorkspaceRevision[]>([]);
   const [revisionTotal, setRevisionTotal] = useState(0);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -553,6 +559,19 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   }, []);
 
   useEffect(() => {
+    if (!historyOpen && !inspectorOpen && !layersOpen && !membersOpen) return undefined;
+    const closeTopPanel = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (historyOpen) setHistoryOpen(false);
+      else if (membersOpen) setMembersOpen(false);
+      else if (layersOpen) setLayersOpen(false);
+      else setInspectorOpen(false);
+    };
+    window.addEventListener("keydown", closeTopPanel);
+    return () => window.removeEventListener("keydown", closeTopPanel);
+  }, [historyOpen, inspectorOpen, layersOpen, membersOpen]);
+
+  useEffect(() => {
     const preview = geometryPreviewRef.current;
     if (!preview || !workspace || preview.baseVersion === workspace.version) return;
     if (nodeDragRef.current?.interactionId === preview.interactionId) nodeDragRef.current = null;
@@ -639,6 +658,64 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     setScale((value) => Math.min(1.35, Math.max(0.7, Number((value + delta).toFixed(2)))));
   }
 
+  function openInspector() {
+    if (!selection) return;
+    setHistoryOpen(false);
+    setMembersOpen(false);
+    setLayersOpen(false);
+    setInspectorOpen(true);
+  }
+
+  function openLayers() {
+    setHistoryOpen(false);
+    setMembersOpen(false);
+    setInspectorOpen(false);
+    setLayersOpen(true);
+  }
+
+  function onStageKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.target !== event.currentTarget) return;
+    const movement = event.shiftKey ? 80 : 32;
+    if (event.key === "ArrowLeft") setOffset((current) => ({ ...current, x: current.x + movement }));
+    else if (event.key === "ArrowRight") setOffset((current) => ({ ...current, x: current.x - movement }));
+    else if (event.key === "ArrowUp") setOffset((current) => ({ ...current, y: current.y + movement }));
+    else if (event.key === "ArrowDown") setOffset((current) => ({ ...current, y: current.y - movement }));
+    else return;
+    event.preventDefault();
+  }
+
+  function fitCanvas() {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const rect = stage.getBoundingClientRect();
+    const stageWidth = stage.clientWidth || rect.width || window.innerWidth;
+    const stageHeight = stage.clientHeight || rect.height || window.innerHeight;
+    if (stageWidth <= 0 || stageHeight <= 0) return;
+
+    const content = [...geometryMap.values(), CANVAS_CHART_GEOMETRY];
+    const minX = Math.min(...content.map((geometry) => geometry.x));
+    const minY = Math.min(...content.map((geometry) => geometry.y));
+    const maxX = Math.max(...content.map((geometry) => geometry.x + geometry.width));
+    const maxY = Math.max(...content.map((geometry) => geometry.y + geometry.height));
+    const contentWidth = Math.max(1, maxX - minX);
+    const contentHeight = Math.max(1, maxY - minY);
+    const padding = Math.min(64, Math.max(24, stageWidth * 0.08));
+    const fittedScale = Math.min(
+      1,
+      Math.max(0.3, Math.min(
+        (stageWidth - padding * 2) / contentWidth,
+        (stageHeight - padding * 2) / contentHeight,
+      )),
+    );
+    const nextScale = Number(fittedScale.toFixed(2));
+
+    setScale(nextScale);
+    setOffset({
+      x: Math.round((stageWidth - contentWidth * nextScale) / 2 - minX * nextScale),
+      y: Math.round((stageHeight - contentHeight * nextScale) / 2 - minY * nextScale),
+    });
+  }
+
   async function saveRevision() {
     const current = workspaceRef.current;
     if (!current) {
@@ -672,6 +749,8 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       return;
     }
     setMembersOpen(false);
+    setInspectorOpen(false);
+    setLayersOpen(false);
     setHistoryOpen(true);
     setHistoryLoading(true);
     setHistoryError("");
@@ -727,6 +806,7 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       setUndoStack([]);
       setRedoStack([]);
       setSelection(null);
+      setInspectorOpen(false);
       onNotify(`Restored revision v${targetVersion} as new revision v${updated.version}`);
     } catch (error) {
       if (isConflictError(error)) {
@@ -863,6 +943,8 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     const match = nodes.find((node) => nodeKind(node) === kind);
     if (match) {
       setSelection({ kind: "node", id: match.id });
+      setInspectorOpen(true);
+      setLayersOpen(false);
       selectTool("select");
     }
   }
@@ -873,7 +955,11 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       return;
     }
     setSelection({ kind: "node", id: node.id });
-    if (tool !== "connect") return;
+    if (tool !== "connect") {
+      setInspectorOpen(true);
+      setLayersOpen(false);
+      return;
+    }
     if (!connectSource) {
       setConnectSource(node.id);
       onNotify(`Choose a target for ${nodeLabel(node)}`);
@@ -936,6 +1022,8 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     });
     if (updated) {
       selectTool("select");
+      setInspectorOpen(true);
+      setLayersOpen(false);
       onNotify(`Note added · revision v${updated.version}`);
     }
   }
@@ -1036,19 +1124,23 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     }
   }
 
-  async function saveNodeData(node: CanvasNodeRecord, data: Record<string, unknown>, baseVersion?: number) {
-    if (Object.keys(data).length === 0) {
+  async function saveNodePatch(node: CanvasNodeRecord, patch: EditableNodePatch, baseVersion?: number) {
+    if (!patch.position && (!patch.data || Object.keys(patch.data).length === 0)) {
       onNotify("No node changes to save");
       return;
     }
-    const inverseData = Object.fromEntries(
-      Object.keys(data).map((key) => [key, previousNodeDataValue(node, key)]),
-    );
+    const inverse: EditableNodePatch = {};
+    if (patch.position) inverse.position = { ...node.position };
+    if (patch.data) {
+      inverse.data = Object.fromEntries(
+        Object.keys(patch.data).map((key) => [key, previousNodeDataValue(node, key)]),
+      );
+    }
     const nodeSelection: CanvasSelection = { kind: "node", id: node.id };
     const updated = await commitAuthoringAction({
       description: `Updated ${nodeLabel(node)}`,
-      forward: [{ type: "updateNode", nodeId: node.id, patch: { data } }],
-      inverse: [{ type: "updateNode", nodeId: node.id, patch: { data: inverseData } }],
+      forward: [{ type: "updateNode", nodeId: node.id, patch }],
+      inverse: [{ type: "updateNode", nodeId: node.id, patch: inverse }],
       selectionBefore: nodeSelection,
       selectionAfter: nodeSelection,
     }, baseVersion);
@@ -1194,10 +1286,10 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   return (
     <div className="canvas-shell">
       <header className="canvas-topbar">
-        <button className="canvas-brand" type="button" onClick={onOpenExplorer} aria-label="Open Data Fusion Explorer"><span className="brand-mark">◈</span><strong>Open Data Fusion</strong></button>
-        <div className="canvas-workspace-name"><span>My workspace</span><ChevronDown size={14} /><span className="canvas-slash">/</span><span>{workspace?.name ?? "Cooling Water System"}</span><ChevronDown size={14} /></div>
+        <button className="canvas-brand" type="button" onClick={onOpenExplorer} aria-label="Open Data Fusion Explorer"><BrandLogo aria-hidden="true" /></button>
+        <div className="canvas-workspace-name"><span>My workspace</span><span className="canvas-slash">/</span><span>{workspace?.name ?? "Cooling Water System"}</span></div>
         <button className="canvas-save-state" type="button" disabled={!workspace || !canEdit} onClick={saveRevision} title={canEdit ? "Save a new immutable revision" : "Your workspace role is read-only"}>Saved v{workspace?.version ?? "—"} <span>✓</span> <small>{workspace ? !membersLoaded ? "Checking access" : canEdit ? "Save revision" : "Read only" : "Connecting"}</small></button>
-        <button className={`canvas-presence${collaborationConnected === false ? " is-disconnected" : ""}${membersOpen ? " is-open" : ""}`} type="button" aria-label={`Workspace members, ${presenceUsers.length} online`} aria-expanded={membersOpen} onClick={() => { setHistoryOpen(false); setMembersOpen((open) => !open); }} title={`${members.length} workspace member${members.length === 1 ? "" : "s"}`}>
+        <button className={`canvas-presence${collaborationConnected === false ? " is-disconnected" : ""}${membersOpen ? " is-open" : ""}`} type="button" aria-label={`Workspace members, ${presenceUsers.length} online`} aria-expanded={membersOpen} onClick={() => { setHistoryOpen(false); setInspectorOpen(false); setLayersOpen(false); setMembersOpen((open) => !open); }} title={`${members.length} workspace member${members.length === 1 ? "" : "s"}`}>
           <Users size={15} />
           <div className="presence-avatars" aria-hidden="true">
             {presenceUsers.slice(0, 3).map((user) => <span key={user.userId} title={`${user.displayName} · ${user.role}`}>{user.displayName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span>)}
@@ -1207,27 +1299,35 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
           <ChevronDown size={12} />
         </button>
         {membersLoaded && !canEdit ? <span className="canvas-readonly-badge">{currentMember?.role ?? "no access"} · read only</span> : null}
-        <div className="canvas-top-actions"><button aria-label="Search"><Search size={18} /></button><button aria-label="Revision history" onClick={openHistory}><Clock3 size={18} /></button><button aria-label="Help"><CircleHelp size={18} /></button><button aria-label="Notifications"><Bell size={18} /></button><button aria-label="Settings"><Settings size={18} /></button>{authSession.enabled ? <button className="canvas-signout-button" type="button" aria-label={`Sign out ${authSession.identity?.displayName ?? activeUserId}`} title={`Signed in as ${authSession.identity?.displayName ?? activeUserId}`} onClick={() => void authSession.signOut().catch((error: unknown) => onNotify(error instanceof Error ? error.message : "Sign out failed"))}><span>{(authSession.identity?.displayName ?? activeUserId).split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span><LogOut size={15} /></button> : null}<MobileCanvasMenu onOpenHistory={() => void openHistory()} onToggleMembers={() => { setHistoryOpen(false); setMembersOpen((open) => !open); }} /><button className="new-canvas-button" type="button" disabled={!canEdit} onClick={() => onNotify("New canvas created")}>New canvas <Plus size={17} /></button></div>
+        <div className="canvas-top-actions"><button aria-label="Revision history" onClick={openHistory}><Clock3 size={18} /></button>{authSession.enabled ? <button className="canvas-signout-button" type="button" aria-label={`Sign out ${authSession.identity?.displayName ?? activeUserId}`} title={`Signed in as ${authSession.identity?.displayName ?? activeUserId}`} onClick={() => void authSession.signOut().catch((error: unknown) => onNotify(error instanceof Error ? error.message : "Sign out failed"))}><span>{(authSession.identity?.displayName ?? activeUserId).split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span><LogOut size={15} /></button> : null}<MobileCanvasMenu hasSelection={selection !== null} onOpenHistory={() => void openHistory()} onOpenInspector={openInspector} onToggleMembers={() => { setHistoryOpen(false); setInspectorOpen(false); setLayersOpen(false); setMembersOpen((open) => !open); }} /><span id="new-canvas-unavailable" className="sr-only">Creating additional workspaces is not available in this increment.</span><button className="new-canvas-button" type="button" disabled aria-describedby="new-canvas-unavailable">New canvas <Plus size={17} /></button></div>
       </header>
-      <aside className="canvas-tool-rail" aria-label="Canvas tools">
-        <button className="canvas-tool-logo" type="button" onClick={onOpenExplorer} aria-label="Open Data Fusion Explorer">◈</button>
-        <CanvasToolButton active={tool === "select"} label="Select" icon={<MousePointer2 size={18} />} onClick={() => selectTool("select")} />
-        <CanvasToolButton active={tool === "pan"} label="Pan" icon={<Hand size={18} />} onClick={() => selectTool("pan")} />
-        <CanvasToolButton active={tool === "connect"} disabled={!canEdit} label="Connect" icon={<Link2 size={18} />} onClick={() => selectTool("connect")} />
-        <CanvasToolButton label="Asset" icon={<Box size={18} />} onClick={() => selectFirstNode("asset")} />
-        <CanvasToolButton label="Time series" icon={<Gauge size={18} />} onClick={() => selectFirstNode("series")} />
-        <CanvasToolButton label="Document" icon={<FileText size={18} />} onClick={() => selectFirstNode("document")} />
-        <CanvasToolButton disabled={!canEdit} label="Note" icon={<StickyNote size={18} />} onClick={() => void addNote()} />
-        <CanvasToolButton label="Layers" icon={<Layers3 size={18} />} onClick={() => onNotify("Layers panel is ready")} />
+      <aside className="canvas-tool-rail" role="toolbar" aria-label="Canvas tools">
+        <div className="canvas-tool-group canvas-tool-group--modes">
+          <CanvasToolButton active={tool === "select"} label="Select" icon={<MousePointer2 size={18} />} onClick={() => selectTool("select")} />
+          <CanvasToolButton active={tool === "pan"} label="Pan" icon={<Hand size={18} />} onClick={() => selectTool("pan")} />
+          <CanvasToolButton active={tool === "connect"} disabled={!canEdit} label="Connect" icon={<Link2 size={18} />} onClick={() => selectTool("connect")} />
+        </div>
+        <div className="canvas-tool-group canvas-tool-group--objects">
+          <CanvasToolButton label="Find asset" icon={<Box size={18} />} onClick={() => selectFirstNode("asset")} />
+          <CanvasToolButton label="Find series" icon={<Gauge size={18} />} onClick={() => selectFirstNode("series")} />
+          <CanvasToolButton label="Find document" icon={<FileText size={18} />} onClick={() => selectFirstNode("document")} />
+          <CanvasToolButton disabled={!canEdit} label="Note" icon={<StickyNote size={18} />} onClick={() => void addNote()} />
+          <CanvasToolButton active={layersOpen} label="Layers" icon={<Layers3 size={18} />} onClick={openLayers} />
+        </div>
         <div className="canvas-tool-spacer" />
-        <CanvasToolButton disabled={!canEdit || undoStack.length === 0} label="Undo" icon={<RotateCcw size={18} />} onClick={() => void undoLatest()} />
-        <CanvasToolButton disabled={!canEdit || redoStack.length === 0} label="Redo" icon={<Redo2 size={18} />} onClick={() => void redoLatest()} />
-        <div className="canvas-zoom-label">{Math.round(scale * 100)}% <ChevronDown size={12} /></div>
+        <div className="canvas-tool-group canvas-tool-group--history">
+          <CanvasToolButton disabled={!canEdit || undoStack.length === 0} label="Undo" icon={<RotateCcw size={18} />} onClick={() => void undoLatest()} />
+          <CanvasToolButton disabled={!canEdit || redoStack.length === 0} label="Redo" icon={<Redo2 size={18} />} onClick={() => void redoLatest()} />
+        </div>
+        <div className="canvas-zoom-label" aria-label={`Canvas zoom ${Math.round(scale * 100)} percent`}>{Math.round(scale * 100)}%</div>
       </aside>
       <main
         ref={stageRef}
         className={`canvas-stage tool-${tool}`}
         aria-label="Open Data Fusion industrial canvas"
+
+        tabIndex={0}
+        onKeyDown={onStageKeyDown}
         onPointerDown={onCanvasPointerDown}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
@@ -1236,12 +1336,12 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       >
         {conflictMessage && <div className="canvas-conflict-banner" role="alert"><AlertTriangle size={17} /><span>{conflictMessage}</span><button type="button" aria-label="Dismiss conflict message" onClick={() => setConflictMessage("")}><X size={15} /></button></div>}
         {tool === "connect" && <div className="canvas-connect-hint" role="status">{connectSource ? "Select a target node" : "Select the source node"}</div>}
-        <div className="canvas-dots" style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }} onClick={(event) => { if (event.target === event.currentTarget && tool === "select") setSelection(null); }}>
+        <div className="canvas-dots" style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }} onClick={(event) => { if (event.target === event.currentTarget && tool === "select") { setSelection(null); setInspectorOpen(false); } }}>
           {nodes.filter((node) => node.type === "diagram").map((node) => {
             const geometry = geometryMap.get(node.id);
             return geometry ? <PidPanel key={node.id} geometry={geometry} /> : null;
           })}
-          <div className="canvas-panel canvas-chart-panel"><div className="canvas-panel-header"><span><Gauge size={17} /> Pressure psi</span><MoreDots /></div><div className="canvas-legend"><span className="legend-blue">●</span> P-101 Discharge Pressure <em>psi</em><span className="legend-green">●</span> P-101 Suction Pressure <em>psi</em></div><TelemetryChart snapshot={snapshot} /><div className="chart-ranges"><button>1H</button><button>6H</button><button className="is-active">1D</button><button>1W</button><button>1M</button><button>Custom</button></div><div className="chart-footer">Interval: 1 min <ChevronDown size={13} /><span>● Live <ChevronDown size={13} /></span></div></div>
+          <div className="canvas-panel canvas-chart-panel"><div className="canvas-panel-header"><span><Gauge size={17} /> Pressure psi</span><MoreDots /></div><div className="canvas-legend"><span className="legend-blue">●</span> P-101 Discharge Pressure <em>psi</em><span className="legend-green">●</span> P-101 Suction Pressure <em>psi</em></div><TelemetryChart snapshot={snapshot} /><div className="chart-window-summary">Latest loaded telemetry window</div><div className="chart-footer"><span>Historical snapshot</span><span>{snapshot?.telemetry.series[0]?.points.length ?? 0} points</span></div></div>
           <svg className="canvas-edges" viewBox="0 0 1400 1000" aria-label="Canvas connections">
             {edges.map((edge) => {
               const source = nodeMap.get(edge.source);
@@ -1260,11 +1360,13 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
                   tabIndex={0}
                   aria-label={label}
                   aria-pressed={isSelected}
-                  onClick={(event) => { event.stopPropagation(); setSelection({ kind: "edge", id: edge.id }); }}
+                  onClick={(event) => { event.stopPropagation(); setSelection({ kind: "edge", id: edge.id }); setLayersOpen(false); setInspectorOpen(true); }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
                       setSelection({ kind: "edge", id: edge.id });
+                      setLayersOpen(false);
+                      setInspectorOpen(true);
                     }
                   }}
                 >
@@ -1303,15 +1405,17 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
             );
           })}
         </div>
-        <div className="canvas-stage-actions"><button aria-label="Canvas overview"><Move size={17} /></button><button aria-label="Toggle snapping"><Cable size={17} /></button><button aria-label="Fit canvas"><Maximize2 size={17} /></button></div>
+        <div className="canvas-stage-actions"><button aria-label="Fit canvas" onClick={fitCanvas}><Maximize2 size={17} /></button></div>
         <div className="canvas-minimap"><span className="minimap-selection" /><i /><i /><i /><i /></div>
         <div className="canvas-zoom-controls"><button aria-label="Zoom out" onClick={() => updateZoom(-0.1)}><ZoomOut size={16} /></button><button aria-label="Zoom in" onClick={() => updateZoom(0.1)}><ZoomIn size={16} /></button><button aria-label="Reset canvas" onClick={() => { setScale(1); setOffset({ x: 0, y: 0 }); }}><Maximize2 size={16} /></button></div>
-        {showIntro && <div className="canvas-intro"><button className="canvas-intro-close" aria-label="Close introduction" onClick={() => setShowIntro(false)}><X size={16} /></button><div className="intro-illustration"><Cable size={36} /><span>◯</span><span>□</span></div><div><h1>Build an industrial view</h1><p>Bring assets, time series, documents, and relations into one canvas.</p><div><button className="intro-primary" onClick={() => { setShowIntro(false); onNotify("Cooling Water System template loaded"); }}>Start with a template</button><button className="intro-secondary" onClick={() => setShowIntro(false)}>Skip</button></div></div></div>}
+        {selection ? <button className="canvas-inspector-trigger" type="button" aria-label="Open selection inspector" aria-expanded={inspectorOpen} onClick={openInspector}><PanelRightOpen size={17} /> Inspect selection</button> : null}
+        {showIntro && <div className="canvas-intro"><button className="canvas-intro-close" aria-label="Close introduction" onClick={() => setShowIntro(false)}><X size={16} /></button><div className="intro-illustration"><Cable size={36} /><span>◯</span><span>□</span></div><div><h1>Explore this industrial view</h1><p>This workspace already connects assets, time series, documents, and governed relations.</p><div><button className="intro-primary" onClick={() => setShowIntro(false)}>Explore workspace</button><button className="intro-secondary" onClick={onOpenExplorer}>Open Explorer</button></div></div></div>}
       </main>
-      <aside className="canvas-inspector" aria-label="Selection inspector">
+      {inspectorOpen ? <button className="canvas-inspector-backdrop" type="button" aria-label="Close selection inspector" onClick={() => setInspectorOpen(false)} /> : null}
+      <aside className={`canvas-inspector${inspectorOpen ? " is-open" : ""}`} aria-label="Selection inspector">
         <div className="inspector-header">
           <div><strong>Selection</strong>{!canEdit && membersLoaded ? <span>Read only</span> : null}</div>
-          <button aria-label="Clear selection" onClick={() => setSelection(null)}><X size={17} /></button>
+          <button aria-label="Clear selection and close inspector" onClick={() => { setSelection(null); setInspectorOpen(false); }}><X size={17} /></button>
         </div>
         {selectedNode && selectedKind ? (
           <NodeInspector
@@ -1319,7 +1423,7 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
             node={selectedNode}
             kind={selectedKind}
             canEdit={canEdit}
-            onSave={(data) => void saveNodeData(selectedNode, data, workspace?.version)}
+            onSave={(patch) => void saveNodePatch(selectedNode, patch, workspace?.version)}
             onDelete={() => void deleteNode(selectedNode, workspace?.version)}
           />
         ) : selectedEdge ? (
@@ -1336,6 +1440,18 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
           <div className="inspector-empty"><MousePointer2 size={24} /><strong>Select a node or relationship</strong><span>Choose an item on the canvas to edit its details.</span></div>
         )}
       </aside>
+      {layersOpen ? (
+        <section className="canvas-layers-panel" aria-label="Canvas layers">
+          <div className="layers-panel-header"><div><strong>Canvas layers</strong><span>{nodes.length} nodes · {edges.length} relationships</span></div><button type="button" aria-label="Close canvas layers" onClick={() => setLayersOpen(false)}><X size={17} /></button></div>
+          <ol className="canvas-layer-list">
+            {nodes.map((node) => {
+              const kind = nodeKind(node);
+              const selected = selection?.kind === "node" && selection.id === node.id;
+              return <li key={node.id}><button type="button" className={selected ? "is-selected" : ""} aria-pressed={selected} onClick={() => { if (!kind) { fitCanvas(); return; } setSelection({ kind: "node", id: node.id }); setLayersOpen(false); setInspectorOpen(true); }}><span>{kind ? <NodeIcon kind={kind} /> : <Layers3 size={18} />}</span><strong>{nodeLabel(node)}</strong><small>{kind ? nodeTypeLabel(kind) : "Diagram"}</small></button></li>;
+            })}
+          </ol>
+        </section>
+      ) : null}
       {membersOpen ? (
         <WorkspaceMembersPanel
           members={members}
@@ -1450,7 +1566,7 @@ function WorkspaceMembersPanel({
 }
 
 function CanvasToolButton({ active, disabled, label, icon, onClick }: { active?: boolean; disabled?: boolean; label: string; icon: React.ReactNode; onClick: () => void }) {
-  return <button className={`canvas-tool${active ? " is-active" : ""}`} type="button" disabled={disabled} aria-label={label} onClick={onClick}>{icon}<span>{label}</span></button>;
+  return <button className={`canvas-tool${active ? " is-active" : ""}`} type="button" disabled={disabled} aria-label={label} aria-pressed={active === undefined ? undefined : active} onClick={onClick}>{icon}<span>{label}</span></button>;
 }
 
 function NodeIcon({ kind }: { kind: NodeKind }) {
@@ -1540,7 +1656,7 @@ function NodeInspector({
   node: CanvasNodeRecord;
   kind: NodeKind;
   canEdit: boolean;
-  onSave: (data: Record<string, unknown>) => void;
+  onSave: (patch: EditableNodePatch) => void;
   onDelete: () => void;
 }) {
   const dimensions = nodeDimensions(node);
@@ -1556,6 +1672,8 @@ function NodeInspector({
   const [description, setDescription] = useState(initialDescription);
   const [unit, setUnit] = useState(initialUnit);
   const [uri, setUri] = useState(initialUri);
+  const [positionX, setPositionX] = useState(node.position.x);
+  const [positionY, setPositionY] = useState(node.position.y);
   const [width, setWidth] = useState(dimensions.width);
   const [height, setHeight] = useState(dimensions.height);
 
@@ -1571,7 +1689,13 @@ function NodeInspector({
     if ((kind === "asset" || kind === "system" || kind === "document") && description !== initialDescription) data.description = description;
     if (kind === "series" && unit.trim() !== initialUnit) data.unit = unit.trim();
     if (kind === "document" && uri.trim() !== initialUri) data.uri = uri.trim();
-    onSave(data);
+    const nextX = Number.isFinite(positionX) ? Math.round(positionX) : node.position.x;
+    const nextY = Number.isFinite(positionY) ? Math.round(positionY) : node.position.y;
+    const positionChanged = nextX !== node.position.x || nextY !== node.position.y;
+    onSave({
+      ...(Object.keys(data).length > 0 ? { data } : {}),
+      ...(positionChanged ? { position: { x: nextX, y: nextY } } : {}),
+    });
   }
 
   return (
@@ -1588,6 +1712,10 @@ function NodeInspector({
           {kind === "series" ? <label>Unit<input aria-label="Time series unit" value={unit} onChange={(event) => setUnit(event.target.value)} /></label> : null}
           {kind === "document" ? <label>Document URI<input aria-label="Document URI" value={uri} onChange={(event) => setUri(event.target.value)} /></label> : null}
           {kind === "asset" || kind === "system" || kind === "document" ? <label>Description<textarea aria-label="Node description" rows={4} value={description} onChange={(event) => setDescription(event.target.value)} /></label> : null}
+          <div className="inspector-position-grid">
+            <label>X position<input aria-label="Node X position" type="number" value={positionX} onChange={(event) => setPositionX(Number(event.target.value))} /></label>
+            <label>Y position<input aria-label="Node Y position" type="number" value={positionY} onChange={(event) => setPositionY(Number(event.target.value))} /></label>
+          </div>
           <div className="inspector-size-grid">
             <label>Width<input aria-label="Node width" type="number" min={MIN_NODE_WIDTH} max={MAX_NODE_WIDTH} value={width} onChange={(event) => setWidth(Number(event.target.value))} /></label>
             <label>Height<input aria-label="Node height" type="number" min={MIN_NODE_HEIGHT} max={MAX_NODE_HEIGHT} value={height} onChange={(event) => setHeight(Number(event.target.value))} /></label>

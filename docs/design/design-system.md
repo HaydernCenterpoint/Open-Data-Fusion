@@ -30,6 +30,13 @@ The product uses an industrial editorial layout: a deep graphite global rail, tr
 --topbar-height: 62px;
 ```
 
+## Brand mark
+
+- The product mark visualizes multiple governed data streams converging into one fusion point.
+- Use the full wordmark only where at least 150px of horizontal space is available; use the icon variant in compact navigation.
+- Teal is reserved for the brand fusion accent and must not replace cobalt as the interaction color.
+- Keep the SVG mark code-native and legible at 24px, 32px, and 40px sizes.
+
 ## Typography
 
 - UI chrome: Inter or a system grotesk, 13–14px, 500–600 weight.
@@ -50,9 +57,18 @@ The product uses an industrial editorial layout: a deep graphite global rail, tr
 
 ## Responsive behavior
 
-- At 1180px, the contextual rail becomes a drawer.
-- At 900px, the asset tree becomes a drawer and the global navigation collapses to icons.
-- At 640px, the chart and property sections stack; top-bar search moves below the page title.
+- At 1180px, the contextual rail becomes an accessible drawer with an explicit open/close control.
+- At 1080px, the Canvas inspector becomes a right-side drawer instead of removing selection details.
+- At 900px, Canvas tools move to a horizontally scrollable bottom toolbar; revision, member, and inspector actions remain available through mobile controls.
+- At 790px, the asset tree becomes a drawer and global section navigation moves to a labeled selector.
+- At 560px, the Canvas inspector becomes a bottom sheet, chart content scrolls within its own surface, and property sections stack.
+
+## Interaction integrity
+
+- Every visible control must perform its labeled action, be explicitly disabled with a reason, or be removed from the shipped surface.
+- Charts derive axes and labels from telemetry timestamps and values; a historical snapshot must never be labeled as live.
+- Tabs follow the keyboard tab pattern, search follows the combobox/listbox pattern, and modal dialogs trap and restore focus.
+- Governed accept/reject actions require an explicit confirmation step and support review evidence.
 
 ## Allowed first-viewport copy
 

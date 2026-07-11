@@ -14,8 +14,11 @@ This project is independently implemented. It is not affiliated with, endorsed b
 - Workspace roles, owner-managed membership, live presence, and committed updates over SSE.
 - End-to-end OIDC login (Authorization Code + PKCE), JWT resource-server verification, authenticated SSE, and a reproducible local Keycloak realm.
 - PostgreSQL workspace/outbox migration foundation for the planned multi-instance cutover.
-- React Industrial Canvas plus an Asset Explorer data-detail view.
-- Contextualization relations remain reviewable assertions rather than automatic truth.
+- Responsive React Industrial Canvas plus an Asset Explorer data-detail view.
+- URL-synchronized views, assets, tenants, and projects with browser back/forward support.
+- Timestamp-aware telemetry charts with data-derived axes and honest latest-available fallbacks.
+- Keyboard-accessible search, tabs, dialogs, Canvas inspection, and responsive contextual drawers.
+- Contextualization relations remain reviewable assertions with explicit confirmation and review evidence rather than automatic truth.
 
 ## Run locally
 
@@ -31,6 +34,16 @@ The web app runs at `http://localhost:5173`; the API runs at `http://localhost:4
 
 To exercise the local collaboration profile, open separate tabs with `?user=harper.dennis`, `?user=riley.chen`, or `?user=samantha.lee`. Harper and Riley may edit; Samantha is read-only. These query identities are development-only and must be replaced by verified OIDC identity in production.
 
+### Deep-link the web workspace
+
+The web client keeps its active surface and project context in the URL. For example:
+
+```text
+http://localhost:5173/?view=explorer&asset=P-101&tenant=demo&project=north-plant
+```
+
+Supported `view` values are `canvas`, `explorer`, `sources`, `pipelines`, `models`, `context`, `diagrams`, `matching`, `spatial`, `writeback`, and `audit`. The optional development `user` parameter can be combined with these route parameters. Unknown query parameters are preserved for the OIDC flow.
+
 The optional local identity provider is isolated in its own Compose file:
 
 ```powershell
@@ -38,6 +51,18 @@ npm run infra:identity
 ```
 
 The API and Vite both read this root `.env`. See [`infra/keycloak/README.md`](infra/keycloak/README.md) for the OIDC variables and demo login setup. The PostgreSQL schema and transactional outbox are a cutover foundation, not yet the API runtime; see [ADR 0005](docs/architecture/0005-postgresql-cutover-and-transactional-outbox.md).
+
+### Rehearse a SQLite cutover
+
+Create a deterministic preflight bundle before planning a one-way PostgreSQL import:
+
+```powershell
+npm run cutover:preflight --workspace @open-data-fusion/api -- `
+  --database data/open-data-fusion.db `
+  --output "$env:TEMP\odf-cutover-preflight.json"
+```
+
+The command opens SQLite read-only, validates workspace history and membership invariants, then writes the JSON bundle only when validation succeeds. It does not import into PostgreSQL, alter SQLite, or enable dual writes; it is a rehearsal input for the cutover described by [ADR 0005](docs/architecture/0005-postgresql-cutover-and-transactional-outbox.md).
 
 ```powershell
 npm run check
@@ -47,7 +72,7 @@ npm run check
 
 ```text
 apps/api            Local API, SQLite schema, seed data, ingest, audit, workspace revisions
-apps/web            React/Vite Industrial Canvas and Asset Explorer
+apps/web            Responsive React/Vite Canvas, Explorer, and governed platform surfaces
 packages/contracts  Shared domain and API types
 infra/keycloak      Reproducible local OIDC realm and browser/API clients
 infra/postgres      Production workspace, history, membership, audit, and outbox migration
@@ -57,4 +82,4 @@ docs/architecture   Architecture decision records
 
 ## Product boundary
 
-The kernel still excludes a shared multi-instance event broker, offline merge-resolution, industrial write-back, P&ID parsing, 3D, and autonomous ML matching. Those capabilities are gated behind a production-like design-partner pilot.
+The kernel still excludes a shared multi-instance event broker and offline merge-resolution. Industrial write-back is fail-closed unless an external executor and backend policy are configured; critical requests remain non-executable. Diagram extraction is currently text/tag based, Spatial uses a lightweight review schematic rather than a 3D engine, and matching outputs remain proposal-only. Full P&ID parsing, production 3D, and autonomous ML acceptance remain gated behind a production-like design-partner pilot.

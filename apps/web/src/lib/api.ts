@@ -122,9 +122,16 @@ export async function getExplorerSnapshot(
   signal?: AbortSignal,
 ): Promise<ExplorerSnapshot> {
   const encodedId = encodeURIComponent(externalId);
+  const telemetryTo = Date.now();
+  const telemetryFrom = telemetryTo - 30 * 24 * 60 * 60 * 1_000;
+  const telemetryQuery = new URLSearchParams({
+    from: new Date(telemetryFrom).toISOString(),
+    to: new Date(telemetryTo).toISOString(),
+    limit: "5000",
+  });
   const [detail, telemetry] = await Promise.all([
     request<AssetDetailResponse>(`/api/v1/assets/${encodedId}`, { signal }),
-    request<TelemetryResponse>(`/api/v1/assets/${encodedId}/telemetry?limit=500`, { signal }),
+    request<TelemetryResponse>(`/api/v1/assets/${encodedId}/telemetry?${telemetryQuery.toString()}`, { signal }),
   ]);
   return { detail, telemetry };
 }

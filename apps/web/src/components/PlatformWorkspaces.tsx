@@ -420,13 +420,16 @@ export function ModelsWorkspace({ context }: { context: PlatformContext | null }
   );
 }
 
-function PlatformCandidateRow({ candidate, busy, onReview }: { candidate: PlatformContextCandidate; busy: boolean; onReview: (candidate: PlatformContextCandidate, decision: "accepted" | "rejected") => void }) {
+function PlatformCandidateRow({ candidate, busy, onReview }: { candidate: PlatformContextCandidate; busy: boolean; onReview: (candidate: PlatformContextCandidate, decision: "accepted" | "rejected", comment: string) => void }) {
+  const [pendingDecision, setPendingDecision] = useState<"accepted" | "rejected" | null>(null);
+  const [comment, setComment] = useState("");
+
   return (
     <li className="governance-list-row platform-candidate-row">
       <div className="relation-route"><strong>{candidate.source.id}</strong><span><GitBranch size={14} /> {candidate.relationType}</span><strong>{candidate.target.id}</strong></div>
       <div className="governance-row-meta"><span className={`status-chip status-${candidate.status}`}>{candidate.status}</span><span>{Math.round(candidate.confidence * 100)}% confidence</span><span>{candidate.source.type} → {candidate.target.type}</span><span>{candidate.reviewedBy ? `Reviewed by ${candidate.reviewedBy}` : `Proposed by ${candidate.createdBy}`}</span></div>
       {Object.keys(candidate.evidence).length > 0 ? <details><summary>Evidence</summary><pre>{JSON.stringify(candidate.evidence, null, 2)}</pre></details> : null}
-      {candidate.status === "proposed" ? <div className="candidate-actions"><button type="button" disabled={busy} onClick={() => onReview(candidate, "accepted")}><Check size={14} /> Accept</button><button type="button" disabled={busy} onClick={() => onReview(candidate, "rejected")}><X size={14} /> Reject</button></div> : null}
+      {candidate.status === "proposed" ? <div className="candidate-review"><div className="candidate-actions"><button type="button" disabled={busy} aria-pressed={pendingDecision === "accepted"} onClick={() => setPendingDecision("accepted")}><Check size={14} /> Accept</button><button type="button" disabled={busy} aria-pressed={pendingDecision === "rejected"} onClick={() => setPendingDecision("rejected")}><X size={14} /> Reject</button></div>{pendingDecision ? <div className="candidate-confirmation"><label>Review evidence<textarea rows={2} value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Optional decision rationale" /></label><div><button type="button" disabled={busy} onClick={() => onReview(candidate, pendingDecision, comment)}>{busy ? "Saving…" : `Confirm ${pendingDecision === "accepted" ? "accept" : "reject"}`}</button><button type="button" disabled={busy} onClick={() => { setPendingDecision(null); setComment(""); }}>Cancel</button></div></div> : null}</div> : null}
     </li>
   );
 }
@@ -465,12 +468,12 @@ export function PlatformContextWorkspace({ context, onOpenAsset }: { context: Pl
   const filteredCandidates = useMemo(() => !deferredQuery ? candidates.items : candidates.items.filter((candidate) => `${candidate.source.id} ${candidate.target.id} ${candidate.relationType} ${candidate.status}`.toLowerCase().includes(deferredQuery)), [candidates.items, deferredQuery]);
   const filteredLegacy = useMemo(() => !deferredQuery ? legacyRelations : legacyRelations.filter((relation) => `${relation.source.externalId} ${relation.target.externalId} ${relation.type} ${relation.status}`.toLowerCase().includes(deferredQuery)), [deferredQuery, legacyRelations]);
 
-  async function review(candidate: PlatformContextCandidate, decision: "accepted" | "rejected") {
+  async function review(candidate: PlatformContextCandidate, decision: "accepted" | "rejected", comment: string) {
     if (!context) return;
     setReviewing(candidate.id);
     setReviewIssue(null);
     try {
-      const updated = await reviewPlatformCandidate(context, candidate.id, { decision });
+      const updated = await reviewPlatformCandidate(context, candidate.id, { decision, ...(comment.trim() ? { comment: comment.trim() } : {}) });
       setCandidates((state) => ({ ...state, items: state.items.map((item) => item.id === updated.id ? updated : item) }));
     } catch (error) {
       setReviewIssue(platformIssue(error, "Candidate review could not be saved"));
@@ -493,7 +496,7 @@ export function PlatformContextWorkspace({ context, onOpenAsset }: { context: Pl
       <SectionHeading eyebrow="Governed contextualization" title="Context" description="Review project-scoped contextualization candidates first, while retaining the legacy relation projection for comparison." icon={<Tags size={24} />} />
       <div className="section-toolbar"><label className="section-search"><Search size={16} /><span className="sr-only">Filter contextualization</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter candidates and legacy relations" /></label></div>
       {!context ? <ContextRequired /> : null}
-      <section className="resource-section context-primary"><ResourceHeader icon={<Tags size={18} />} title="Platform candidates" count={filteredCandidates.length} />{candidates.loading ? <LoadState message="Loading contextualization candidates…" /> : null}{candidates.issue ? <IssueNotice issue={candidates.issue} onRetry={() => setReloadToken((value) => value + 1)} /> : null}{reviewIssue ? <IssueNotice issue={reviewIssue} /> : null}{!candidates.loading && !candidates.issue && filteredCandidates.length === 0 ? <PageEmpty>{query ? "No candidates match this filter." : "No platform candidates exist in this project."}</PageEmpty> : null}<ol className="governance-list">{filteredCandidates.map((candidate) => <PlatformCandidateRow key={candidate.id} candidate={candidate} busy={reviewing === candidate.id} onReview={(item, decision) => void review(item, decision)} />)}</ol><CursorLoadMore cursor={candidates.nextCursor} loading={candidates.loadingMore} onLoad={() => void loadMoreCandidates()} /></section>
+      <section className="resource-section context-primary"><ResourceHeader icon={<Tags size={18} />} title="Platform candidates" count={filteredCandidates.length} />{candidates.loading ? <LoadState message="Loading contextualization candidates…" /> : null}{candidates.issue ? <IssueNotice issue={candidates.issue} onRetry={() => setReloadToken((value) => value + 1)} /> : null}{reviewIssue ? <IssueNotice issue={reviewIssue} /> : null}{!candidates.loading && !candidates.issue && filteredCandidates.length === 0 ? <PageEmpty>{query ? "No candidates match this filter." : "No platform candidates exist in this project."}</PageEmpty> : null}<ol className="governance-list">{filteredCandidates.map((candidate) => <PlatformCandidateRow key={candidate.id} candidate={candidate} busy={reviewing === candidate.id} onReview={review} />)}</ol><CursorLoadMore cursor={candidates.nextCursor} loading={candidates.loadingMore} onLoad={() => void loadMoreCandidates()} /></section>
       <section className="resource-section legacy-context-section"><ResourceHeader icon={<GitBranch size={18} />} title="Legacy relation projection" count={filteredLegacy.length} />{legacyIssue ? <IssueNotice issue={legacyIssue} onRetry={() => setReloadToken((value) => value + 1)} /> : null}{!legacyIssue && filteredLegacy.length === 0 ? <PageEmpty>{query ? "No legacy relations match this filter." : "No legacy relations are available."}</PageEmpty> : null}<ol className="governance-list">{filteredLegacy.map((relation) => <LegacyRelationRow key={relation.id} relation={relation} onOpenAsset={onOpenAsset} />)}</ol></section>
     </main>
   );

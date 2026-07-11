@@ -1,6 +1,7 @@
 import {
   Box,
   ChevronsLeft,
+  ChevronsRight,
   Cuboid,
   Database,
   FileSearch,
@@ -11,6 +12,7 @@ import {
   Tags,
   Workflow,
 } from "lucide-react";
+import { BrandLogo } from "./BrandLogo";
 
 const navigation = [
   { label: "Explorer", icon: Network },
@@ -30,13 +32,16 @@ export const navigationLabels: NavigationLabel[] = navigation.map(({ label }) =>
 
 interface SidebarProps {
   active: NavigationLabel;
+  collapsed: boolean;
+  collapseLocked: boolean;
   onNavigate: (label: NavigationLabel) => void;
+  onToggleCollapsed: () => void;
 }
 
-export function Sidebar({ active, onNavigate }: SidebarProps) {
+export function Sidebar({ active, collapsed, collapseLocked, onNavigate, onToggleCollapsed }: SidebarProps) {
   return (
     <aside className="sidebar" aria-label="Primary navigation">
-      <div className="brand">Open Data Fusion</div>
+      <div className="brand"><BrandLogo variant={collapsed ? "icon" : "full"} /></div>
       <nav className="primary-nav">
         {navigation.map(({ label, icon: Icon }) => {
           const isActive = label === active;
@@ -54,9 +59,11 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
           );
         })}
       </nav>
-      <button className="collapse-nav" type="button" aria-label="Collapse navigation">
-        <ChevronsLeft size={25} strokeWidth={1.6} />
-      </button>
+      {!collapseLocked ? (
+        <button className="collapse-nav" type="button" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} aria-expanded={!collapsed} onClick={onToggleCollapsed}>
+          {collapsed ? <ChevronsRight size={25} strokeWidth={1.6} /> : <ChevronsLeft size={25} strokeWidth={1.6} />}
+        </button>
+      ) : null}
     </aside>
   );
 }

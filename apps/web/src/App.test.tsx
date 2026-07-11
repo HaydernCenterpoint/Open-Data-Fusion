@@ -222,6 +222,7 @@ describe("Open Data Fusion workspace", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    window.history.replaceState({}, "", "/");
     serverWorkspace = workspaceFixture();
     serverMembers = [
       { workspaceId: serverWorkspace.id, userId: "harper.dennis", displayName: "Harper Dennis", role: "owner" },
@@ -455,6 +456,29 @@ describe("Open Data Fusion workspace", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Note" })).toBeEnabled());
   }
 
+  it("groups canvas tools in a dedicated toolbar without a duplicate brand control", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Pump P-101 canvas node" });
+
+    const toolbar = screen.getByRole("toolbar", { name: "Canvas tools" });
+    expect(within(toolbar).getByRole("button", { name: "Select" })).toBeInTheDocument();
+    expect(within(toolbar).getByRole("button", { name: "Layers" })).toBeInTheDocument();
+    expect(within(toolbar).queryByRole("button", { name: "Open Data Fusion Explorer" })).not.toBeInTheDocument();
+    expect(toolbar.querySelectorAll(".canvas-tool-group")).toHaveLength(3);
+  });
+
+  it("opens real layer navigation and the responsive selection inspector", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Pump P-101 canvas node" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Layers" }));
+    const layers = screen.getByRole("region", { name: "Canvas layers" });
+    fireEvent.click(within(layers).getByRole("button", { name: /Operator note/ }));
+
+    expect(screen.getByRole("complementary", { name: "Selection inspector" })).toHaveClass("is-open");
+    expect(screen.getByRole("button", { name: "Open selection inspector" })).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("renders positions and edges from the workspace snapshot", async () => {
     render(<App />);
     const pump = await screen.findByRole("button", { name: "Pump P-101 canvas node" });
@@ -462,6 +486,21 @@ describe("Open Data Fusion workspace", () => {
     expect(pump).toHaveAttribute("data-canvas-x", "321");
     expect(pump).toHaveAttribute("data-canvas-y", "123");
     expect(document.querySelector('[data-edge-id="canvas-p101-pressure"]')).toBeInTheDocument();
+  });
+
+  it("fits canvas content into the visible stage", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Pump P-101 canvas node" });
+    await waitForEditor();
+    const stage = screen.getByRole("main", { name: "Open Data Fusion industrial canvas" });
+    Object.defineProperty(stage, "clientWidth", { configurable: true, value: 840 });
+    Object.defineProperty(stage, "clientHeight", { configurable: true, value: 720 });
+
+    const world = stage.querySelector(".canvas-dots") as HTMLElement;
+    fireEvent.click(screen.getByRole("button", { name: "Fit canvas" }));
+
+    await waitFor(() => expect(world.style.transform).not.toBe("translate(0px, 0px) scale(1)"));
+    expect(world.style.transform).toMatch(/scale\(0\.[0-9]+\)/);
   });
 
   it("adds a real shared note through the operations endpoint", async () => {
@@ -558,6 +597,8 @@ describe("Open Data Fusion workspace", () => {
 
     fireEvent.change(screen.getByLabelText("Node label"), { target: { value: "Shift handover" } });
     fireEvent.change(screen.getByLabelText("Note content"), { target: { value: "Inspect seal before restart" } });
+    fireEvent.change(screen.getByLabelText("Node X position"), { target: { value: "760" } });
+    fireEvent.change(screen.getByLabelText("Node Y position"), { target: { value: "590" } });
     fireEvent.change(screen.getByLabelText("Node width"), { target: { value: "280" } });
     fireEvent.change(screen.getByLabelText("Node height"), { target: { value: "160" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
@@ -568,10 +609,10 @@ describe("Open Data Fusion workspace", () => {
     expect(body.operations[0]).toEqual({
       type: "updateNode",
       nodeId: "canvas-note",
-      patch: { data: { label: "Shift handover", width: 280, height: 160, text: "Inspect seal before restart" } },
+      patch: { data: { label: "Shift handover", width: 280, height: 160, text: "Inspect seal before restart" }, position: { x: 760, y: 590 } },
     });
     const updatedNote = await screen.findByRole("button", { name: "Shift handover canvas node" });
-    expect(updatedNote).toHaveStyle({ width: "280px", height: "160px" });
+    expect(updatedNote).toHaveStyle({ width: "280px", height: "160px", transform: "translate3d(760px, 590px, 0)" });
   });
 
   it("edits and deletes a selected relationship", async () => {
@@ -788,6 +829,32 @@ describe("Open Data Fusion workspace", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /Saved v2/ })).toBeInTheDocument());
   });
 
+  it("supports deep-linked assets and keeps navigation in the URL", async () => {
+    window.history.replaceState({}, "", "/?view=explorer&asset=P-102&tenant=demo&project=north-plant");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Pump P-102" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Audit" }));
+    expect(await screen.findByRole("heading", { name: "Audit" })).toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get("view")).toBe("audit");
+    expect(new URLSearchParams(window.location.search).get("asset")).toBeNull();
+
+    window.history.pushState({}, "", "/?view=explorer&asset=P-101&tenant=demo&project=north-plant");
+    fireEvent.popState(window);
+    expect(await screen.findByRole("heading", { name: "Pump P-101" })).toBeInTheDocument();
+  });
+
+  it("collapses and expands desktop navigation", async () => {
+    render(<App />);
+    openExplorer();
+    await screen.findByRole("heading", { name: "Asset Explorer" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse navigation" }));
+    expect(document.querySelector(".app-shell")).toHaveClass("navigation-collapsed");
+    fireEvent.click(screen.getByRole("button", { name: "Expand navigation" }));
+    expect(document.querySelector(".app-shell")).not.toHaveClass("navigation-collapsed");
+  });
+
   it("preserves Explorer navigation and data context", async () => {
     render(<App />);
     openExplorer();
@@ -796,11 +863,22 @@ describe("Open Data Fusion workspace", () => {
     expect(await screen.findByText("Related time series (3)")).toBeInTheDocument();
   });
 
+  it("keeps related data available as a responsive drawer", async () => {
+    render(<App />);
+    openExplorer();
+    await screen.findByRole("heading", { name: "Asset Explorer" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open related data" }));
+    expect(screen.getByRole("complementary", { name: "Related data" })).toHaveClass("is-open");
+    fireEvent.click(within(screen.getByRole("complementary", { name: "Related data" })).getByRole("button", { name: "Close related data" }));
+    expect(screen.getByRole("complementary", { name: "Related data" })).not.toHaveClass("is-open");
+  });
+
   it("opens the ingest workflow from Explorer", () => {
     render(<App />);
     openExplorer();
-    fireEvent.click(screen.getByRole("button", { name: "Ingest data" }));
-    expect(screen.getByRole("dialog", { name: "Ingest data" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Ingest sample" }));
+    expect(screen.getByRole("dialog", { name: "Ingest sample bundle" })).toBeInTheDocument();
     expect(screen.getByText(/1 asset.*1 time series.*1 data point/)).toBeInTheDocument();
   });
 
@@ -845,7 +923,7 @@ describe("Open Data Fusion workspace", () => {
   it("searches API assets and opens the selected asset", async () => {
     render(<App />);
     openExplorer();
-    const search = screen.getByRole("searchbox", { name: "Search project data" });
+    const search = screen.getByRole("combobox", { name: "Search project data" });
     fireEvent.change(search, { target: { value: "P-102" } });
     fireEvent.click(await screen.findByRole("option", { name: /Pump P-102/ }));
 
@@ -934,6 +1012,8 @@ describe("Open Data Fusion workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Context" }));
     const acceptButton = await screen.findByRole("button", { name: "Accept" });
     fireEvent.click(acceptButton);
+    fireEvent.change(screen.getByLabelText("Review evidence"), { target: { value: "Verified against P&ID tag" } });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm accept" }));
 
     await waitFor(() => expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument());
     const reviewRequest = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/api/v1/platform/contextualization/candidates/candidate-1/review") && init?.method === "POST");
@@ -941,7 +1021,7 @@ describe("Open Data Fusion workspace", () => {
       "x-odf-tenant-id": "demo",
       "x-odf-project-id": "north-plant",
     });
-    expect(JSON.parse(String(reviewRequest?.[1]?.body))).toEqual({ decision: "accepted" });
+    expect(JSON.parse(String(reviewRequest?.[1]?.body))).toEqual({ decision: "accepted", comment: "Verified against P&ID tag" });
   });
 
   it("extracts P&ID tags and loads the next governed diagram page", async () => {
@@ -1100,7 +1180,7 @@ describe("Open Data Fusion workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sources" }));
     await screen.findByText("North OPC-UA");
     fireEvent.click(screen.getByRole("button", { name: "Explorer" }));
-    fireEvent.change(screen.getByRole("searchbox", { name: "Search project data" }), { target: { value: "P-102" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Search project data" }), { target: { value: "P-102" } });
 
     expect(await screen.findByText(/sign-in expired/i)).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/v1/assets?") && String(url).includes("q=P-102"))).toBe(false);

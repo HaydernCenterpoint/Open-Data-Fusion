@@ -13,6 +13,7 @@
     "prebuild": "npm --prefix ../.. run build --workspace @open-data-fusion/platform-core",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
+    "cutover:preflight": "npm run build && node dist/src/cutover-preflight-cli.js",
     "pretest": "npm --prefix ../.. run build --workspace @open-data-fusion/platform-core",
     "test": "vitest run",
     "pretest:watch": "npm --prefix ../.. run build --workspace @open-data-fusion/platform-core",

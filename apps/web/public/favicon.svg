@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 136" fill="none">
+  <defs>
+    <linearGradient id="blue" x1="33" x2="139" y1="17" y2="76" gradientUnits="userSpaceOnUse"><stop stop-color="#1748ec"/><stop offset="1" stop-color="#2a9fec"/></linearGradient>
+    <linearGradient id="teal" x1="33" x2="139" y1="50" y2="75" gradientUnits="userSpaceOnUse"><stop stop-color="#00aa98"/><stop offset="1" stop-color="#00c3a8"/></linearGradient>
+    <linearGradient id="sky" x1="33" x2="139" y1="83" y2="65" gradientUnits="userSpaceOnUse"><stop stop-color="#16a8ed"/><stop offset="1" stop-color="#00b7d9"/></linearGradient>
+    <linearGradient id="navy" x1="33" x2="139" y1="116" y2="65" gradientUnits="userSpaceOnUse"><stop stop-color="#081a3d"/><stop offset="1" stop-color="#145d87"/></linearGradient>
+    <linearGradient id="fusion" x1="113" x2="158" y1="42" y2="94" gradientUnits="userSpaceOnUse"><stop stop-color="#00c4aa"/><stop offset="1" stop-color="#00a890"/></linearGradient>
+  </defs>
+  <path d="M42 17H72C88 17 92 24 100 38L116 62C122 71 130 74 139 74" stroke="url(#blue)" stroke-width="7" stroke-linecap="round"/>
+  <path d="M42 50H75C88 50 92 55 101 64C110 73 121 76 139 75" stroke="url(#teal)" stroke-width="7" stroke-linecap="round"/>
+  <path d="M42 83H75C88 83 92 78 101 70C110 62 120 61 139 65" stroke="url(#sky)" stroke-width="7" stroke-linecap="round"/>
+  <path d="M42 116H75C88 116 91 109 99 95L113 76C120 66 127 64 139 64" stroke="url(#navy)" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="22" cy="17" r="11" fill="url(#blue)"/><circle cx="22" cy="50" r="11" fill="url(#teal)"/><circle cx="22" cy="83" r="11" fill="url(#sky)"/><circle cx="22" cy="116" r="11" fill="url(#navy)"/>
+  <circle cx="137" cy="69" r="22" fill="url(#fusion)"/><circle cx="137" cy="69" r="8" fill="#fff"/>
+</svg>

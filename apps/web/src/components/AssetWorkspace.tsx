@@ -1,12 +1,16 @@
 import { Activity, AlertCircle, Check, Factory, FileText, GitBranch, History, RefreshCw, Upload } from "lucide-react";
-import { useState } from "react";
+import { useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { ExplorerSnapshot } from "../types";
 import { OverviewDetails } from "./OverviewDetails";
-import { PressureChart } from "./PressureChart";
+import { PressureChart, type PressureChartRange } from "./PressureChart";
 import { PumpIcon } from "./PumpIcon";
 
 const tabs = ["Overview", "Time series", "Documents", "Relations", "Lineage"] as const;
 type Tab = (typeof tabs)[number];
+
+function tabKey(tab: Tab): string {
+  return tab.toLowerCase().replaceAll(" ", "-");
+}
 
 interface AssetWorkspaceProps {
   onIngest: () => void;
@@ -71,15 +75,28 @@ function AssetTitleIcon({ type }: { type: string }) {
 
 export function AssetWorkspace({ onIngest, snapshot, loading = false, error = "", onRetry }: AssetWorkspaceProps) {
   const [tab, setTab] = useState<Tab>("Overview");
-  const [range, setRange] = useState("24h");
-  const [live, setLive] = useState(true);
+  const [range, setRange] = useState<PressureChartRange>("24h");
+  const tabsetId = useId();
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const series = snapshot?.telemetry.series.find((item) => item.externalId.toLowerCase().includes("pressure")) ?? snapshot?.telemetry.series[0];
-  const values = series?.points.map((point) => point.value);
+  const points = series?.points;
   const acceptedRelations = snapshot?.detail.relations.filter((relation) => relation.status === "accepted").length ?? 0;
+
+  function onTabKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, currentIndex: number) {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = tabs.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    setTab(tabs[nextIndex]);
+    tabRefs.current[nextIndex]?.focus();
+  }
 
   return (
     <main className="asset-workspace">
-      <div className="page-heading-row"><h1>Asset Explorer</h1><button className="ingest-button" type="button" onClick={onIngest}><Upload size={19} /> Ingest data</button></div>
+      <div className="page-heading-row"><h1>Asset Explorer</h1><button className="ingest-button" type="button" onClick={onIngest}><Upload size={19} /> Ingest sample</button></div>
       {loading || error ? <ExplorerDataState loading={loading} error={error} onRetry={onRetry} /> : null}
       {!loading && !error && !snapshot ? <div className="explorer-data-state"><AlertCircle size={24} /><div><strong>No asset selected</strong><p>Choose an asset from the hierarchy or global search.</p></div></div> : null}
       {!loading && !error && snapshot ? (
@@ -89,11 +106,17 @@ export function AssetWorkspace({ onIngest, snapshot, loading = false, error = ""
             <div className="review-status"><span><Check size={11} /></span><div><strong>{acceptedRelations > 0 ? "Reviewed" : "No accepted relations"}</strong><small>Contextualization status</small></div></div>
           </div>
           <div className="tabs" role="tablist" aria-label="Asset data views">
-            {tabs.map((item) => <button key={item} type="button" role="tab" aria-selected={tab === item} className={tab === item ? "is-active" : ""} onClick={() => setTab(item)}>{item}</button>)}
+            {tabs.map((item, index) => {
+              const key = tabKey(item);
+              const selected = tab === item;
+              return <button ref={(element) => { tabRefs.current[index] = element; }} id={`${tabsetId}-${key}-tab`} key={item} type="button" role="tab" aria-controls={`${tabsetId}-${key}-panel`} aria-selected={selected} tabIndex={selected ? 0 : -1} className={selected ? "is-active" : ""} onKeyDown={(event) => onTabKeyDown(event, index)} onClick={() => setTab(item)}>{item}</button>;
+            })}
           </div>
-          {tab === "Overview" ? (
-            <><PressureChart range={range} onRangeChange={setRange} live={live} onLiveToggle={() => setLive((value) => !value)} values={values} title={series?.name || "Telemetry"} unit={series?.unit || "value"} /><OverviewDetails snapshot={snapshot} /></>
-          ) : <AlternateTab tab={tab} snapshot={snapshot} />}
+          <div id={`${tabsetId}-${tabKey(tab)}-panel`} role="tabpanel" aria-labelledby={`${tabsetId}-${tabKey(tab)}-tab`} tabIndex={0}>
+            {tab === "Overview" ? (
+              <><PressureChart range={range} onRangeChange={setRange} points={points} rangeEnd={snapshot.telemetry.range.to} title={series?.name || "Telemetry"} unit={series?.unit || "value"} /><OverviewDetails snapshot={snapshot} /></>
+            ) : <AlternateTab tab={tab} snapshot={snapshot} />}
+          </div>
         </div>
       ) : null}
     </main>
