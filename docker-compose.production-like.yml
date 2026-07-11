@@ -1,0 +1,133 @@
+# Production-like integration overlay. It is deliberately local/CI scoped:
+# ports bind to loopback, credentials are supplied at runtime, and Keycloak
+# remains in start-dev mode. It is not a production deployment topology.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.production-like.yml \
+#     --profile production-like up --build --wait
+
+services:
+  # Promote the one-shot migration gate into this profile so API instances
+  # cannot start against an unverified schema.
+  migrate:
+    profiles: ["production-like"]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.6.4
+    profiles: ["production-like"]
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    environment:
+      # Keep the issuer stable inside the Compose network. The host can still
+      # request a CI token through the loopback port below.
+      KC_HOSTNAME: http://keycloak:8080
+      KC_BOOTSTRAP_ADMIN_USERNAME: "${KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME:?Set KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME}"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:?Set KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD via a secret manager or environment variable}"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      ODF_DEMO_USER_PASSWORD: "${ODF_DEMO_USER_PASSWORD:?Set ODF_DEMO_USER_PASSWORD for the imported development realm}"
+      ODF_CONNECTOR_CLIENT_SECRET: "${ODF_CONNECTOR_CLIENT_SECRET:?Set ODF_CONNECTOR_CLIENT_SECRET via a secret manager or environment variable}"
+    ports:
+      - "127.0.0.1:${ODF_KEYCLOAK_PORT:-8080}:8080"
+      - "127.0.0.1:${ODF_KEYCLOAK_MANAGEMENT_PORT:-9000}:9000"
+    volumes:
+      - ./infra/keycloak/open-data-fusion-realm.json:/opt/keycloak/data/import/open-data-fusion-realm.json:ro
+    mem_limit: 1g
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c '{ printf "HEAD /health/ready HTTP/1.0\\r\\n\\r\\n" >&3;
+          grep -q "200" <&3; } 3<>/dev/tcp/127.0.0.1/9000'
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+
+  # Override the SQLite preview profile with the production Canvas boundary.
+  # ODF_API_POSTGRES_URL must identify a login inheriting only odf_app; it is
+  # purposely distinct from the migrator and outbox-publisher login.
+  api:
+    profiles: ["production-like"]
+    image: open-data-fusion-api:production-like
+    environment:
+      ODF_AUTH_MODE: oidc
+      ODF_OIDC_ISSUER: http://keycloak:8080/realms/open-data-fusion
+      ODF_OIDC_AUDIENCE: open-data-fusion-api
+      ODF_OIDC_JWKS_URI: http://keycloak:8080/realms/open-data-fusion/protocol/openid-connect/certs
+      ODF_OIDC_USER_CLAIM: preferred_username
+      ODF_WORKSPACE_PERSISTENCE: postgres
+      # Empty is deliberate during dependency/migration bootstrap. The API
+      # process rejects it at startup, so the profile remains fail-closed.
+      ODF_API_POSTGRES_URL: "${ODF_API_POSTGRES_URL:-}"
+      ODF_SEED: "false"
+      ODF_SHARED_EVENTS_REQUIRED: "true"
+      ODF_REDIS_URL: "redis://:${ODF_REDIS_PASSWORD:?Set ODF_REDIS_PASSWORD via a secret manager or environment variable}@odf-redis:6379/0"
+      ODF_OTEL_ENABLED: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+
+  # A separately addressed API replica makes it possible to prove that a
+  # committed Canvas update reaches an SSE client connected elsewhere.
+  api-replica:
+    profiles: ["production-like"]
+    image: open-data-fusion-api:production-like
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      ODF_AUTH_MODE: oidc
+      ODF_OIDC_ISSUER: http://keycloak:8080/realms/open-data-fusion
+      ODF_OIDC_AUDIENCE: open-data-fusion-api
+      ODF_OIDC_JWKS_URI: http://keycloak:8080/realms/open-data-fusion/protocol/openid-connect/certs
+      ODF_OIDC_USER_CLAIM: preferred_username
+      ODF_WORKSPACE_PERSISTENCE: postgres
+      ODF_API_POSTGRES_URL: "${ODF_API_POSTGRES_URL:-}"
+      ODF_SEED: "false"
+      ODF_DATABASE_PATH: /var/lib/odf/open-data-fusion.db
+      ODF_RAW_LANDING_PATH: /var/lib/odf/raw
+      ODF_OBJECT_STORE_PATH: /var/lib/odf/objects
+      ODF_OBJECT_STORE_MAX_BYTES: "52428800"
+      ODF_SHARED_EVENTS_REQUIRED: "true"
+      ODF_REDIS_URL: "redis://:${ODF_REDIS_PASSWORD:?Set ODF_REDIS_PASSWORD via a secret manager or environment variable}@odf-redis:6379/0"
+      ODF_OTEL_ENABLED: "false"
+      PORT: "4310"
+    ports:
+      - "127.0.0.1:${ODF_API_REPLICA_PORT:-4311}:4310"
+    volumes:
+      - odf-api-replica-data:/var/lib/odf
+    depends_on:
+      odf-postgres:
+        condition: service_healthy
+      odf-redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    secrets:
+      - odf_metrics_token
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4310/ready').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # The publisher receives a different least-privilege URL from API replicas.
+  # Its only job is to mark committed outbox rows after Redis acknowledges the
+  # stream write.
+  outbox-worker:
+    profiles: ["production-like"]
+    environment:
+      # The worker's own required() startup check rejects an empty URL.
+      ODF_POSTGRES_URL: "${ODF_OUTBOX_POSTGRES_URL:-}"
+      ODF_REDIS_URL: "redis://:${ODF_REDIS_PASSWORD:?Set ODF_REDIS_PASSWORD via a secret manager or environment variable}@odf-redis:6379/0"
+
+volumes:
+  odf-api-replica-data:

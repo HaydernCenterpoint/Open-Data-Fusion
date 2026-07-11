@@ -22,6 +22,10 @@
     "infra:validate": "python infra/postgres/scripts/validate_static.py",
     "infra:postgres": "docker compose up -d odf-postgres",
     "infra:migrate": "docker compose --profile migrate run --rm migrate",
+    "infra:production-like:dependencies": "docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like up -d --wait odf-postgres odf-redis",
+    "infra:production-like:migrate": "docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like run --rm migrate",
+    "infra:production-like": "docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like up --build --wait",
+    "infra:production-like:down": "docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like down --volumes --remove-orphans",
     "infra:identity": "docker compose -f docker-compose.identity.yml up -d",
     "infra:identity:down": "docker compose -f docker-compose.identity.yml down"
   },

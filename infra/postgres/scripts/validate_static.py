@@ -121,6 +121,70 @@ def validate_migrations(migration_paths: list[Path]) -> None:
     ]:
         require(guardrail in cutover, f"missing SQLite cutover role guardrail: {guardrail}")
 
+    workspace_grants = read(MIGRATIONS / "006_workspace_application_role_grants.sql")
+    for guardrail in [
+        "GRANT SELECT, UPDATE ON odf.workspaces TO odf_app",
+        "GRANT SELECT, INSERT ON odf.workspace_revisions TO odf_app",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON odf.workspace_members TO odf_app",
+        "GRANT SELECT ON odf.workspaces, odf.workspace_revisions, odf.workspace_members TO odf_readonly",
+        "REVOKE INSERT, UPDATE, DELETE ON odf.workspace_scopes FROM odf_app",
+    ]:
+        require(guardrail in workspace_grants, f"missing PostgreSQL Canvas least-privilege guardrail: {guardrail}")
+
+    provisioner = read(MIGRATIONS / "007_tenant_project_provisioning_role.sql")
+    for guardrail in [
+        "CREATE ROLE odf_tenant_provisioner",
+        "CREATE ROLE odf_tenant_provision_owner",
+        "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT NOBYPASSRLS",
+        "ALTER ROLE odf_tenant_provisioner WITH",
+        "ALTER ROLE odf_tenant_provision_owner WITH",
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA odf FROM odf_tenant_provisioner",
+        "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA odf FROM odf_tenant_provisioner",
+        "GRANT SELECT ON odf.schema_migrations TO odf_tenant_provisioner",
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA odf FROM odf_tenant_provision_owner",
+        "GRANT SELECT, INSERT ON",
+        "odf.tenants",
+        "odf.projects",
+        "odf.tenant_members",
+        "odf.project_members",
+        "odf.model_spaces",
+        "odf.audit_log",
+        "GRANT USAGE ON SEQUENCE odf.audit_log_id_seq TO odf_tenant_provision_owner",
+        "CREATE POLICY tenant_provision_owner_read",
+        "CREATE POLICY tenant_provision_owner_insert",
+        "TO odf_tenant_provision_owner USING (true)",
+        "TO odf_tenant_provision_owner WITH CHECK (true)",
+        "CREATE OR REPLACE FUNCTION odf.provision_tenant_project(",
+        "SECURITY DEFINER",
+        "SET search_path = pg_catalog, odf, pg_temp",
+        "SET row_security = on",
+        "tenant/project bootstrap target is partially occupied",
+        "tenant/project bootstrap target already exists but is not an exact completed bootstrap",
+        "ALTER FUNCTION odf.provision_tenant_project(",
+        "OWNER TO odf_tenant_provision_owner",
+        "GRANT EXECUTE ON FUNCTION odf.provision_tenant_project(",
+        ") TO odf_tenant_provisioner;",
+        "REVOKE INSERT, UPDATE, DELETE ON odf.projects FROM odf_app",
+        "REVOKE INSERT, UPDATE, DELETE ON odf.tenant_members, odf.project_members FROM odf_app",
+    ]:
+        require(guardrail in provisioner, f"missing tenant/project provisioning guardrail: {guardrail}")
+    require(
+        re.search(r"CREATE POLICY\s+tenant_provisioner_.*?TO\s+odf_tenant_provisioner", provisioner, re.DOTALL) is None,
+        "tenant provisioner must not receive global RLS policies",
+    )
+    direct_provisioner_table_grants = [
+        (" ".join(privileges.split()), " ".join(relation.split()))
+        for privileges, relation in re.findall(
+            r"GRANT\s+([^;]+?)\s+ON\s+(?:TABLE\s+)?(odf\.[^;]+?)\s+TO\s+odf_tenant_provisioner\s*;",
+            provisioner,
+            re.DOTALL,
+        )
+    ]
+    require(
+        direct_provisioner_table_grants == [("SELECT", "odf.schema_migrations")],
+        "tenant provisioner must have only schema_migrations SELECT and no direct tenant data grants",
+    )
+
 
 def validate_tenant_foreign_keys(sql: str) -> None:
     """Catch scope-breaking composite FKs before a migration reaches PostgreSQL.
@@ -194,11 +258,64 @@ def validate_runtime_artifacts() -> None:
     compose = read(ROOT / "docker-compose.yml")
     for service in ["odf-postgres:", "odf-redis:", "outbox-worker:", "otel-collector:", "prometheus:", "grafana:"]:
         require(service in compose, f"docker-compose.yml missing {service}")
-    require("application-preview" in compose, "application containers must remain explicitly preview-only until the PostgreSQL adapter exists")
+    require("application-preview" in compose, "application preview profile is missing")
+    require("ODF_WORKSPACE_PERSISTENCE: sqlite" in compose, "the application preview must explicitly select SQLite")
     require("profiles: [\"workers\"]" in compose, "outbox worker must remain an explicitly enabled profile")
     require("service_completed_successfully" in compose, "outbox worker must wait for the migration gate")
     require("maxmemory-policy noeviction" in compose, "Redis Streams baseline must not evict queued data")
+    require("ODF_OUTBOX_HEALTH_FILE" in compose, "outbox worker must expose a dependency heartbeat")
+    require("lastSuccessAt" in compose, "outbox worker healthcheck must reject stale heartbeats")
     require("odf_metrics_token:" in compose, "Compose must define the API metrics secret")
+    require("ODF_GRAFANA_ADMIN_PASSWORD:?Set" in compose, "Grafana must not have a checked-in fallback password")
+
+    identity = read(ROOT / "docker-compose.identity.yml")
+    for required_secret in [
+        "KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME:?Set",
+        "KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:?Set",
+        "ODF_DEMO_USER_PASSWORD:?Set",
+        "ODF_CONNECTOR_CLIENT_SECRET:?Set",
+    ]:
+        require(required_secret in identity, f"Keycloak identity profile must require {required_secret.split(':', 1)[0]}")
+    require("/health/ready" in identity, "Keycloak identity profile must expose a readiness healthcheck")
+
+    production_like = read(ROOT / "docker-compose.production-like.yml")
+    for service in ["keycloak:", "api:", "api-replica:", "outbox-worker:"]:
+        require(service in production_like, f"production-like Compose profile missing {service}")
+    for guardrail in [
+        "profiles: [\"production-like\"]",
+        "ODF_WORKSPACE_PERSISTENCE: postgres",
+        "ODF_API_POSTGRES_URL:",
+        "ODF_SEED: \"false\"",
+        "ODF_OUTBOX_POSTGRES_URL:",
+        "ODF_SHARED_EVENTS_REQUIRED: \"true\"",
+        "KC_HOSTNAME: http://keycloak:8080",
+        "service_completed_successfully",
+    ]:
+        require(guardrail in production_like, f"production-like Compose profile missing guardrail: {guardrail}")
+
+    production_like_workflow = read(ROOT / ".github" / "workflows" / "production-like-integration.yml")
+    for guardrail in [
+        "Production-like PostgreSQL Canvas integration",
+        "odf_ci_api",
+        "odf_ci_outbox",
+        "odf_ci_tenant_provision",
+        "Prove security-definer tenant bootstrap boundary",
+        "odf.provision_tenant_project",
+        "production-like-smoke.sh",
+        '"packages/contracts/**"',
+        '"packages/platform-core/**"',
+    ]:
+        require(guardrail in production_like_workflow, f"production-like integration workflow missing guardrail: {guardrail}")
+
+    production_like_smoke = read(ROOT / "infra" / "ci" / "production-like-smoke.sh")
+    for guardrail in [
+        "published_at IS NOT NULL",
+        "XRANGE odf:workspace-events",
+        "eventId",
+        "event: workspace.updated",
+        "has_table_privilege('odf_ci_api'",
+    ]:
+        require(guardrail in production_like_smoke, f"production-like smoke script missing assertion: {guardrail}")
 
     otel = read(ROOT / "infra" / "observability" / "otel-collector-config.yaml")
     prometheus = read(ROOT / "infra" / "observability" / "prometheus.yml")

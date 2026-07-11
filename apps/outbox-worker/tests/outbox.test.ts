@@ -47,8 +47,8 @@ describe("OutboxPump", () => {
     const publisher = new FakePublisher();
     const result = await new OutboxPump(repository, publisher, { workerId: "worker" }).runOnce();
     expect(result).toEqual({ claimed: 2, published: 2, failed: 0 });
-    expect(publisher.events.toSorted()).toEqual(["1", "2"]);
-    expect(repository.published.toSorted()).toEqual(["1", "2"]);
+    expect(publisher.events).toEqual(["1", "2"]);
+    expect(repository.published).toEqual(["1", "2"]);
   });
 
   it("releases failed events with sanitized bounded backoff", async () => {
@@ -60,5 +60,35 @@ describe("OutboxPump", () => {
     expect(result).toEqual({ claimed: 2, published: 1, failed: 1 });
     expect(repository.released).toEqual([{ eventId: "1", error: "broker failed with a transient error", delay: 10_000 }]);
     expect(repository.published).toEqual(["2"]);
+  });
+
+  it("does not publish a later claimed event while an earlier event is still in flight", async () => {
+    const repository = new FakeRepository([event("1"), event("2")]);
+    let releaseFirstEvent: (() => void) | undefined;
+    const firstEventGate = new Promise<void>((resolve) => { releaseFirstEvent = resolve; });
+    let signalFirstStarted: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolve) => { signalFirstStarted = resolve; });
+    const started: string[] = [];
+    const publisher: SharedEventPublisher = {
+      async publish(item) {
+        started.push(item.eventId);
+        if (item.eventId === "1") {
+          signalFirstStarted?.();
+          await firstEventGate;
+        }
+      },
+      async close() {},
+    };
+    const pump = new OutboxPump(repository, publisher, { workerId: "worker" });
+
+    const running = pump.runOnce();
+    await firstStarted;
+    expect(started).toEqual(["1"]);
+    expect(repository.published).toEqual([]);
+
+    releaseFirstEvent?.();
+    await expect(running).resolves.toEqual({ claimed: 2, published: 2, failed: 0 });
+    expect(started).toEqual(["1", "2"]);
+    expect(repository.published).toEqual(["1", "2"]);
   });
 });

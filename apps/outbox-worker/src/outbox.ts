@@ -42,7 +42,10 @@ export class OutboxPump {
     const events = await this.repository.claim(this.batchSize, this.options.workerId, this.leaseMilliseconds);
     let published = 0;
     let failed = 0;
-    await Promise.all(events.map(async (event) => {
+    // Preserve the repository's durable event order. Membership revocations
+    // and workspace mutations for the same aggregate must never overtake one
+    // another on the shared stream.
+    for (const event of events) {
       try {
         await this.publisher.publish(event);
         await this.repository.markPublished(event.eventId, this.options.workerId);
@@ -56,7 +59,7 @@ export class OutboxPump {
           retryDelay(event, this.maximumRetryDelayMilliseconds),
         );
       }
-    }));
+    }
     return { claimed: events.length, published, failed };
   }
 }

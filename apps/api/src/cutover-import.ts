@@ -26,6 +26,7 @@ export const REQUIRED_CUTOVER_MIGRATIONS = [
   '003_tenant_industrial_data_plane',
   '004_sqlite_cutover_role',
   '005_tenant_membership_and_workspace_scope',
+  '006_workspace_application_role_grants',
 ] as const;
 
 export interface SqliteCutoverTargetScope {

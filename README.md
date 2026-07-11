@@ -50,7 +50,7 @@ Open Data Fusion is an open-source platform for building trustworthy industrial 
 - immutable workspace revisions, audit history, and collaboration events;
 - OIDC authentication, server-side authorization, and least-privilege infrastructure foundations.
 
-The project is deliberately **local-first**: the default runtime uses a real SQLite database and local governed storage so the complete workflow can be developed and evaluated without a distributed platform. PostgreSQL, Redis Streams, workers, row-level security, and cutover tooling are present as a production foundation, but the main API has **not yet switched from SQLite to PostgreSQL**.
+The project is deliberately **local-first**: the default runtime uses a real SQLite database and local governed storage so the complete workflow can be developed and evaluated without a distributed platform. Canvas/workspace endpoints can opt into PostgreSQL with `ODF_WORKSPACE_PERSISTENCE=postgres`, including transactional outbox and Redis-backed cross-instance events. Asset, platform, ingest, and governed-object surfaces remain SQLite-backed pending their own adapters, so this is not yet a full data-plane cutover.
 
 ### Design principles
 
@@ -100,8 +100,9 @@ Status legend:
 | Industrial write-back | **Gated** | Dry-run evidence, allowlisted operations, separation of duties, risk-based approvals, and external executor injection |
 | OIDC and Keycloak | **Optional** | Authorization Code + PKCE, JWT verification, authenticated SSE, permission claims, and a reproducible local realm |
 | Edge collection | **Optional** | Read-only CSV, PostgreSQL, and OPC UA collection with checkpoints, durable local queueing, OAuth delivery, and retry |
-| PostgreSQL data plane | **Foundation** | Tenant-scoped schema, forced RLS, typed repositories, immutable history, transactional outbox, and least-privilege roles |
-| Workers and broker | **Foundation** | Standalone pipeline and outbox workers exist, but the SQLite API does not yet produce PostgreSQL outbox events or consume Redis events |
+| PostgreSQL Canvas persistence | **Optional** | Tenant/project-scoped workspace reads and writes, forced RLS, immutable revisions/audit, transactional outbox, and least-privilege API role |
+| PostgreSQL data plane | **Foundation** | Tenant-scoped schema and typed repositories exist; asset, platform, ingest, and governed-object API adapters remain pending |
+| Workers and broker | **Optional** | Outbox worker publishes PostgreSQL Canvas commits to Redis Streams and API replicas fan out shared events; pipeline remains explicitly scoped and gated |
 | Observability | **Optional** | Redacted structured API logs, Prometheus metrics, optional OTLP traces, collector, alerts, Prometheus, and Grafana baseline |
 | SQLite cutover | **Foundation** | Deterministic preflight, transactional dry-run import, frozen-source verification, checksums, and explicit apply gate |
 
@@ -115,21 +116,21 @@ flowchart TB
     Sources[CSV, PostgreSQL, OPC UA sources] --> Edge[Read-only edge agent]
     Edge --> API
 
-    subgraph Local[Current local-first runtime]
-        API --> SQLite[(SQLite canonical and workspace store)]
+    subgraph Local[Default local-first runtime]
+        API --> SQLite[(SQLite canonical, platform, and object metadata)]
         API --> Files[(Raw landing and governed object files)]
         API --> SSE[In-process SSE and presence]
     end
 
-    subgraph Foundation[Production infrastructure foundation]
-        PG[(PostgreSQL tenant data plane and outbox)]
+    subgraph CanvasCutover[Optional PostgreSQL Canvas boundary]
+        PG[(PostgreSQL workspaces, RLS, and outbox)]
         Pipeline[Pipeline worker] --> PG
         PG --> Outbox[Outbox worker]
         Outbox --> Redis[(Redis Streams)]
+        Redis --> API
     end
 
-    API -. planned adapter cutover .-> PG
-    Redis -. planned shared event delivery .-> API
+    API -->|Canvas when ODF_WORKSPACE_PERSISTENCE=postgres| PG
 
     API -. OTLP traces .-> Collector[OpenTelemetry Collector]
     API -. protected metrics .-> Prometheus[Prometheus]
@@ -145,7 +146,7 @@ flowchart TD
     B --> C[Apply idempotency and schema checks]
     C --> D[Write canonical state and provenance]
     D --> E[Create immutable audit evidence]
-    E -. PostgreSQL adapter .-> J[Create transactional outbox intent]
+    E -. PostgreSQL Canvas mutation .-> J[Create transactional outbox intent]
     D --> F[Generate contextualization candidates]
     F --> G{Explicit review}
     G -->|Accept| H[Trusted relation]
@@ -328,7 +329,10 @@ VITE_OIDC_USER_CLAIM=sub
 | `writeback:approve` | Approve or reject another identity's request |
 | `writeback:execute` | Execute only after every policy and approval gate passes |
 
-Start the reproducible local Keycloak realm with:
+After injecting `KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME`,
+`KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD`, `ODF_DEMO_USER_PASSWORD`, and
+`ODF_CONNECTOR_CLIENT_SECRET` from a local secret source, start the reproducible
+development Keycloak realm with:
 
 ```bash
 npm run infra:identity
@@ -354,8 +358,12 @@ The root `.env` is read by the API and Vite development processes. Important var
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Process-level OpenTelemetry Collector endpoint |
 | `VITE_API_URL` | Browser API base URL; same-origin when empty |
 | `VITE_WORKSPACE_USER` | Default development workspace identity |
-| `ODF_POSTGRES_URL` | PostgreSQL URL for a purpose-specific least-privilege login |
-| `ODF_REDIS_URL` | Authenticated Redis URL for the outbox worker |
+| `ODF_WORKSPACE_PERSISTENCE` | `sqlite` for intentional preview/local use; `postgres` for the PostgreSQL Canvas boundary |
+| `ODF_API_POSTGRES_URL` | Dedicated non-superuser PostgreSQL API login inheriting `odf_app` only |
+| `ODF_SHARED_EVENTS_REQUIRED` | Require Redis shared delivery; set `true` for multi-instance PostgreSQL Canvas use |
+| `ODF_OUTBOX_POSTGRES_URL` | Dedicated outbox-publisher login inheriting `odf_outbox_publisher` only |
+| `ODF_TENANT_PROVISION_POSTGRES_URL` | Dedicated bootstrap login with migration-read plus security-definer execute only (inherits `odf_tenant_provisioner`); used by `tenant:provision` |
+| `ODF_REDIS_URL` | Authenticated Redis URL for the API shared-event transport and outbox worker |
 
 API tracing initializes before the server loads the repository-root `.env`. Export `ODF_OTEL_ENABLED` and `OTEL_EXPORTER_OTLP_ENDPOINT` in the shell/container environment (or provide an API-workspace environment file) rather than relying only on the root `.env` for these two values.
 
@@ -374,11 +382,14 @@ Docker Compose is a reproducible development and validation baseline, not a high
 | `edge` | Run the configured read-only edge agent with its required preview API dependency | [Configure source, identity, and delivery endpoints first](#edge-ingestion) |
 | `observability` | Start collector, Prometheus, and Grafana | `docker compose --profile observability up -d` |
 | `application-preview` | Build preview API/web containers; an ingress or reverse proxy is still required | `docker compose --profile application-preview up -d` |
+| `production-like` | PostgreSQL Canvas + Redis Streams + Keycloak + two API replicas + outbox worker | [Bootstrap roles, then run the profile](docs/operations/postgres-canvas-production-like.md) |
 
 Before starting infrastructure, supply unique secrets through the environment or a secret manager. Runtime workers must use dedicated login roles; never reuse the migrator or superuser URL.
 
 > [!NOTE]
 > `application-preview` still runs the API on SQLite. The static web image has no `/api` reverse proxy, so the browser UI cannot reach the API until an ingress/proxy routes `/api` to port `4310`. The profile proves container build contexts and service startup; it is not a functional standalone deployment or the PostgreSQL production cutover.
+
+The [`production-like` runbook](docs/operations/postgres-canvas-production-like.md) documents the separate least-privilege API/outbox logins, required tenant/project UUID headers for Canvas calls, and the multi-instance outbox/Redis/SSE rehearsal. It is a local/CI validation topology, not an internet-facing production deployment.
 
 ### Running workers
 
@@ -423,7 +434,7 @@ The checked-in `config.example.json` contains documentation-only hostnames and i
 
 ## SQLite-to-PostgreSQL cutover
 
-The current API runtime is SQLite-backed. The repository includes a one-way, rehearsable workspace-history import for the future PostgreSQL switch described by [ADR 0005](docs/architecture/0005-postgresql-cutover-and-transactional-outbox.md).
+The default API runtime is SQLite-backed, while Canvas/workspace endpoints can run against PostgreSQL when `ODF_WORKSPACE_PERSISTENCE=postgres`. The repository includes a one-way, rehearsable workspace-history import for that Canvas switch as described by [ADR 0005](docs/architecture/0005-postgresql-cutover-and-transactional-outbox.md). Asset, platform, ingest, and governed-object data remain on their local adapters until separately cut over.
 
 ### 1. Create a deterministic preflight bundle
 
@@ -479,7 +490,7 @@ npm run cutover:import --workspace @open-data-fusion/api -- `
 
 `--database` is mandatory with `--apply`. Any schema, count, or checksum drift is rejected before PostgreSQL is opened. Legacy non-UUID correlation IDs use the versioned deterministic mapping `open-data-fusion.uuidv8.sha256.v1`.
 
-The importer does **not** generate historical outbox events and does **not** switch the API adapter. Remove the cutover login's role membership after evidence and validation are retained.
+The importer does **not** generate historical outbox events. Configure the PostgreSQL Canvas API adapter only after the final import, migration/role verification, and outbox delivery rehearsal succeed. Remove the cutover login's role membership after evidence and validation are retained.
 
 ## Development and validation
 
@@ -493,6 +504,7 @@ The importer does **not** generate historical outbox events and does **not** swi
 | `npm test` | Run every workspace test suite |
 | `npm run build` | Build every workspace and the production web bundle |
 | `npm run infra:validate` | Verify migration checksums, RLS, Compose, Docker, and observability guardrails |
+| `npm run infra:production-like` | Start the bootstrapped PostgreSQL Canvas/Redis/Keycloak two-replica validation topology (requires explicit secrets and dedicated URLs) |
 | `npm run check` | Run typecheck, tests, builds, and infrastructure validation |
 | `npm run check:release` | Add dependency audit and full dependency-tree validation |
 | `npm run sbom` | Generate an SPDX software bill of materials |
@@ -508,6 +520,7 @@ CI also performs:
 - Node.js 24 workspace verification;
 - migration and Compose validation;
 - PostgreSQL migration idempotency and live runtime probes;
+- production-like PostgreSQL Canvas update, outbox-to-Redis delivery, OIDC, replica SSE, and least-privilege role smoke;
 - API, web, outbox-worker, and edge-agent container builds;
 - dependency license policy checks;
 - `npm audit` at high severity;
@@ -518,7 +531,7 @@ CI also performs:
 
 ```text
 apps/
-  api/                 Express API, SQLite runtime, cutover tooling, storage, auth
+  api/                 Express API, PostgreSQL Canvas adapter, local data adapters, cutover tooling, storage, auth
   web/                 React/Vite Explorer, Canvas, and governed product surfaces
   edge-agent/          Read-only connectors and durable store-and-forward delivery
   outbox-worker/       PostgreSQL outbox to Redis Streams publisher
@@ -537,6 +550,7 @@ infra/
 docs/
   architecture/        Architecture decision records
   design/              Design system and implementation screenshots
+  operations/          Production-like validation and recovery runbooks
   security/            Authentication and authorization documentation
 
 scripts/               Dependency and release guardrails
@@ -557,6 +571,7 @@ Additional references:
 
 - [API documentation](apps/api/README.md)
 - [PostgreSQL runtime contract](packages/postgres-runtime/README.md)
+- [PostgreSQL Canvas production-like runbook](docs/operations/postgres-canvas-production-like.md)
 - [Design system](docs/design/design-system.md)
 - [Authentication profiles](docs/security/authentication.md)
 - [Technical direction and pilot criteria](open-data-fusion-technical-report-source.md)
@@ -571,15 +586,16 @@ Additional references:
 - [x] OIDC resource-server and browser PKCE flows
 - [x] Edge connectors with durable checkpointing and delivery
 - [x] Governed objects, search, latest/aggregate telemetry, and raw replay
-- [x] Tenant PostgreSQL schema, forced RLS, typed repositories, standalone worker implementations, and cutover rehearsal
+- [x] Tenant PostgreSQL schema, forced RLS, typed repositories, PostgreSQL Canvas adapter, shared Redis event delivery, worker implementations, and cutover rehearsal
 - [x] CI, security workflows, SBOM, container builds, and observability baseline
 
 ### Next production gates
 
-- [ ] Wire the API to the PostgreSQL runtime and switch reads/writes together
-- [ ] Persist production tenant administration and project membership in PostgreSQL
-- [ ] Connect API instances to the shared broker for horizontal event delivery
-- [ ] Rehearse backup/restore, broker failure, dead-letter, and multi-instance concurrency
+- [x] Switch Canvas/workspace reads and writes together to the PostgreSQL runtime, with Redis-backed multi-instance event delivery
+- [x] Add an audited, least-privilege tenant/project bootstrap workflow with an explicit dry-run/apply gate
+- [ ] Persist ongoing tenant administration and project membership through governed user-facing API workflows
+- [ ] Move asset, platform, ingest, and governed-object API reads/writes from SQLite to their PostgreSQL repositories without dual-write
+- [ ] Rehearse backup/restore, broker failure, dead-letter, and multi-instance concurrency beyond the CI Canvas/outbox smoke
 - [ ] Replace local file storage with encrypted, versioned object storage
 - [ ] Complete production ingress, TLS/mTLS, secret-manager, and network-isolation design
 - [ ] Add durable trace/log storage, worker telemetry, SLOs, and operational runbooks

@@ -220,6 +220,8 @@ describe("Open Data Fusion workspace", () => {
   let serverWritebacks: PlatformWritebackRequest[];
   let writebackApprovalCount: number;
   let fetchMock: ReturnType<typeof vi.fn>;
+  let blockProjectRequests: boolean;
+  let releaseProjectRequest: (() => void) | null;
 
   beforeEach(() => {
     window.history.replaceState({}, "", "/");
@@ -236,6 +238,8 @@ describe("Open Data Fusion workspace", () => {
     serverSpatialLink = structuredClone(spatialLinkFixture);
     serverWritebacks = [structuredClone(highRiskWriteback), structuredClone(criticalWriteback)];
     writebackApprovalCount = 0;
+    blockProjectRequests = false;
+    releaseProjectRequest = null;
     MockEventSource.instances = [];
     vi.stubGlobal("EventSource", MockEventSource);
 
@@ -320,7 +324,12 @@ describe("Open Data Fusion workspace", () => {
         return success({ items: serverWritebacks, nextCursor: null });
       }
       if (parsedUrl.pathname === "/api/v1/platform/tenants") return success({ items: [platformTenant], nextCursor: null });
-      if (parsedUrl.pathname === "/api/v1/platform/tenants/demo/projects") return success({ items: [platformProject], nextCursor: null });
+      if (parsedUrl.pathname === "/api/v1/platform/tenants/demo/projects") {
+        if (blockProjectRequests) {
+          await new Promise<void>((resolve) => { releaseProjectRequest = resolve; });
+        }
+        return success({ items: [platformProject], nextCursor: null });
+      }
       if (parsedUrl.pathname === "/api/v1/platform/sources") {
         return parsedUrl.searchParams.has("cursor")
           ? success({ items: [platformSourceTwo], nextCursor: null })
@@ -455,6 +464,29 @@ describe("Open Data Fusion workspace", () => {
   async function waitForEditor() {
     await waitFor(() => expect(screen.getByRole("button", { name: "Note" })).toBeEnabled());
   }
+
+  it("waits for a selected tenant and project before loading the Canvas workspace", async () => {
+    blockProjectRequests = true;
+    render(<App />);
+
+    await waitFor(() => expect(releaseProjectRequest).not.toBeNull());
+    const workspaceRequestsBeforeContext = fetchMock.mock.calls.filter(([url]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/workspaces/cooling-water-system",
+    );
+    expect(workspaceRequestsBeforeContext).toHaveLength(0);
+
+    releaseProjectRequest?.();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/workspaces/cooling-water-system",
+    )).toBe(true));
+
+    const [, init] = fetchMock.mock.calls.find(([url]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/workspaces/cooling-water-system",
+    ) as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get("x-odf-tenant-id")).toBe("demo");
+    expect(headers.get("x-odf-project-id")).toBe("north-plant");
+  });
 
   it("groups canvas tools in a dedicated toolbar without a duplicate brand control", async () => {
     render(<App />);

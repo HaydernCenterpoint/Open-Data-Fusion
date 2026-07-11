@@ -10,6 +10,8 @@ vi.mock("./auth", () => ({
   getAccessToken: authMocks.getAccessToken,
 }));
 
+const workspaceContext = { tenantId: "tenant-a", projectId: "project-a" };
+
 describe("authenticated API transport", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -29,12 +31,14 @@ describe("authenticated API transport", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = await import("./api");
 
-    await api.getWorkspace("workspace-1", undefined, "forged.development-user");
+    await api.getWorkspace("workspace-1", workspaceContext, undefined, "forged.development-user");
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer verified-access-token");
     expect(headers["x-odf-user"]).toBeUndefined();
+    expect(headers["x-odf-tenant-id"]).toBe(workspaceContext.tenantId);
+    expect(headers["x-odf-project-id"]).toBe(workspaceContext.projectId);
   });
 
   it("parses authenticated SSE frames over fetch without putting identity in the URL", async () => {
@@ -61,7 +65,7 @@ describe("authenticated API transport", () => {
     const members = vi.fn();
     let unsubscribe: () => void = () => undefined;
     const received = new Promise<void>((resolve) => {
-      unsubscribe = api.subscribeToWorkspaceEvents("workspace-1", {
+      unsubscribe = api.subscribeToWorkspaceEvents("workspace-1", workspaceContext, {
         onWorkspaceUpdated: vi.fn(),
         onPresenceUpdated: presence,
         onMembersUpdated: (event) => {
@@ -79,6 +83,8 @@ describe("authenticated API transport", () => {
     expect(url).toBe("/api/v1/workspaces/workspace-1/events");
     expect(url).not.toContain("user=");
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer verified-access-token");
+    expect((init.headers as Record<string, string>)["x-odf-tenant-id"]).toBe(workspaceContext.tenantId);
+    expect((init.headers as Record<string, string>)["x-odf-project-id"]).toBe(workspaceContext.projectId);
     unsubscribe();
   });
 });

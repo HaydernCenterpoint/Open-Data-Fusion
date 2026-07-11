@@ -42,23 +42,33 @@ export class PostgresOutboxRepository implements OutboxRepository {
   async claim(batchSize: number, workerId: string, leaseMilliseconds: number): Promise<OutboxEvent[]> {
     const result = await this.pool.query<OutboxRow>(`
       WITH candidate AS (
-        SELECT event_id
-        FROM odf.outbox_events
-        WHERE published_at IS NULL
-          AND available_at <= now()
-          AND (lease_expires_at IS NULL OR lease_expires_at < now())
-        ORDER BY available_at, occurred_at, event_id
+        SELECT event.event_id
+        FROM odf.outbox_events AS event
+        WHERE event.published_at IS NULL
+          AND event.available_at <= now()
+          AND (event.lease_expires_at IS NULL OR event.lease_expires_at < now())
+          AND NOT EXISTS (
+            SELECT 1 FROM odf.outbox_events AS predecessor
+            WHERE predecessor.aggregate_type = event.aggregate_type
+              AND predecessor.aggregate_id = event.aggregate_id
+              AND predecessor.published_at IS NULL
+              AND (predecessor.occurred_at, predecessor.event_id) < (event.occurred_at, event.event_id)
+          )
+        ORDER BY event.available_at, event.occurred_at, event.event_id
         LIMIT $1
         FOR UPDATE SKIP LOCKED
       )
-      UPDATE odf.outbox_events AS event
-      SET lease_owner = $2,
-          lease_expires_at = now() + ($3 * interval '1 millisecond'),
-          attempt_count = event.attempt_count + 1,
-          last_error = NULL
-      FROM candidate
-      WHERE event.event_id = candidate.event_id
-      RETURNING event.*
+      ), claimed AS (
+        UPDATE odf.outbox_events AS event
+        SET lease_owner = $2,
+            lease_expires_at = now() + ($3 * interval '1 millisecond'),
+            attempt_count = event.attempt_count + 1,
+            last_error = NULL
+        FROM candidate
+        WHERE event.event_id = candidate.event_id
+        RETURNING event.*
+      )
+      SELECT * FROM claimed ORDER BY event_id ASC
     `, [batchSize, workerId, leaseMilliseconds]);
     return result.rows.map(mapRow);
   }

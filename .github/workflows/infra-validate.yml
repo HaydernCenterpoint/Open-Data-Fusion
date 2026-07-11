@@ -28,6 +28,10 @@ jobs:
       ODF_REDIS_PASSWORD: validation-only-redis-password
       ODF_GRAFANA_ADMIN_PASSWORD: validation-only-grafana-password
       ODF_METRICS_TOKEN: validation-only-metrics-token
+      KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME: validation-only-admin
+      KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD: validation-only-keycloak-admin-password
+      ODF_DEMO_USER_PASSWORD: validation-only-demo-password
+      ODF_CONNECTOR_CLIENT_SECRET: validation-only-connector-client-secret
       ODF_POSTGRES_URL: postgresql://validation-worker:validation-worker-password@odf-postgres:5432/odf
       ODF_REDIS_URL: redis://:validation-redis-password@odf-redis:6379/0
     steps:

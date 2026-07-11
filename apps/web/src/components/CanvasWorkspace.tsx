@@ -47,6 +47,7 @@ import type {
   CanvasEdgeRecord,
   CanvasNodeRecord,
   ExplorerSnapshot,
+  PlatformContext,
   WorkspaceMember,
   WorkspaceMemberUpsert,
   WorkspaceOperation,
@@ -61,6 +62,7 @@ type CanvasSelection = { kind: "node"; id: string } | { kind: "edge"; id: string
 interface CanvasWorkspaceProps {
   snapshot: ExplorerSnapshot | null;
   workspace: ApiWorkspace | null;
+  platformContext: PlatformContext | null;
   onWorkspaceUpdated: (workspace: ApiWorkspace) => void;
   onOpenExplorer: () => void;
   onNotify: (message: string) => void;
@@ -373,9 +375,11 @@ function MobileCanvasMenu({ hasSelection, onOpenHistory, onOpenInspector, onTogg
   );
 }
 
-export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpenExplorer, onNotify }: CanvasWorkspaceProps) {
+export function CanvasWorkspace({ snapshot, workspace, platformContext, onWorkspaceUpdated, onOpenExplorer, onNotify }: CanvasWorkspaceProps) {
   const authSession = useAuthSession();
   const activeUserId = authSession.identity?.userId ?? WORKSPACE_USER;
+  const workspaceTenantId = platformContext?.tenantId ?? "";
+  const workspaceProjectId = platformContext?.projectId ?? "";
   const [tool, setTool] = useState<CanvasTool>("select");
   const [selection, setSelection] = useState<CanvasSelection>({ kind: "node", id: "canvas-p101" });
   const [connectSource, setConnectSource] = useState<string | null>(null);
@@ -476,9 +480,14 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   }, []);
 
   const refreshMembers = useCallback(async (workspaceId: string): Promise<boolean> => {
+    if (!workspaceTenantId || !workspaceProjectId) return false;
     setMembersRefreshing(true);
     try {
-      const result = await listWorkspaceMembers(workspaceId, activeUserId);
+      const result = await listWorkspaceMembers(
+        workspaceId,
+        { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+        activeUserId,
+      );
       setMembers(result.items);
       setMembersLoaded(true);
       setMemberError("");
@@ -489,17 +498,23 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     } finally {
       setMembersRefreshing(false);
     }
-  }, [activeUserId]);
+  }, [activeUserId, workspaceProjectId, workspaceTenantId]);
 
   const refreshLatestWorkspace = useCallback(async (workspaceId: string) => {
+    if (!workspaceTenantId || !workspaceProjectId) return;
     try {
-      const latest = await getWorkspace(workspaceId, undefined, activeUserId);
+      const latest = await getWorkspace(
+        workspaceId,
+        { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+        undefined,
+        activeUserId,
+      );
       latestVersionRef.current = Math.max(latestVersionRef.current, latest.version);
       onWorkspaceUpdated(latest);
     } catch {
       onNotify("Could not refresh the latest workspace revision");
     }
-  }, [activeUserId, onNotify, onWorkspaceUpdated]);
+  }, [activeUserId, onNotify, onWorkspaceUpdated, workspaceProjectId, workspaceTenantId]);
 
   const handleOperationError = useCallback(async (error: unknown, workspaceId: string) => {
     if (isConflictError(error)) {
@@ -526,12 +541,21 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       onNotify("This workspace is read-only for your role");
       return null;
     }
+    if (!workspaceTenantId || !workspaceProjectId) {
+      onNotify("Select a tenant and project before editing this Canvas");
+      return null;
+    }
     try {
-      const updated = await applyWorkspaceOperations(current.id, {
-        baseVersion: baseVersion ?? current.version,
-        changeSummary,
-        operations,
-      }, activeUserId);
+      const updated = await applyWorkspaceOperations(
+        current.id,
+        { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+        {
+          baseVersion: baseVersion ?? current.version,
+          changeSummary,
+          operations,
+        },
+        activeUserId,
+      );
       latestVersionRef.current = Math.max(latestVersionRef.current, updated.version);
       onWorkspaceUpdated(updated);
       setConflictMessage("");
@@ -540,7 +564,7 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       await handleOperationError(error, current.id);
       return null;
     }
-  }, [activeUserId, handleOperationError, onNotify, onWorkspaceUpdated]);
+  }, [activeUserId, handleOperationError, onNotify, onWorkspaceUpdated, workspaceProjectId, workspaceTenantId]);
 
   const commitAuthoringAction = useCallback(async (
     entry: AuthoringHistoryEntry,
@@ -572,6 +596,10 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   }, [historyOpen, inspectorOpen, layersOpen, membersOpen]);
 
   useEffect(() => {
+    latestVersionRef.current = workspace?.version ?? 0;
+  }, [workspace?.id, workspace?.version, workspaceProjectId, workspaceTenantId]);
+
+  useEffect(() => {
     const preview = geometryPreviewRef.current;
     if (!preview || !workspace || preview.baseVersion === workspace.version) return;
     if (nodeDragRef.current?.interactionId === preview.interactionId) nodeDragRef.current = null;
@@ -587,14 +615,21 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
 
   useEffect(() => {
     const workspaceId = workspace?.id;
-    if (!workspaceId) return undefined;
+    if (!workspaceId || !workspaceTenantId || !workspaceProjectId) {
+      setMembers([]);
+      setOnlineUsers([]);
+      setMembersLoaded(false);
+      setCollaborationConnected(null);
+      return undefined;
+    }
     let disposed = false;
     let refreshInFlight = false;
+    const workspaceContext = { tenantId: workspaceTenantId, projectId: workspaceProjectId };
 
     setMembersLoaded(false);
     setMembersRefreshing(true);
     setMemberError("");
-    listWorkspaceMembers(workspaceId, activeUserId)
+    listWorkspaceMembers(workspaceId, workspaceContext, activeUserId)
       .then((result) => {
         if (!disposed) setMembers(result.items);
       })
@@ -611,7 +646,7 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
         }
       });
 
-    const stop = subscribeToWorkspaceEvents(workspaceId, {
+    const stop = subscribeToWorkspaceEvents(workspaceId, workspaceContext, {
       onWorkspaceUpdated: (event) => {
         if (event.version <= latestVersionRef.current || refreshInFlight) return;
         if (event.actor !== activeUserId) {
@@ -619,7 +654,7 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
           setRedoStack([]);
         }
         refreshInFlight = true;
-        getWorkspace(workspaceId, undefined, activeUserId)
+        getWorkspace(workspaceId, workspaceContext, undefined, activeUserId)
           .then((latest) => {
             if (disposed) return;
             latestVersionRef.current = Math.max(latestVersionRef.current, latest.version);
@@ -652,7 +687,7 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       disposed = true;
       stop();
     };
-  }, [activeUserId, workspace?.id, onWorkspaceUpdated, refreshMembers]);
+  }, [activeUserId, onWorkspaceUpdated, refreshMembers, workspace?.id, workspaceProjectId, workspaceTenantId]);
 
   function updateZoom(delta: number) {
     setScale((value) => Math.min(1.35, Math.max(0.7, Number((value + delta).toFixed(2)))));
@@ -726,13 +761,21 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       onNotify("This workspace is read-only for your role");
       return;
     }
+    if (!workspaceTenantId || !workspaceProjectId) {
+      onNotify("Select a tenant and project before saving this Canvas");
+      return;
+    }
     try {
-      const updated = await saveWorkspace(current.id, {
-        expectedVersion: current.version,
-        actor: activeUserId,
-        changeSummary: "Saved canvas viewport",
-        snapshot: { ...current.snapshot, viewport: { x: offset.x, y: offset.y, zoom: scale } },
-      });
+      const updated = await saveWorkspace(
+        current.id,
+        { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+        {
+          expectedVersion: current.version,
+          actor: activeUserId,
+          changeSummary: "Saved canvas viewport",
+          snapshot: { ...current.snapshot, viewport: { x: offset.x, y: offset.y, zoom: scale } },
+        },
+      );
       latestVersionRef.current = Math.max(latestVersionRef.current, updated.version);
       onWorkspaceUpdated(updated);
       setConflictMessage("");
@@ -748,6 +791,10 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       onNotify("Workspace service is still connecting");
       return;
     }
+    if (!workspaceTenantId || !workspaceProjectId) {
+      onNotify("Select a tenant and project before viewing Canvas history");
+      return;
+    }
     setMembersOpen(false);
     setInspectorOpen(false);
     setLayersOpen(false);
@@ -755,7 +802,12 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      const history = await listWorkspaceRevisions(current.id, { limit: REVISION_PAGE_SIZE, offset: 0 }, activeUserId);
+      const history = await listWorkspaceRevisions(
+        current.id,
+        { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+        { limit: REVISION_PAGE_SIZE, offset: 0 },
+        activeUserId,
+      );
       setRevisions(history.items);
       setRevisionTotal(history.total);
     } catch {
@@ -769,11 +821,16 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
 
   async function loadMoreHistory() {
     const current = workspaceRef.current;
-    if (!current || historyLoadingMore || revisions.length >= revisionTotal) return;
+    if (!current || !workspaceTenantId || !workspaceProjectId || historyLoadingMore || revisions.length >= revisionTotal) return;
     setHistoryLoadingMore(true);
     setHistoryError("");
     try {
-      const history = await listWorkspaceRevisions(current.id, { limit: REVISION_PAGE_SIZE, offset: revisions.length }, activeUserId);
+      const history = await listWorkspaceRevisions(
+        current.id,
+        { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+        { limit: REVISION_PAGE_SIZE, offset: revisions.length },
+        activeUserId,
+      );
       setRevisions((items) => {
         const knownVersions = new Set(items.map((revision) => revision.version));
         return [...items, ...history.items.filter((revision) => !knownVersions.has(revision.version))];
@@ -789,16 +846,24 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
   async function restoreRevision(targetVersion: number) {
     const current = workspaceRef.current;
     if (!current) return;
+    if (!workspaceTenantId || !workspaceProjectId) {
+      setHistoryError("Select a tenant and project before restoring a Canvas revision.");
+      return;
+    }
     if (!canEditRef.current) {
       setHistoryError("Your workspace role can inspect history but cannot restore revisions.");
       return;
     }
     try {
-      const updated = await rollbackWorkspace(current.id, {
-        expectedVersion: current.version,
-        targetVersion,
-        actor: activeUserId,
-      });
+      const updated = await rollbackWorkspace(
+        current.id,
+        { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+        {
+          expectedVersion: current.version,
+          targetVersion,
+          actor: activeUserId,
+        },
+      );
       latestVersionRef.current = Math.max(latestVersionRef.current, updated.version);
       onWorkspaceUpdated(updated);
       setHistoryOpen(false);
@@ -1239,11 +1304,21 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       setMemberError("Workspace service is still connecting");
       return false;
     }
+    if (!workspaceTenantId || !workspaceProjectId) {
+      setMemberError("Select a tenant and project before changing workspace members");
+      return false;
+    }
     const existing = members.some((member) => member.userId === userId);
     setMemberMutation(`upsert:${userId}`);
     setMemberError("");
     try {
-      const member = await upsertWorkspaceMember(current.id, userId, update, activeUserId);
+      const member = await upsertWorkspaceMember(
+        current.id,
+        { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+        userId,
+        update,
+        activeUserId,
+      );
       setMembers((items) => {
         const withoutTarget = items.filter((item) => item.userId !== member.userId);
         return [...withoutTarget, member].sort((left, right) => left.displayName.localeCompare(right.displayName));
@@ -1265,10 +1340,19 @@ export function CanvasWorkspace({ snapshot, workspace, onWorkspaceUpdated, onOpe
       setMemberError("Workspace service is still connecting");
       return;
     }
+    if (!workspaceTenantId || !workspaceProjectId) {
+      setMemberError("Select a tenant and project before changing workspace members");
+      return;
+    }
     setMemberMutation(`remove:${member.userId}`);
     setMemberError("");
     try {
-      await removeWorkspaceMember(current.id, member.userId, activeUserId);
+      await removeWorkspaceMember(
+        current.id,
+        { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+        member.userId,
+        activeUserId,
+      );
       setMembers((items) => items.filter((item) => item.userId !== member.userId));
       if (member.userId === activeUserId) {
         setMemberError("Your workspace membership was removed. Server access is now required to continue.");

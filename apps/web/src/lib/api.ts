@@ -188,6 +188,20 @@ function platformHeaders(context: PlatformContext): Record<string, string> {
   };
 }
 
+/**
+ * The tenant/project boundary for Canvas workspace requests. Keep this
+ * separate from the current user: authentication determines the user, while
+ * these values determine the workspace data boundary.
+ */
+export type WorkspaceRequestContext = Pick<PlatformContext, "tenantId" | "projectId">;
+
+function workspaceHeaders(context: WorkspaceRequestContext, user: string): Record<string, string> {
+  return {
+    ...platformHeaders(context),
+    "x-odf-user": user,
+  };
+}
+
 function listPlatformScoped<T>(
   resource: string,
   context: PlatformContext,
@@ -386,68 +400,82 @@ export function executePlatformWritebackRequest(context: PlatformContext, reques
   });
 }
 
-export function getWorkspace(id: string, signal?: AbortSignal, user = WORKSPACE_USER): Promise<ApiWorkspace> {
+export function getWorkspace(
+  id: string,
+  context: WorkspaceRequestContext,
+  signal?: AbortSignal,
+  user = WORKSPACE_USER,
+): Promise<ApiWorkspace> {
   return request<ApiWorkspace>(`/api/v1/workspaces/${encodeURIComponent(id)}`, {
     signal,
-    headers: { "x-odf-user": user },
+    headers: workspaceHeaders(context, user),
   });
 }
 
 export function saveWorkspace(
   id: string,
+  context: WorkspaceRequestContext,
   body: { expectedVersion: number; actor: string; changeSummary: string; snapshot: CanvasSnapshot },
 ): Promise<ApiWorkspace> {
   return request<ApiWorkspace>(`/api/v1/workspaces/${encodeURIComponent(id)}`, {
     method: "PUT",
-    headers: { "x-odf-user": body.actor },
+    headers: workspaceHeaders(context, body.actor),
     body: JSON.stringify(body),
   });
 }
 
 export function applyWorkspaceOperations(
   id: string,
+  context: WorkspaceRequestContext,
   body: { baseVersion: number; changeSummary: string; operations: WorkspaceOperation[] },
   user = WORKSPACE_USER,
 ): Promise<ApiWorkspace> {
   return request<ApiWorkspace>(`/api/v1/workspaces/${encodeURIComponent(id)}/operations`, {
     method: "POST",
-    headers: { "x-odf-user": user },
+    headers: workspaceHeaders(context, user),
     body: JSON.stringify(body),
   });
 }
 
-export function listWorkspaceMembers(id: string, user = WORKSPACE_USER): Promise<WorkspaceMemberList> {
+export function listWorkspaceMembers(
+  id: string,
+  context: WorkspaceRequestContext,
+  user = WORKSPACE_USER,
+): Promise<WorkspaceMemberList> {
   return request<WorkspaceMemberList>(`/api/v1/workspaces/${encodeURIComponent(id)}/members`, {
-    headers: { "x-odf-user": user },
+    headers: workspaceHeaders(context, user),
   });
 }
 
 export function upsertWorkspaceMember(
   id: string,
+  context: WorkspaceRequestContext,
   userId: string,
   body: WorkspaceMemberUpsert,
   user = WORKSPACE_USER,
 ): Promise<WorkspaceMember> {
   return request<WorkspaceMember>(`/api/v1/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`, {
     method: "PUT",
-    headers: { "x-odf-user": user },
+    headers: workspaceHeaders(context, user),
     body: JSON.stringify(body),
   });
 }
 
 export function removeWorkspaceMember(
   id: string,
+  context: WorkspaceRequestContext,
   userId: string,
   user = WORKSPACE_USER,
 ): Promise<void> {
   return request<void>(`/api/v1/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`, {
     method: "DELETE",
-    headers: { "x-odf-user": user },
+    headers: workspaceHeaders(context, user),
   });
 }
 
 export function subscribeToWorkspaceEvents(
   id: string,
+  context: WorkspaceRequestContext,
   handlers: {
     onWorkspaceUpdated: (event: WorkspaceUpdatedEvent) => void;
     onPresenceUpdated: (event: WorkspacePresenceEvent) => void;
@@ -464,11 +492,11 @@ export function subscribeToWorkspaceEvents(
     .then((session) => {
       if (disposed) return;
       if (session.enabled) {
-        void runAuthenticatedEventStream(id, handlers, controller.signal);
+        void runAuthenticatedEventStream(id, context, handlers, controller.signal);
         return;
       }
       if (typeof EventSource === "undefined") return;
-      eventSource = createDevelopmentEventSource(id, user, handlers);
+      eventSource = createDevelopmentEventSource(id, context, user, handlers);
     })
     .catch(() => handlers.onConnectionChange?.(false));
 
@@ -496,9 +524,19 @@ function dispatchWorkspaceEvent(type: string, data: string, handlers: WorkspaceE
   }
 }
 
-function createDevelopmentEventSource(id: string, user: string, handlers: WorkspaceEventHandlers): EventSource {
+function createDevelopmentEventSource(
+  id: string,
+  context: WorkspaceRequestContext,
+  user: string,
+  handlers: WorkspaceEventHandlers,
+): EventSource {
+  const parameters = new URLSearchParams({
+    user,
+    tenantId: context.tenantId,
+    projectId: context.projectId,
+  });
   const eventSource = new EventSource(
-    `${API_BASE}/api/v1/workspaces/${encodeURIComponent(id)}/events?user=${encodeURIComponent(user)}`,
+    `${API_BASE}/api/v1/workspaces/${encodeURIComponent(id)}/events?${parameters.toString()}`,
   );
   const listener = (event: Event) => {
     const message = event as MessageEvent<string>;
@@ -578,6 +616,7 @@ async function consumeEventStream(
 
 async function runAuthenticatedEventStream(
   id: string,
+  context: WorkspaceRequestContext,
   handlers: WorkspaceEventHandlers,
   signal: AbortSignal,
 ): Promise<void> {
@@ -588,7 +627,11 @@ async function runAuthenticatedEventStream(
       const accessToken = await getAccessToken();
       if (!accessToken) throw new Error("No active OIDC access token");
       const response = await fetch(url, {
-        headers: { Accept: "text/event-stream", Authorization: `Bearer ${accessToken}` },
+        headers: {
+          Accept: "text/event-stream",
+          Authorization: `Bearer ${accessToken}`,
+          ...platformHeaders(context),
+        },
         cache: "no-store",
         signal,
       });
@@ -617,6 +660,7 @@ export function isConflictError(error: unknown): error is ApiRequestError {
 
 export function listWorkspaceRevisions(
   id: string,
+  context: WorkspaceRequestContext,
   query: { limit?: number; offset?: number } = {},
   user = WORKSPACE_USER,
 ): Promise<WorkspaceRevisionList> {
@@ -625,17 +669,18 @@ export function listWorkspaceRevisions(
   if (query.offset !== undefined) parameters.set("offset", String(query.offset));
   const suffix = parameters.size > 0 ? `?${parameters.toString()}` : "";
   return request<WorkspaceRevisionList>(`/api/v1/workspaces/${encodeURIComponent(id)}/revisions${suffix}`, {
-    headers: { "x-odf-user": user },
+    headers: workspaceHeaders(context, user),
   });
 }
 
 export function rollbackWorkspace(
   id: string,
+  context: WorkspaceRequestContext,
   body: { expectedVersion: number; targetVersion: number; actor: string; changeSummary?: string },
 ): Promise<ApiWorkspace> {
   return request<ApiWorkspace>(`/api/v1/workspaces/${encodeURIComponent(id)}/rollback`, {
     method: "POST",
-    headers: { "x-odf-user": body.actor },
+    headers: workspaceHeaders(context, body.actor),
     body: JSON.stringify(body),
   });
 }

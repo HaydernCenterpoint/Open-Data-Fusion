@@ -153,7 +153,14 @@ describe("pool and probes", () => {
     const client = new RecordingClient();
     const pool = new RecordingPool(client, (query) => {
       if (query.text.includes("current_database")) return result([{ database: "odf" }]);
-      return result([{ schema_present: true, tenant_data_plane_present: true }]);
+      return result([{
+        schema_present: true,
+        tenant_data_plane_present: true,
+        workspace_scope_present: true,
+        project_membership_present: true,
+        workspace_grants_present: true,
+        api_principal_attested: true,
+      }]);
     });
     const runtime = PostgresRuntime.fromPool(pool);
 
@@ -162,12 +169,49 @@ describe("pool and probes", () => {
       status: "ready",
       schemaPresent: true,
       tenantDataPlanePresent: true,
+      workspaceScopePresent: true,
+      projectMembershipPresent: true,
+      workspaceGrantsPresent: true,
+      apiPrincipalAttested: true,
     });
     expect(pool.directQueries[1]?.text).toContain("to_regclass('odf.raw_ingest_objects')");
+    expect(pool.directQueries[1]?.text).toContain("pg_has_role(current_user, 'odf_app', 'member')");
+    expect(pool.directQueries[1]?.text).toContain("pg_has_role(current_user, 'odf_outbox_publisher', 'member')");
+  });
+
+  it("does not report ready for a principal outside the API least-privilege boundary", async () => {
+    const client = new RecordingClient();
+    const pool = new RecordingPool(client, () => result([{
+      schema_present: true,
+      tenant_data_plane_present: true,
+      workspace_scope_present: true,
+      project_membership_present: true,
+      workspace_grants_present: true,
+      api_principal_attested: false,
+    }]));
+    const runtime = PostgresRuntime.fromPool(pool);
+
+    await expect(runtime.readiness()).resolves.toMatchObject({
+      status: "not_ready",
+      apiPrincipalAttested: false,
+    });
   });
 });
 
 describe("workspace repository", () => {
+  it("can build a database-backed access resolver from the same runtime transaction runner", () => {
+    const client = new RecordingClient();
+    let suppliedRunner: unknown;
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, {
+      projectAccessResolverFactory: (runner) => {
+        suppliedRunner = runner;
+        return allowWorkspaceAccess();
+      },
+    });
+
+    expect(suppliedRunner).toBe(runtime);
+  });
+
   it("does not disclose a workspace snapshot to a caller without membership", async () => {
     const client = new RecordingClient((query) => {
       if (query.text.startsWith("SELECT workspace.id FROM odf.workspaces AS workspace")) {
@@ -375,5 +419,8 @@ describe("queue repository", () => {
     const pipelineClaim = claims.find((query) => query.text.includes("odf.pipeline_run_events"));
     expect(pipelineClaim?.text).toContain("(tenant_id, pipeline_run_id, event_type, state, details)");
     expect(pipelineClaim?.text).not.toContain("correlation_id)");
+    const outboxClaim = claims.find((query) => query.text.includes("predecessor.aggregate_type = event.aggregate_type"));
+    expect(outboxClaim?.text).toContain("predecessor.aggregate_id = event.aggregate_id");
+    expect(outboxClaim?.text).toContain("predecessor.published_at IS NULL");
   });
 });

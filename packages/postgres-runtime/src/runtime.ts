@@ -32,6 +32,11 @@ export interface PostgresRuntimeOptions extends PostgresPoolOptions {}
 export interface PostgresRuntimeDependencies {
   /** Required for project-scoped repositories; defaults to fail-closed. */
   projectAccessResolver?: ProjectAccessResolver;
+  /**
+   * Builds a project resolver from this runtime's transaction runner. This is
+   * useful for the database-backed resolver without creating a second pool.
+   */
+  projectAccessResolverFactory?: (runner: TransactionRunner) => ProjectAccessResolver;
 }
 
 const DEFAULT_TRANSACTION_SETTINGS: RuntimePoolSettings = {
@@ -70,7 +75,9 @@ export class PostgresRuntime implements TransactionRunner {
     private readonly settings: RuntimePoolSettings = DEFAULT_TRANSACTION_SETTINGS,
     dependencies: PostgresRuntimeDependencies = {},
   ) {
-    const policy = dependencies.projectAccessResolver ?? new FailClosedProjectAccessResolver();
+    const policy = dependencies.projectAccessResolver
+      ?? dependencies.projectAccessResolverFactory?.(this)
+      ?? new FailClosedProjectAccessResolver();
     this.workspaces = new PostgresWorkspaceRepository(this, policy);
     this.ingestion = new PostgresIngestionRepository(this);
     this.queues = new PostgresQueueRepository(this);
@@ -122,26 +129,79 @@ export class PostgresRuntime implements TransactionRunner {
   }
 
   /**
-   * Uses PostgreSQL catalog visibility rather than application-table reads so
-   * readiness remains available to a least-privilege login before any tenant
-   * context is established.
+   * Uses PostgreSQL catalog visibility rather than tenant table reads so
+   * readiness remains available before a request tenant is established. The
+   * Canvas API also verifies the scope/membership migrations, its narrow
+   * workspace grants, and the connected principal. This prevents a process
+   * from reporting ready while connected as a migrator, cutover, bootstrap,
+   * or outbox-publisher principal.
    */
   async readiness(): Promise<DatabaseReadiness> {
     try {
-      const result = await this.pool.query<{ schema_present: unknown; tenant_data_plane_present: unknown }>({
+      const result = await this.pool.query<{
+        schema_present: unknown;
+        tenant_data_plane_present: unknown;
+        workspace_scope_present: unknown;
+        project_membership_present: unknown;
+        workspace_grants_present: unknown;
+        api_principal_attested: unknown;
+      }>({
         text: [
           "SELECT",
           "  to_regclass('odf.schema_migrations') IS NOT NULL AS schema_present,",
-          "  to_regclass('odf.raw_ingest_objects') IS NOT NULL AS tenant_data_plane_present",
+          "  to_regclass('odf.raw_ingest_objects') IS NOT NULL AS tenant_data_plane_present,",
+          "  to_regclass('odf.workspace_scopes') IS NOT NULL AS workspace_scope_present,",
+          "  to_regclass('odf.project_members') IS NOT NULL AS project_membership_present,",
+          "  (",
+          "    has_table_privilege(current_user, 'odf.workspaces', 'SELECT')",
+          "    AND has_table_privilege(current_user, 'odf.workspaces', 'UPDATE')",
+          "    AND has_table_privilege(current_user, 'odf.workspace_revisions', 'SELECT')",
+          "    AND has_table_privilege(current_user, 'odf.workspace_revisions', 'INSERT')",
+          "    AND has_table_privilege(current_user, 'odf.workspace_members', 'SELECT')",
+          "    AND has_table_privilege(current_user, 'odf.workspace_members', 'INSERT')",
+          "    AND has_table_privilege(current_user, 'odf.workspace_members', 'UPDATE')",
+          "    AND has_table_privilege(current_user, 'odf.workspace_members', 'DELETE')",
+          "    AND has_table_privilege(current_user, 'odf.workspace_scopes', 'SELECT')",
+          "    AND has_table_privilege(current_user, 'odf.project_members', 'SELECT')",
+          "  ) AS workspace_grants_present,",
+          "  (",
+          "    NOT EXISTS (",
+          "      SELECT 1 FROM pg_roles AS principal",
+          "      WHERE principal.rolname IN (current_user, session_user)",
+          "        AND (principal.rolsuper OR principal.rolcreatedb OR principal.rolcreaterole",
+          "          OR principal.rolreplication OR principal.rolbypassrls)",
+          "    )",
+          "    AND pg_has_role(current_user, 'odf_app', 'member')",
+          "    AND NOT pg_has_role(current_user, 'odf_outbox_publisher', 'member')",
+          "    AND NOT pg_has_role(current_user, 'odf_cutover', 'member')",
+          "    AND NOT pg_has_role(current_user, 'odf_tenant_provisioner', 'member')",
+          "    AND NOT has_table_privilege(current_user, 'odf.workspace_scopes', 'INSERT, UPDATE, DELETE')",
+          "    AND NOT has_table_privilege(current_user, 'odf.outbox_events', 'UPDATE, DELETE, TRUNCATE')",
+          "  ) AS api_principal_attested",
         ].join("\n"),
       });
       const row = result.rows[0];
       const schemaPresent = row?.schema_present === true;
       const tenantDataPlanePresent = row?.tenant_data_plane_present === true;
+      const workspaceScopePresent = row?.workspace_scope_present === true;
+      const projectMembershipPresent = row?.project_membership_present === true;
+      const workspaceGrantsPresent = row?.workspace_grants_present === true;
+      const apiPrincipalAttested = row?.api_principal_attested === true;
       return {
-        status: schemaPresent && tenantDataPlanePresent ? "ready" : "not_ready",
+        status: schemaPresent
+          && tenantDataPlanePresent
+          && workspaceScopePresent
+          && projectMembershipPresent
+          && workspaceGrantsPresent
+          && apiPrincipalAttested
+          ? "ready"
+          : "not_ready",
         schemaPresent,
         tenantDataPlanePresent,
+        workspaceScopePresent,
+        projectMembershipPresent,
+        workspaceGrantsPresent,
+        apiPrincipalAttested,
         timestamp: new Date().toISOString(),
       };
     } catch {
@@ -149,6 +209,10 @@ export class PostgresRuntime implements TransactionRunner {
         status: "not_ready",
         schemaPresent: false,
         tenantDataPlanePresent: false,
+        workspaceScopePresent: false,
+        projectMembershipPresent: false,
+        workspaceGrantsPresent: false,
+        apiPrincipalAttested: false,
         timestamp: new Date().toISOString(),
       };
     }

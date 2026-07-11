@@ -6,6 +6,7 @@ import { Pool } from "pg";
 import { createClient } from "redis";
 
 import { OutboxPump } from "./outbox.js";
+import { OutboxHealthFile } from "./health.js";
 import { PostgresOutboxRepository } from "./postgres.js";
 import { RedisStreamPublisher } from "./redis.js";
 
@@ -26,6 +27,14 @@ function positiveInteger(name: string, fallback: number): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
   return value;
 }
+
+function optionalPath(name: string, fallback: string): string {
+  return process.env[name]?.trim() || fallback;
+}
+
+const healthFile = new OutboxHealthFile(optionalPath("ODF_OUTBOX_HEALTH_FILE", "/tmp/odf-outbox-health.json"));
+const healthMaximumAgeMilliseconds = positiveInteger("ODF_OUTBOX_HEALTH_MAX_AGE_MS", 30_000);
+await healthFile.reset();
 
 const pool = new Pool({
   connectionString: required("ODF_POSTGRES_URL"),
@@ -62,11 +71,28 @@ async function shutdown(signal: string): Promise<void> {
 
 process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
-console.log(JSON.stringify({ level: "info", component: "outbox", message: "started", workerId }));
+console.log(JSON.stringify({
+  level: "info",
+  component: "outbox",
+  message: "started",
+  workerId,
+  healthMaximumAgeMilliseconds,
+}));
 
 while (!stopping) {
   try {
     const result = await pump.runOnce();
+    if (result.failed === 0 && redis.isReady) {
+      await healthFile.markSuccess();
+    } else {
+      console.error(JSON.stringify({
+        level: "error",
+        component: "outbox",
+        message: "delivery dependency is unavailable or an event could not be published",
+        failed: result.failed,
+        redisReady: redis.isReady,
+      }));
+    }
     if (result.claimed === 0) await delay(pollMilliseconds);
     else console.log(JSON.stringify({ level: "info", component: "outbox", ...result }));
   } catch (error) {

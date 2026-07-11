@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { SharedEvent, SharedEventDelivery } from './shared-event-delivery.js';
+import type { SharedEvent, SharedEventDelivery, SharedEventDeliveryHealth } from './shared-event-delivery.js';
 
 export type WorkspaceRole = 'owner' | 'editor' | 'reviewer' | 'viewer';
 
@@ -12,6 +12,15 @@ export interface WorkspaceMember {
 }
 
 export type WorkspaceMemberChange = 'added' | 'updated' | 'removed';
+
+export interface WorkspaceEventPublishOptions {
+  /**
+   * False is used after a PostgreSQL commit: the transactional outbox becomes
+   * the one shared-delivery authority, preventing an API write and its worker
+   * publication from producing two SSE events.
+   */
+  distribute?: boolean;
+}
 
 export interface WorkspaceMembersUpdatedData {
   workspaceId: string;
@@ -70,12 +79,15 @@ export class WorkspaceEventHub {
     };
   }
 
-  publishWorkspaceUpdated(data: Record<string, unknown>): void {
+  publishWorkspaceUpdated(data: Record<string, unknown>, options: WorkspaceEventPublishOptions = {}): void {
     const workspaceId = String(data.workspaceId);
-    this.publishCommittedEvent('workspace.updated', workspaceId, data);
+    this.publishCommittedEvent('workspace.updated', workspaceId, data, options.distribute !== false);
   }
 
-  publishMembersUpdated(data: WorkspaceMembersUpdatedData): void {
+  publishMembersUpdated(
+    data: WorkspaceMembersUpdatedData,
+    options: WorkspaceEventPublishOptions = {},
+  ): void {
     const subscriptions = this.subscriptions.get(data.workspaceId);
     if (subscriptions && data.change !== 'removed') {
       for (const subscription of subscriptions.values()) {
@@ -90,7 +102,7 @@ export class WorkspaceEventHub {
       data: { ...data },
     };
 
-    if (this.sharedDelivery) {
+    if (this.sharedDelivery && options.distribute !== false) {
       // The transport dispatches locally before writing remotely, so the
       // existing SSE request path remains non-blocking.
       void this.sharedDelivery.publish({
@@ -116,13 +128,22 @@ export class WorkspaceEventHub {
     await this.sharedDelivery?.close();
   }
 
+  /**
+   * A required Redis transport must make the API unready after it fails. The
+   * in-memory transport is healthy only for local/single-instance profiles.
+   */
+  eventDeliveryHealth(): SharedEventDeliveryHealth {
+    return this.sharedDelivery?.health() ?? { status: 'ok', mode: 'memory' };
+  }
+
   private publishCommittedEvent(
     type: Extract<WorkspaceEvent['type'], 'workspace.updated'>,
     workspaceId: string,
     data: Record<string, unknown>,
+    distribute: boolean,
   ): void {
     const event: WorkspaceEvent = { id: randomUUID(), type, data };
-    if (this.sharedDelivery) {
+    if (this.sharedDelivery && distribute) {
       void this.sharedDelivery.publish({
         topic: 'workspace-events',
         eventId: event.id,

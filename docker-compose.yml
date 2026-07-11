@@ -86,6 +86,10 @@ services:
     environment:
       NODE_ENV: production
       ODF_AUTH_MODE: development
+      # The preview profile deliberately retains the local SQLite workspace
+      # store. Production-like PostgreSQL Canvas validation is provided by
+      # docker-compose.production-like.yml instead.
+      ODF_WORKSPACE_PERSISTENCE: sqlite
       ODF_DATABASE_PATH: /var/lib/odf/open-data-fusion.db
       ODF_RAW_LANDING_PATH: /var/lib/odf/raw
       ODF_OBJECT_STORE_PATH: /var/lib/odf/objects
@@ -140,6 +144,8 @@ services:
       ODF_OUTBOX_BATCH_SIZE: "${ODF_OUTBOX_BATCH_SIZE:-50}"
       ODF_OUTBOX_LEASE_MS: "${ODF_OUTBOX_LEASE_MS:-30000}"
       ODF_OUTBOX_POLL_MS: "${ODF_OUTBOX_POLL_MS:-1000}"
+      ODF_OUTBOX_HEALTH_FILE: /tmp/odf-outbox-health.json
+      ODF_OUTBOX_HEALTH_MAX_AGE_MS: "${ODF_OUTBOX_HEALTH_MAX_AGE_MS:-30000}"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -148,7 +154,12 @@ services:
       odf-redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const fs = require('node:fs'); const file = process.env.ODF_OUTBOX_HEALTH_FILE || '/tmp/odf-outbox-health.json'; const maximumAge = Number(process.env.ODF_OUTBOX_HEALTH_MAX_AGE_MS || 30000); const heartbeat = JSON.parse(fs.readFileSync(file, 'utf8')); if (!Number.isFinite(heartbeat.lastSuccessAt) || !Number.isFinite(maximumAge) || maximumAge <= 0 || heartbeat.lastSuccessAt > Date.now() || Date.now() - heartbeat.lastSuccessAt > maximumAge) process.exit(1);
       interval: 15s
       timeout: 5s
       retries: 3
@@ -259,7 +270,7 @@ services:
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: "${ODF_GRAFANA_ADMIN_USER:-admin}"
-      GF_SECURITY_ADMIN_PASSWORD: "${ODF_GRAFANA_ADMIN_PASSWORD:-change-me-before-exposing-grafana}"
+      GF_SECURITY_ADMIN_PASSWORD: "${ODF_GRAFANA_ADMIN_PASSWORD:?Set ODF_GRAFANA_ADMIN_PASSWORD via a secret manager or environment variable}"
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./infra/observability/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yaml:ro

@@ -95,6 +95,9 @@ export default function App() {
   const [toast, setToast] = useState("");
   const explorerRequestRef = useRef<AbortController | null>(null);
   const projectRequestRef = useRef<AbortController | null>(null);
+  const workspaceRequestRef = useRef<AbortController | null>(null);
+  const workspaceTenantId = platformContext?.tenantId ?? "";
+  const workspaceProjectId = platformContext?.projectId ?? "";
 
   const updateRoute = useCallback((patch: Partial<AppRoute>, mode: AppRouteHistoryMode = "push") => {
     const nextRoute: AppRoute = { ...routeRef.current, ...patch };
@@ -150,10 +153,12 @@ export default function App() {
     historyMode: AppRouteHistoryMode | null = "replace",
   ) => {
     projectRequestRef.current?.abort();
+    workspaceRequestRef.current?.abort();
     const controller = new AbortController();
     projectRequestRef.current = controller;
     setSelectedTenantId(tenantId);
     setPlatformContext(null);
+    setWorkspace(null);
     setPlatformProjects([]);
     setPlatformBootstrap({ status: "loading", message: `Loading projects for ${tenantId}…` });
     try {
@@ -187,6 +192,7 @@ export default function App() {
         setSelectedTenantId("");
         setPlatformProjects([]);
         setPlatformContext(null);
+        setWorkspace(null);
         setPlatformBootstrap({ status: "empty", message: "No accessible tenants were returned for this identity." });
         return;
       }
@@ -201,14 +207,38 @@ export default function App() {
   }, [loadProjectsForTenant]);
 
   useEffect(() => {
+    workspaceRequestRef.current?.abort();
+    if (!workspaceTenantId || !workspaceProjectId) {
+      setWorkspace(null);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    workspaceRequestRef.current = controller;
+    setWorkspace(null);
+    void getWorkspace(
+      "cooling-water-system",
+      { tenantId: workspaceTenantId, projectId: workspaceProjectId },
+      controller.signal,
+    )
+      .then((nextWorkspace) => {
+        if (!controller.signal.aborted) setWorkspace(nextWorkspace);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setWorkspace(null);
+      });
+
+    return () => controller.abort();
+  }, [workspaceProjectId, workspaceTenantId]);
+
+  useEffect(() => {
     const controller = new AbortController();
     setAssetsLoading(true);
     void Promise.all([
       getHealth(controller.signal),
       capture(listAssets({ limit: ASSET_PAGE_SIZE, offset: 0 }, controller.signal)),
-      capture(getWorkspace("cooling-water-system", controller.signal)),
       capture(listPlatformTenants({ limit: 100 }, controller.signal)),
-    ]).then(([online, assetResult, workspaceResult, tenantResult]) => {
+    ]).then(([online, assetResult, tenantResult]) => {
       if (controller.signal.aborted) return;
       setApiOnline(online);
       setAssetsLoading(false);
@@ -216,18 +246,14 @@ export default function App() {
         setAssets(assetResult.value.items);
         setAssetTotal(assetResult.value.total);
         setAssetsError("");
-        const preferredExternalId = workspaceResult.ok
-          ? workspaceResult.value.snapshot.nodes.find((node) => node.type === "asset" && typeof node.data.externalId === "string")?.data.externalId
-          : undefined;
         const routedAssetId = routeRef.current.assetId;
         const initialAssetId = routedAssetId
-          ?? assetResult.value.items.find((asset) => asset.externalId === preferredExternalId)?.externalId
+          ?? assetResult.value.items.find((asset) => asset.externalId === "P-101")?.externalId
           ?? assetResult.value.items[0]?.externalId;
         if (initialAssetId) void loadExplorerAsset(initialAssetId);
       } else {
         setAssetsError(errorMessage(assetResult.error, "Assets could not be loaded"));
       }
-      if (workspaceResult.ok) acceptWorkspace(workspaceResult.value);
       if (tenantResult.ok) {
         setPlatformTenants(tenantResult.value.items);
         if (tenantResult.value.items.length === 0) {
@@ -247,8 +273,9 @@ export default function App() {
       controller.abort();
       explorerRequestRef.current?.abort();
       projectRequestRef.current?.abort();
+      workspaceRequestRef.current?.abort();
     };
-  }, [acceptWorkspace, loadExplorerAsset, loadProjectsForTenant]);
+  }, [loadExplorerAsset, loadProjectsForTenant]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return undefined;
@@ -344,6 +371,8 @@ export default function App() {
 
   function selectPlatformProject(projectId: string) {
     if (!selectedTenantId) return;
+    workspaceRequestRef.current?.abort();
+    setWorkspace(null);
     setPlatformContext({ tenantId: selectedTenantId, projectId });
     setPlatformBootstrap({ status: "ready", message: `${selectedTenantId} / ${projectId}` });
     updateRoute({ tenantId: selectedTenantId, projectId });
@@ -369,7 +398,7 @@ export default function App() {
   if (viewMode === "canvas") {
     return (
       <>
-        <CanvasWorkspace snapshot={snapshot} workspace={workspace} onWorkspaceUpdated={acceptWorkspace} onOpenExplorer={() => showView("explorer")} onNotify={notify} />
+        <CanvasWorkspace snapshot={snapshot} workspace={workspace} platformContext={platformContext} onWorkspaceUpdated={acceptWorkspace} onOpenExplorer={() => showView("explorer")} onNotify={notify} />
         {toast ? <div className="toast" role="status">{toast}</div> : null}
       </>
     );

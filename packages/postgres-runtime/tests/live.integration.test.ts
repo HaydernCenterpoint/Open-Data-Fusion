@@ -20,6 +20,10 @@ if (connectionString) {
         status: "ready",
         schemaPresent: true,
         tenantDataPlanePresent: true,
+        workspaceScopePresent: true,
+        projectMembershipPresent: true,
+        workspaceGrantsPresent: true,
+        apiPrincipalAttested: true,
       });
     });
 

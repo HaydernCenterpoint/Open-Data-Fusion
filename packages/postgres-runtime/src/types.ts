@@ -72,6 +72,15 @@ export interface DatabaseReadiness {
   status: "ready" | "not_ready";
   schemaPresent: boolean;
   tenantDataPlanePresent: boolean;
+  workspaceScopePresent: boolean;
+  projectMembershipPresent: boolean;
+  workspaceGrantsPresent: boolean;
+  /**
+   * The connected principal is suitable for the production Canvas API: it is
+   * a non-elevated application login without cutover, bootstrap, or
+   * outbox-publisher capabilities.
+   */
+  apiPrincipalAttested: boolean;
   timestamp: string;
 }
 

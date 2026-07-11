@@ -15,6 +15,7 @@
     "start": "node dist/src/server.js",
     "cutover:preflight": "npm run build && node dist/src/cutover-preflight-cli.js",
     "cutover:import": "npm run build && node dist/src/cutover-import-cli.js",
+    "tenant:provision": "npm run build && node dist/src/tenant-provision-cli.js",
     "pretest": "npm --prefix ../.. run build --workspace @open-data-fusion/platform-core && npm --prefix ../.. run build --workspace @open-data-fusion/postgres-runtime",
     "test": "vitest run",
     "pretest:watch": "npm --prefix ../.. run build --workspace @open-data-fusion/platform-core && npm --prefix ../.. run build --workspace @open-data-fusion/postgres-runtime",

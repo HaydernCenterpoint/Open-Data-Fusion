@@ -7,6 +7,10 @@ audience, and the four users seeded into the example workspace.
 Start the isolated development identity stack:
 
 ```powershell
+$env:KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME = "local-admin-name"
+$env:KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD = "<value-from-secret-manager>"
+$env:ODF_DEMO_USER_PASSWORD = "<value-from-secret-manager>"
+$env:ODF_CONNECTOR_CLIENT_SECRET = "<value-from-secret-manager>"
 docker compose -f docker-compose.identity.yml up -d
 ```
 
@@ -29,7 +33,7 @@ The realm defines API client roles for `data:read`, `data:ingest`,
 `relations:review`, `audit:read`, `platform:admin`, and three independent
 write-back roles. Demo users receive least-purpose role
 sets, while the `open-data-fusion-connector` confidential client has a service
-account limited to `data:read` and `data:ingest`. Override
+account limited to `data:read` and `data:ingest`. Set a unique
 `ODF_CONNECTOR_CLIENT_SECRET` before importing the realm and use the client
 credentials grant only from a protected connector runtime; never ship that
 secret to the browser.
@@ -43,10 +47,10 @@ VITE_OIDC_SCOPE=openid profile email
 VITE_OIDC_USER_CLAIM=preferred_username
 ```
 
-`ODF_DEMO_USER_PASSWORD` is substituted while importing the realm. The Compose
-profile supplies a documented local fallback; override it in `.env` before
-starting. The same password is intentionally shared by all four demo users and
-must never be used outside local development.
+`ODF_DEMO_USER_PASSWORD` is substituted while importing the realm. Compose
+requires an explicit value and has no checked-in fallback. The same password is
+intentionally shared by all four demo users and must never be used outside
+local development.
 
 The Keycloak `start-dev` profile uses insecure HTTP and local storage. A
 production deployment must use an optimized image, HTTPS, external PostgreSQL,

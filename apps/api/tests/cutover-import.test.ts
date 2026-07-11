@@ -301,7 +301,7 @@ describe('SQLite to PostgreSQL cutover import', () => {
     const pool = new RecordingCutoverPool(REQUIRED_CUTOVER_MIGRATIONS.slice(0, -1));
 
     await expect(importSqliteCutoverBundle(pool, report, dryRunOptions())).rejects.toThrow(
-      'PostgreSQL cutover target is missing migrations: 005_tenant_membership_and_workspace_scope',
+      'PostgreSQL cutover target is missing migrations: 006_workspace_application_role_grants',
     );
     expect(pool.client.commands.map((query) => query.text)).toContain('ROLLBACK');
   });

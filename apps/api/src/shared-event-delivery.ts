@@ -39,11 +39,18 @@ export interface SharedEventInput {
 
 export type SharedEventListener = (event: SharedEvent) => void;
 
+/** Runtime state used by readiness checks when cross-instance delivery is mandatory. */
+export interface SharedEventDeliveryHealth {
+  status: "ok" | "degraded";
+  mode: "memory" | "redis";
+}
+
 export interface SharedEventDelivery {
   /** The selected transport at creation time. */
   readonly mode: "memory" | "redis";
   publish(input: SharedEventInput): Promise<SharedEvent>;
   subscribe(topic: string, listener: SharedEventListener): () => void;
+  health(): SharedEventDeliveryHealth;
   close(): Promise<void>;
 }
 
@@ -266,6 +273,10 @@ export class InMemorySharedEventDelivery implements SharedEventDelivery {
     };
   }
 
+  health(): SharedEventDeliveryHealth {
+    return { status: "ok", mode: "memory" };
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     this.subscriptions.clear();
@@ -370,6 +381,10 @@ export class RedisStreamEventDelivery extends InMemorySharedEventDelivery {
         this.streamTopics.delete(streamName(normalizedTopic));
       }
     };
+  }
+
+  override health(): SharedEventDeliveryHealth {
+    return { status: this.redisActive && !this.closed ? "ok" : "degraded", mode: "redis" };
   }
 
   override async close(): Promise<void> {

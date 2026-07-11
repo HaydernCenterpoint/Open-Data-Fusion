@@ -1,0 +1,326 @@
+name: Production-like PostgreSQL Canvas integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/api/**"
+      - "apps/outbox-worker/**"
+      - "packages/contracts/**"
+      - "packages/platform-core/**"
+      - "packages/postgres-runtime/**"
+      - "infra/**"
+      - "docker-compose*.yml"
+      - "Dockerfile.api"
+      - "Dockerfile.outbox"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.base.json"
+      - ".github/workflows/production-like-integration.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "apps/outbox-worker/**"
+      - "packages/contracts/**"
+      - "packages/platform-core/**"
+      - "packages/postgres-runtime/**"
+      - "infra/**"
+      - "docker-compose*.yml"
+      - "Dockerfile.api"
+      - "Dockerfile.outbox"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.base.json"
+      - ".github/workflows/production-like-integration.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  canvas-outbox-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # These are disposable CI-only credentials. Deployment profiles require
+      # their own secrets and have no fallback values in Compose.
+      COMPOSE_PROJECT_NAME: odf-production-like-ci
+      ODF_POSTGRES_DB: odf
+      ODF_POSTGRES_ADMIN_USER: odf_migrator
+      ODF_POSTGRES_ADMIN_PASSWORD: ci-only-postgres-admin-password
+      ODF_REDIS_PASSWORD: ci-only-redis-password
+      ODF_GRAFANA_ADMIN_PASSWORD: ci-only-grafana-password
+      ODF_METRICS_TOKEN: ci-only-metrics-token
+      KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME: ci-local-admin
+      KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD: ci-only-keycloak-admin-password
+      ODF_DEMO_USER_PASSWORD: ci-only-demo-user-password
+      ODF_CONNECTOR_CLIENT_SECRET: ci-only-connector-client-secret
+      ODF_CI_API_PASSWORD: ci-only-api-password
+      ODF_CI_OUTBOX_PASSWORD: ci-only-outbox-password
+      ODF_CI_TENANT_PROVISION_PASSWORD: ci-only-tenant-provision-password
+      ODF_API_POSTGRES_URL: postgresql://odf_ci_api:ci-only-api-password@odf-postgres:5432/odf
+      ODF_OUTBOX_POSTGRES_URL: postgresql://odf_ci_outbox:ci-only-outbox-password@odf-postgres:5432/odf
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Validate production-like Compose shape
+        run: |
+          python3 infra/postgres/scripts/validate_static.py
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like config --quiet
+
+      - name: Start PostgreSQL and Redis
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml
+          --profile production-like up -d --wait odf-postgres odf-redis
+
+      - name: Apply all immutable migrations
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml
+          --profile production-like run --rm migrate
+
+      - name: Prove security-definer tenant bootstrap boundary
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like exec -T odf-postgres \
+            psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+            --set=tenant_provision_password="$ODF_CI_TENANT_PROVISION_PASSWORD" \
+            --username "$ODF_POSTGRES_ADMIN_USER" --dbname "$ODF_POSTGRES_DB" <<'SQL'
+          DO $roles$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'odf_ci_tenant_provision') THEN
+              CREATE ROLE odf_ci_tenant_provision LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+          END
+          $roles$;
+          ALTER ROLE odf_ci_tenant_provision WITH LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          ALTER ROLE odf_ci_tenant_provision PASSWORD :'tenant_provision_password';
+          REVOKE odf_app, odf_outbox_publisher, odf_readonly, odf_cutover, odf_tenant_provision_owner FROM odf_ci_tenant_provision;
+          REVOKE ALL PRIVILEGES ON SCHEMA odf FROM odf_ci_tenant_provision;
+          REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA odf FROM odf_ci_tenant_provision;
+          REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA odf FROM odf_ci_tenant_provision;
+          REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA odf FROM odf_ci_tenant_provision;
+          GRANT odf_tenant_provisioner TO odf_ci_tenant_provision;
+
+          DO $boundary$
+          BEGIN
+            IF NOT has_schema_privilege('odf_ci_tenant_provision', 'odf', 'USAGE')
+              OR NOT has_table_privilege('odf_ci_tenant_provision', 'odf.schema_migrations', 'SELECT')
+              OR NOT has_function_privilege(
+                'odf_ci_tenant_provision',
+                'odf.provision_tenant_project(uuid,text,text,uuid,text,text,text,uuid,text,text,text)'::regprocedure,
+                'EXECUTE'
+              ) THEN
+              RAISE EXCEPTION 'tenant provisioner is missing its minimal capability';
+            END IF;
+            IF has_table_privilege(
+              'odf_ci_tenant_provision',
+              'odf.tenants',
+              'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+            )
+              OR has_table_privilege(
+                'odf_ci_tenant_provision',
+                'odf.projects',
+                'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+              )
+              OR has_table_privilege(
+                'odf_ci_tenant_provision',
+                'odf.tenant_members',
+                'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+              )
+              OR has_table_privilege(
+                'odf_ci_tenant_provision',
+                'odf.project_members',
+                'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+              )
+              OR has_table_privilege(
+                'odf_ci_tenant_provision',
+                'odf.model_spaces',
+                'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+              )
+              OR has_table_privilege(
+                'odf_ci_tenant_provision',
+                'odf.audit_log',
+                'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+              )
+              OR pg_has_role('odf_ci_tenant_provision', 'odf_tenant_provision_owner', 'MEMBER') THEN
+              RAISE EXCEPTION 'tenant provisioner has a forbidden direct data capability';
+            END IF;
+          END
+          $boundary$;
+          SQL
+
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like exec \
+            -e PGPASSWORD="$ODF_CI_TENANT_PROVISION_PASSWORD" -T odf-postgres \
+            psql --no-psqlrc --set=ON_ERROR_STOP=1 --host 127.0.0.1 \
+            --username odf_ci_tenant_provision --dbname "$ODF_POSTGRES_DB" <<'SQL'
+          BEGIN ISOLATION LEVEL SERIALIZABLE;
+          DO $bootstrap$
+          DECLARE
+            created record;
+            unchanged record;
+          BEGIN
+            SELECT * INTO created
+            FROM odf.provision_tenant_project(
+              'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'::uuid,
+              'tenant-provision-ci',
+              'Tenant provision CI',
+              'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'::uuid,
+              'bootstrap-project',
+              'Bootstrap project',
+              'owner@example.test',
+              'cccccccc-cccc-4ccc-8ccc-cccccccccccc'::uuid,
+              'default',
+              'Default model space',
+              'ci-tenant-provision'
+            );
+            IF NOT (
+              created.tenant_created
+              AND created.project_created
+              AND created.tenant_owner_created
+              AND created.project_owner_created
+              AND created.model_space_created
+              AND created.audit_recorded
+            ) THEN
+              RAISE EXCEPTION 'tenant bootstrap did not create the complete bounded target';
+            END IF;
+
+            BEGIN
+              PERFORM *
+              FROM odf.provision_tenant_project(
+                'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'::uuid,
+                'tenant-provision-ci',
+                'Tenant provision CI',
+                'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'::uuid,
+                'bootstrap-project',
+                'Bootstrap project',
+                'replacement-owner@example.test',
+                'cccccccc-cccc-4ccc-8ccc-cccccccccccc'::uuid,
+                'default',
+                'Default model space',
+                'ci-tenant-provision'
+              );
+              RAISE EXCEPTION 'existing tenant plus new owner unexpectedly succeeded';
+            EXCEPTION WHEN unique_violation THEN
+              IF position('exact completed bootstrap' IN SQLERRM) = 0 THEN
+                RAISE;
+              END IF;
+            END;
+
+            SELECT * INTO unchanged
+            FROM odf.provision_tenant_project(
+              'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'::uuid,
+              'tenant-provision-ci',
+              'Tenant provision CI',
+              'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'::uuid,
+              'bootstrap-project',
+              'Bootstrap project',
+              'owner@example.test',
+              'cccccccc-cccc-4ccc-8ccc-cccccccccccc'::uuid,
+              'default',
+              'Default model space',
+              'ci-tenant-provision'
+            );
+            IF unchanged.tenant_created
+              OR unchanged.project_created
+              OR unchanged.tenant_owner_created
+              OR unchanged.project_owner_created
+              OR unchanged.model_space_created
+              OR unchanged.audit_recorded THEN
+              RAISE EXCEPTION 'exact completed tenant bootstrap was not an idempotent no-op';
+            END IF;
+          END
+          $bootstrap$;
+          ROLLBACK;
+          SQL
+
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like exec -T odf-postgres \
+            psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+            --username "$ODF_POSTGRES_ADMIN_USER" --dbname "$ODF_POSTGRES_DB" <<'SQL'
+          REVOKE odf_tenant_provisioner FROM odf_ci_tenant_provision;
+          DROP ROLE odf_ci_tenant_provision;
+          SQL
+
+      - name: Provision isolated CI roles and PostgreSQL Canvas fixture
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like exec -T odf-postgres \
+            psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+            --set=api_password="$ODF_CI_API_PASSWORD" \
+            --set=outbox_password="$ODF_CI_OUTBOX_PASSWORD" \
+            --username "$ODF_POSTGRES_ADMIN_USER" --dbname "$ODF_POSTGRES_DB" <<'SQL'
+          DO $roles$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'odf_ci_api') THEN
+              CREATE ROLE odf_ci_api LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'odf_ci_outbox') THEN
+              CREATE ROLE odf_ci_outbox LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+          END
+          $roles$;
+          ALTER ROLE odf_ci_api PASSWORD :'api_password';
+          ALTER ROLE odf_ci_outbox PASSWORD :'outbox_password';
+          GRANT odf_app TO odf_ci_api;
+          GRANT odf_outbox_publisher TO odf_ci_outbox;
+
+          INSERT INTO odf.tenants (tenant_id, slug, name)
+          VALUES ('11111111-1111-4111-8111-111111111111', 'ci-tenant', 'CI tenant');
+          INSERT INTO odf.projects (project_id, tenant_id, slug, name)
+          VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', 'ci-project', 'CI project');
+          INSERT INTO odf.tenant_members (tenant_id, user_id, role, created_by)
+          VALUES ('11111111-1111-4111-8111-111111111111', 'service-account-open-data-fusion-connector', 'owner', 'ci-bootstrap');
+          INSERT INTO odf.project_members (tenant_id, project_id, user_id, role, created_by)
+          VALUES ('11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', 'service-account-open-data-fusion-connector', 'owner', 'ci-bootstrap');
+          INSERT INTO odf.workspaces (id, name, snapshot, version, created_by, updated_by)
+          VALUES (
+            'ci-production-like-workspace',
+            'CI production-like workspace',
+            '{"viewport":{"x":0,"y":0,"zoom":1},"nodes":[],"edges":[]}'::jsonb,
+            1,
+            'service-account-open-data-fusion-connector',
+            'service-account-open-data-fusion-connector'
+          );
+          INSERT INTO odf.workspace_scopes (workspace_id, tenant_id, project_id, assigned_by)
+          VALUES (
+            'ci-production-like-workspace',
+            '11111111-1111-4111-8111-111111111111',
+            '22222222-2222-4222-8222-222222222222',
+            'ci-bootstrap'
+          );
+          INSERT INTO odf.workspace_members (workspace_id, user_id, display_name, role)
+          VALUES (
+            'ci-production-like-workspace',
+            'service-account-open-data-fusion-connector',
+            'CI connector service account',
+            'owner'
+          );
+          INSERT INTO odf.workspace_revisions (workspace_id, version, snapshot, change_summary, actor, correlation_id)
+          VALUES (
+            'ci-production-like-workspace',
+            1,
+            '{"viewport":{"x":0,"y":0,"zoom":1},"nodes":[],"edges":[]}'::jsonb,
+            'Initial CI fixture',
+            'ci-bootstrap',
+            '55555555-5555-4555-8555-555555555555'
+          );
+          SQL
+
+      - name: Start identity, API replicas, and outbox publisher
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml
+          --profile production-like up -d --build --wait keycloak api api-replica outbox-worker
+
+      - name: Prove PostgreSQL Canvas update, outbox, Redis, and replica SSE
+        run: bash infra/ci/production-like-smoke.sh
+
+      - name: Show integration service logs after failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like ps || true
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like logs --no-color --tail=200 api api-replica outbox-worker keycloak odf-postgres odf-redis || true
+
+      - name: Remove production-like integration resources
+        if: always()
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml
+          --profile production-like down --volumes --remove-orphans

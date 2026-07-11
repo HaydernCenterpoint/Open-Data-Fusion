@@ -63,6 +63,22 @@ routes continue to use `owner`, `editor`, `reviewer` and `viewer`; possession of
 a data-plane permission does not grant access to a workspace, and workspace
 membership does not implicitly grant ingestion or audit access.
 
+### PostgreSQL Canvas scope
+
+When `ODF_WORKSPACE_PERSISTENCE=postgres`, every workspace/Canvas request must
+also include two valid UUID headers:
+
+```text
+x-odf-tenant-id: <tenant UUID>
+x-odf-project-id: <project UUID>
+```
+
+The API resolves the verified identity's project membership under that tenant
+and applies tenant context transaction-locally in PostgreSQL. Missing,
+malformed, or unauthorized headers fail closed. These headers do not replace
+OIDC or workspace membership; treat them as untrusted client input and
+authorize them only through server-side membership validation.
+
 Ingestion `source.actor` and relation-review `reviewer` values supplied by a
 client are compatibility inputs only. The API always replaces them with the
 verified identity before writing domain state or audit history. Connector and

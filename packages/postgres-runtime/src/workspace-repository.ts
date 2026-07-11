@@ -241,6 +241,7 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
         version: workspace.version,
         actor: input.actor,
         changeSummary: input.changeSummary,
+        updatedAt: workspace.updatedAt,
       };
       const deduplicationKey = input.deduplicationKey
         ?? "workspace:" + workspace.id + ":v" + String(workspace.version);
@@ -330,6 +331,8 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
       if (!row) throw new ConflictError("Workspace member could not be saved");
       const member = workspaceMemberFromRow(row);
       const action = before.rows[0] ? "workspace.member_updated" : "workspace.member_added";
+      const change = before.rows[0] ? "updated" : "added";
+      const occurredAt = new Date().toISOString();
       await this.insertAudit(
         transaction,
         input.actor,
@@ -347,13 +350,20 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
         transaction,
         "workspace",
         input.workspaceId,
-        action,
+        "members.updated",
         "workspace-events",
         input.workspaceId,
         {
           workspaceId: input.workspaceId,
-          userId: input.member.userId,
-          role: input.member.role,
+          actor: input.actor,
+          change,
+          member: {
+            workspaceId: member.workspaceId,
+            userId: member.userId,
+            displayName: member.displayName,
+            role: member.role,
+          },
+          occurredAt,
         },
         {},
         "workspace-member:" + input.workspaceId + ":" + input.member.userId + ":" + input.correlationId,
@@ -383,6 +393,7 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
       const row = result.rows[0];
       if (!row) throw new NotFoundError("Workspace member was not found");
       const member = workspaceMemberFromRow(row);
+      const occurredAt = new Date().toISOString();
       await this.insertAudit(
         transaction,
         input.actor,
@@ -400,13 +411,20 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
         transaction,
         "workspace",
         input.workspaceId,
-        "workspace.member_removed",
+        "members.updated",
         "workspace-events",
         input.workspaceId,
         {
           workspaceId: input.workspaceId,
-          userId: member.userId,
-          role: member.role,
+          actor: input.actor,
+          change: "removed",
+          member: {
+            workspaceId: member.workspaceId,
+            userId: member.userId,
+            displayName: member.displayName,
+            role: member.role,
+          },
+          occurredAt,
         },
         {},
         "workspace-member-removed:" + input.workspaceId + ":" + member.userId + ":" + input.correlationId,

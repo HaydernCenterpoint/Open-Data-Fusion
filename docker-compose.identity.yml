@@ -6,15 +6,27 @@ services:
     restart: unless-stopped
     command: ["start-dev", "--import-realm"]
     environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: "${KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME:-admin}"
-      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:-change-this-local-admin-password}"
+      # This is intentionally a development-only Compose stack, but it still
+      # has no checked-in credentials or unsafe fallback passwords.
+      KC_BOOTSTRAP_ADMIN_USERNAME: "${KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME:?Set KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME}"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:?Set KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD via a secret manager or environment variable}"
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
-      ODF_DEMO_USER_PASSWORD: "${ODF_DEMO_USER_PASSWORD:-change-this-local-demo-password}"
-      ODF_CONNECTOR_CLIENT_SECRET: "${ODF_CONNECTOR_CLIENT_SECRET:-change-this-local-connector-secret}"
+      ODF_DEMO_USER_PASSWORD: "${ODF_DEMO_USER_PASSWORD:?Set ODF_DEMO_USER_PASSWORD for the imported development realm}"
+      ODF_CONNECTOR_CLIENT_SECRET: "${ODF_CONNECTOR_CLIENT_SECRET:?Set ODF_CONNECTOR_CLIENT_SECRET via a secret manager or environment variable}"
     ports:
       - "127.0.0.1:${ODF_KEYCLOAK_PORT:-8080}:8080"
       - "127.0.0.1:${ODF_KEYCLOAK_MANAGEMENT_PORT:-9000}:9000"
     volumes:
       - ./infra/keycloak/open-data-fusion-realm.json:/opt/keycloak/data/import/open-data-fusion-realm.json:ro
     mem_limit: 1g
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c '{ printf "HEAD /health/ready HTTP/1.0\\r\\n\\r\\n" >&3;
+          grep -q "200" <&3; } 3<>/dev/tcp/127.0.0.1/9000'
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 30s

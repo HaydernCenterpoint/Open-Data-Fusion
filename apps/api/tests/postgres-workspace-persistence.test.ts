@@ -174,6 +174,18 @@ describe('PostgresWorkspacePersistence', () => {
         role: 'editor',
       },
     });
-    expect(client.queries.some((query) => query.text.startsWith('INSERT INTO odf.outbox_events'))).toBe(true);
+    const outbox = client.queries.find((query) => query.text.startsWith('INSERT INTO odf.outbox_events'));
+    expect(outbox?.values?.[2]).toBe('members.updated');
+    expect(JSON.parse(String(outbox?.values?.[5]))).toMatchObject({
+      workspaceId: 'cooling-water-system',
+      actor: scope.userId,
+      change: 'added',
+      member: {
+        workspaceId: 'cooling-water-system',
+        userId: 'riley.chen',
+        displayName: 'Riley Chen',
+        role: 'editor',
+      },
+    });
   });
 });

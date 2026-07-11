@@ -91,6 +91,7 @@ describe('shared event delivery', () => {
 
     expect(delivery).toBeInstanceOf(InMemorySharedEventDelivery);
     expect(delivery.mode).toBe('memory');
+    expect(delivery.health()).toEqual({ status: 'ok', mode: 'memory' });
     expect(received).toEqual([published]);
     expect(published.messageKey).toBe('cooling-water-system');
     expect(published.correlationId).toBe(published.eventId);
@@ -143,6 +144,7 @@ describe('shared event delivery', () => {
 
     expect(received).toEqual([published]);
     expect(publisher.xAddCalls).toHaveLength(1);
+    expect(delivery.health()).toEqual({ status: 'ok', mode: 'redis' });
     expect(publisher.xAddCalls[0]).toMatchObject({
       key: 'odf:workspace-events',
       id: '*',
@@ -227,6 +229,7 @@ describe('shared event delivery', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       'Redis event delivery is unavailable; using in-memory delivery for this API instance.',
     );
+    expect(delivery.health()).toEqual({ status: 'degraded', mode: 'redis' });
 
     await delivery.close();
   });

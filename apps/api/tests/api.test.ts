@@ -7,7 +7,17 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../src/app.js';
+import { WorkspaceEventHub } from '../src/collaboration.js';
 import { FusionDatabase } from '../src/database.js';
+import { InMemorySharedEventDelivery } from '../src/shared-event-delivery.js';
+
+class DegradedRedisDelivery extends InMemorySharedEventDelivery {
+  override readonly mode = 'redis' as const;
+
+  override health() {
+    return { status: 'degraded' as const, mode: 'redis' as const };
+  }
+}
 
 describe('Open Data Fusion API vertical slice', () => {
   let tempDirectory: string;
@@ -31,6 +41,25 @@ describe('Open Data Fusion API vertical slice', () => {
     expect(response.status).toBe(200);
     expect(response.headers['x-correlation-id']).toBe('health-test');
     expect(response.body).toMatchObject({ status: 'ok', service: 'open-data-fusion-api', schemaVersion: '3' });
+  });
+
+  it('fails readiness when a required shared event transport degrades', async () => {
+    const requiredApp = createApp(
+      database,
+      new WorkspaceEventHub(new DegradedRedisDelivery()),
+      { sharedEventsRequired: true },
+    );
+
+    const health = await request(requiredApp).get('/health');
+    const ready = await request(requiredApp).get('/ready');
+
+    expect(health.status).toBe(200);
+    expect(health.body.sharedEventDelivery).toEqual({ status: 'degraded', mode: 'redis' });
+    expect(ready.status).toBe(503);
+    expect(ready.body).toMatchObject({
+      readiness: 'not_ready',
+      sharedEventDelivery: { status: 'degraded', mode: 'redis' },
+    });
   });
 
   it('lists and searches the seeded asset hierarchy', async () => {
