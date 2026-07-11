@@ -3,7 +3,7 @@
 - Reference interaction: Cognite Data Fusion Quick Start demo
 - Reference URL: `https://www.cognite.com/en/demos/cltd3po5v001v0fk1a83q8oiz`
 - Accepted concept: `../../docs/design/open-data-fusion-canvas-concept.png`
-- Desktop implementation: `../../docs/design/open-data-fusion-canvas-implementation.png`
+- Desktop implementation: `../../docs/design/open-data-fusion-canvas-implementation.jpg`
 - Collaborative implementation: `../../docs/design/open-data-fusion-collaborative-canvas.png`
 - Responsive check: 900 × 900 and 390 × 844
 - Result: passed
