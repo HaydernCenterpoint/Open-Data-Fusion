@@ -13,10 +13,13 @@ import {
 } from './cutover-import.js';
 import { readSqliteCutoverSource } from './cutover-preflight-cli.js';
 
-const usage = 'Usage: cutover-import --bundle <preflight.json> [--database <sqlite-path>] [--apply]';
+const usage = 'Usage: cutover-import --bundle <preflight.json> --tenant-id <uuid> --project-id <uuid> --assigned-by <user> [--database <sqlite-path>] [--apply]';
 
 export interface CutoverImportArguments {
   bundlePath: string;
+  tenantId: string;
+  projectId: string;
+  assignedBy: string;
   databasePath?: string;
   apply: boolean;
 }
@@ -25,6 +28,9 @@ export type CutoverImportPoolFactory = (connectionString: string) => RuntimePool
 
 export function parseCutoverImportArguments(args: readonly string[]): CutoverImportArguments {
   let bundlePath: string | undefined;
+  let tenantId: string | undefined;
+  let projectId: string | undefined;
+  let assignedBy: string | undefined;
   let databasePath: string | undefined;
   let apply = false;
 
@@ -35,15 +41,24 @@ export function parseCutoverImportArguments(args: readonly string[]): CutoverImp
       apply = true;
       continue;
     }
-    if (argument === '--bundle' || argument === '--database') {
+    if (argument === '--bundle' || argument === '--database' || argument === '--tenant-id' || argument === '--project-id' || argument === '--assigned-by') {
       const value = args[index + 1];
       if (!value || value.startsWith('--')) throw new Error(usage);
       if (argument === '--bundle') {
         if (bundlePath !== undefined) throw new Error(usage);
         bundlePath = value;
-      } else {
+      } else if (argument === '--database') {
         if (databasePath !== undefined) throw new Error(usage);
         databasePath = value;
+      } else if (argument === '--tenant-id') {
+        if (tenantId !== undefined) throw new Error(usage);
+        tenantId = value;
+      } else if (argument === '--project-id') {
+        if (projectId !== undefined) throw new Error(usage);
+        projectId = value;
+      } else {
+        if (assignedBy !== undefined) throw new Error(usage);
+        assignedBy = value;
       }
       index += 1;
       continue;
@@ -51,9 +66,12 @@ export function parseCutoverImportArguments(args: readonly string[]): CutoverImp
     throw new Error(usage);
   }
 
-  if (!bundlePath || (apply && !databasePath)) throw new Error(usage);
+  if (!bundlePath || !tenantId || !projectId || !assignedBy || (apply && !databasePath)) throw new Error(usage);
   return {
     bundlePath,
+    tenantId,
+    projectId,
+    assignedBy,
     ...(databasePath ? { databasePath } : {}),
     apply,
   };
@@ -99,6 +117,11 @@ export async function runSqliteCutoverImportCli(
   try {
     return await importSqliteCutoverBundle(pool, bundle, {
       apply: parsed.apply,
+      targetScope: {
+        tenantId: parsed.tenantId,
+        projectId: parsed.projectId,
+        assignedBy: parsed.assignedBy,
+      },
       ...(currentSource ? { currentSource } : {}),
     });
   } finally {

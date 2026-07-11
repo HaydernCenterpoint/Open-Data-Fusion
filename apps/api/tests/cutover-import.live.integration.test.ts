@@ -6,8 +6,15 @@ import { createSqliteCutoverPreflightReport } from '../src/cutover-preflight.js'
 import { FusionDatabase } from '../src/database.js';
 
 const connectionString = process.env.ODF_TEST_CUTOVER_POSTGRES_URL;
+const targetScope = {
+  tenantId: process.env.ODF_TEST_CUTOVER_TENANT_ID,
+  projectId: process.env.ODF_TEST_CUTOVER_PROJECT_ID,
+  assignedBy: process.env.ODF_TEST_CUTOVER_ASSIGNED_BY ?? 'cutover-test@example.test',
+};
 
-if (connectionString) {
+if (connectionString && targetScope.tenantId && targetScope.projectId) {
+  const tenantId = targetScope.tenantId;
+  const projectId = targetScope.projectId;
   describe('SQLite cutover live PostgreSQL rehearsal', () => {
     const source = new FusionDatabase({ path: ':memory:' });
     const pool = createPostgresPool({
@@ -27,7 +34,13 @@ if (connectionString) {
     it('imports and verifies a real bundle before rolling every row back', async () => {
       const bundle = createSqliteCutoverPreflightReport(source.database, ':memory:');
 
-      const result = await importSqliteCutoverBundle(pool, bundle);
+      const result = await importSqliteCutoverBundle(pool, bundle, {
+        targetScope: {
+          tenantId,
+          projectId,
+          assignedBy: targetScope.assignedBy,
+        },
+      });
 
       expect(result).toMatchObject({
         mode: 'dry-run',
@@ -38,6 +51,6 @@ if (connectionString) {
   });
 } else {
   describe.skip('SQLite cutover live PostgreSQL rehearsal', () => {
-    it('requires ODF_TEST_CUTOVER_POSTGRES_URL', () => {});
+    it('requires ODF_TEST_CUTOVER_POSTGRES_URL, ODF_TEST_CUTOVER_TENANT_ID, and ODF_TEST_CUTOVER_PROJECT_ID', () => {});
   });
 }

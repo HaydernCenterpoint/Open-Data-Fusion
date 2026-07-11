@@ -13,8 +13,15 @@ import { RecordingClient, RecordingPool, pgFailure, result } from "./recording-p
 
 const tenantContext = {
   tenantId: "11111111-1111-1111-1111-111111111111",
+  projectId: "33333333-3333-3333-3333-333333333333",
   userId: "operator@example.test",
 };
+
+function allowWorkspaceAccess(role: "owner" | "editor" | "reviewer" | "viewer" = "owner") {
+  return {
+    resolve: async () => ({ role }),
+  };
+}
 
 function workspaceRow(version = 2): Record<string, unknown> {
   return {
@@ -163,17 +170,20 @@ describe("pool and probes", () => {
 describe("workspace repository", () => {
   it("does not disclose a workspace snapshot to a caller without membership", async () => {
     const client = new RecordingClient((query) => {
-      if (query.text.includes("FROM odf.workspaces AS workspace")) return result();
-      if (query.text === "SELECT id FROM odf.workspaces WHERE id = $1") {
+      if (query.text.startsWith("SELECT workspace.id FROM odf.workspaces AS workspace")) {
         return result([{ id: "cooling-water-system" }]);
       }
+      if (query.text.includes("FROM odf.workspaces AS workspace")) return result();
       return result();
     });
-    const runtime = PostgresRuntime.fromPool(new RecordingPool(client));
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, {
+      projectAccessResolver: allowWorkspaceAccess(),
+    });
 
     await expect(runtime.workspaces.getWorkspace(tenantContext, "cooling-water-system"))
       .rejects.toEqual(expect.any(ForbiddenError));
-    expect(client.queries.some((query) => query.text.includes("membership.user_id = $2"))).toBe(true);
+    expect(client.queries.some((query) => query.text.includes("membership.user_id = $4"))).toBe(true);
+    expect(client.queries.some((query) => query.text.includes("scope.project_id = $3::uuid"))).toBe(true);
     expect(client.queries.at(-1)?.text).toBe("ROLLBACK");
   });
 
@@ -183,7 +193,9 @@ describe("workspace repository", () => {
       if (query.text.startsWith("UPDATE odf.workspaces")) return result([workspaceRow()]);
       return result();
     });
-    const runtime = PostgresRuntime.fromPool(new RecordingPool(client));
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, {
+      projectAccessResolver: allowWorkspaceAccess("editor"),
+    });
 
     const workspace = await runtime.workspaces.mutateWorkspace(tenantContext, {
       workspaceId: "cooling-water-system",
@@ -211,6 +223,8 @@ describe("workspace repository", () => {
       tenantContext.userId,
       "cooling-water-system",
       1,
+      tenantContext.tenantId,
+      tenantContext.projectId,
     ]);
   });
 
@@ -222,7 +236,9 @@ describe("workspace repository", () => {
       }
       return result();
     });
-    const runtime = PostgresRuntime.fromPool(new RecordingPool(client));
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, {
+      projectAccessResolver: allowWorkspaceAccess(),
+    });
 
     await expect(runtime.workspaces.removeWorkspaceMember(tenantContext, {
       workspaceId: "cooling-water-system",

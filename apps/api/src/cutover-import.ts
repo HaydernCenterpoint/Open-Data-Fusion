@@ -25,12 +25,21 @@ export const REQUIRED_CUTOVER_MIGRATIONS = [
   '002_workspace_owner_invariant',
   '003_tenant_industrial_data_plane',
   '004_sqlite_cutover_role',
+  '005_tenant_membership_and_workspace_scope',
 ] as const;
+
+export interface SqliteCutoverTargetScope {
+  tenantId: string;
+  projectId: string;
+  assignedBy: string;
+}
 
 export interface SqliteCutoverImportOptions {
   apply?: boolean;
   /** Fresh report read from the frozen SQLite source immediately before apply. */
   currentSource?: unknown;
+  /** Immutable tenant/project assignment for every imported workspace. */
+  targetScope?: SqliteCutoverTargetScope;
 }
 
 export interface SqliteCutoverImportReport {
@@ -39,6 +48,7 @@ export interface SqliteCutoverImportReport {
   counts: SqliteCutoverPreflightReport['counts'];
   sourceChecksums: SqliteCutoverPreflightReport['checksums'];
   targetChecksums: SqliteCutoverPreflightReport['checksums'];
+  targetScope: SqliteCutoverTargetScope;
   correlationIds: {
     algorithm: typeof CORRELATION_ID_MAPPING_ALGORITHM;
     uniqueSourceValues: number;
@@ -202,6 +212,27 @@ function nullableText(value: unknown, field: string): string | null {
   return value;
 }
 
+function normalizedTargetScope(scope: SqliteCutoverTargetScope | undefined): SqliteCutoverTargetScope {
+  if (!scope) {
+    throw new SqliteCutoverPreflightError(
+      'SQLite cutover requires an explicit tenant, project, and assigning actor for workspace scope',
+    );
+  }
+  const tenantId = scope.tenantId.trim().toLowerCase();
+  const projectId = scope.projectId.trim().toLowerCase();
+  const assignedBy = scope.assignedBy.trim();
+  if (!POSTGRES_UUID_PATTERN.test(tenantId)) {
+    throw new SqliteCutoverPreflightError('SQLite cutover target tenantId must be a UUID');
+  }
+  if (!POSTGRES_UUID_PATTERN.test(projectId)) {
+    throw new SqliteCutoverPreflightError('SQLite cutover target projectId must be a UUID');
+  }
+  if (!assignedBy || assignedBy.length > 255) {
+    throw new SqliteCutoverPreflightError('SQLite cutover target assignedBy must be 1 to 255 characters');
+  }
+  return { tenantId, projectId, assignedBy };
+}
+
 function jsonObject(value: unknown, field: string): JsonObject {
   if (value === null || Array.isArray(value) || typeof value !== 'object') {
     throw new Error(`${field} must be a JSON object`);
@@ -278,6 +309,13 @@ async function readTargetCounts(client: RuntimeClient): Promise<CutoverCounts> {
   return parseCounts(result.rows[0]);
 }
 
+async function readWorkspaceScopeCount(client: RuntimeClient): Promise<number> {
+  const result = await client.query({
+    text: 'SELECT count(*) AS workspace_scopes FROM odf.workspace_scopes',
+  });
+  return safeInteger(result.rows[0]?.workspace_scopes, 'workspace scopes count');
+}
+
 function countsAreEqual(left: CutoverCounts, right: CutoverCounts): boolean {
   return left.workspaces === right.workspaces
     && left.revisions === right.revisions
@@ -300,7 +338,11 @@ async function insertBatches(
   }
 }
 
-async function insertTargetData(client: RuntimeClient, data: TargetData): Promise<void> {
+async function insertTargetData(
+  client: RuntimeClient,
+  data: TargetData,
+  targetScope: SqliteCutoverTargetScope,
+): Promise<void> {
   await insertBatches(client, [
     'INSERT INTO odf.workspaces',
     '  (id, name, snapshot, version, created_by, created_at, updated_by, updated_at)',
@@ -318,6 +360,20 @@ async function insertTargetData(client: RuntimeClient, data: TargetData): Promis
     created_at: workspace.createdAt,
     updated_by: workspace.updatedBy,
     updated_at: workspace.updatedAt,
+  }))); 
+
+  await insertBatches(client, [
+    'INSERT INTO odf.workspace_scopes',
+    '  (workspace_id, tenant_id, project_id, assigned_by)',
+    'SELECT item.workspace_id, item.tenant_id::uuid, item.project_id::uuid, item.assigned_by',
+    'FROM jsonb_to_recordset($1::jsonb) AS item(',
+    '  workspace_id text, tenant_id text, project_id text, assigned_by text',
+    ')',
+  ].join('\n'), data.workspaces.map((workspace) => ({
+    workspace_id: workspace.id,
+    tenant_id: targetScope.tenantId,
+    project_id: targetScope.projectId,
+    assigned_by: targetScope.assignedBy,
   })));
 
   await insertBatches(client, [
@@ -387,7 +443,10 @@ async function advanceAuditSequence(client: RuntimeClient): Promise<void> {
   });
 }
 
-async function verifyTargetIntegrity(client: RuntimeClient): Promise<void> {
+async function verifyTargetIntegrity(
+  client: RuntimeClient,
+  targetScope: SqliteCutoverTargetScope,
+): Promise<void> {
   const result = await client.query({
     text: [
       'SELECT',
@@ -404,20 +463,30 @@ async function verifyTargetIntegrity(client: RuntimeClient): Promise<void> {
       '    GROUP BY workspace_id',
       '    HAVING min(version) <> 1 OR max(version) <> count(*)',
       '  ) AS invalid_revision_history,',
-      '  EXISTS (',
-      '    SELECT 1',
-      '    FROM odf.workspaces AS workspace',
-      '    WHERE NOT EXISTS (',
-      "      SELECT 1 FROM odf.workspace_members AS member WHERE member.workspace_id = workspace.id AND member.role = 'owner'",
-      '    )',
-      '  ) AS missing_owner',
-    ].join('\n'),
-  });
+       '  EXISTS (',
+       '    SELECT 1',
+       '    FROM odf.workspaces AS workspace',
+       '    WHERE NOT EXISTS (',
+       "      SELECT 1 FROM odf.workspace_members AS member WHERE member.workspace_id = workspace.id AND member.role = 'owner'",
+       '    )',
+       '  ) AS missing_owner,',
+       '  EXISTS (',
+       '    SELECT 1',
+       '    FROM odf.workspaces AS workspace',
+       '    LEFT JOIN odf.workspace_scopes AS scope ON scope.workspace_id = workspace.id',
+       '    WHERE scope.workspace_id IS NULL',
+       '       OR scope.tenant_id <> $1::uuid',
+       '       OR scope.project_id <> $2::uuid',
+       '  ) AS invalid_workspace_scope',
+     ].join('\n'),
+     values: [targetScope.tenantId, targetScope.projectId],
+   });
   const row = result.rows[0];
   if (!row) throw new Error('PostgreSQL did not return cutover integrity results');
   if (row.invalid_current_revision === true) throw new Error('PostgreSQL cutover target has an invalid current revision');
-  if (row.invalid_revision_history === true) throw new Error('PostgreSQL cutover target has non-contiguous revision history');
-  if (row.missing_owner === true) throw new Error('PostgreSQL cutover target has a workspace without an owner');
+   if (row.invalid_revision_history === true) throw new Error('PostgreSQL cutover target has non-contiguous revision history');
+   if (row.missing_owner === true) throw new Error('PostgreSQL cutover target has a workspace without an owner');
+   if (row.invalid_workspace_scope === true) throw new Error('PostgreSQL cutover target has an invalid workspace tenant scope');
 }
 
 async function readTargetData(client: RuntimeClient): Promise<TargetData> {
@@ -472,6 +541,8 @@ async function verifyCutoverPrincipal(client: RuntimeClient): Promise<void> {
       "    AND has_table_privilege(current_user, 'odf.workspace_revisions', 'INSERT') AS can_import_revisions,",
       "  has_table_privilege(current_user, 'odf.workspace_members', 'SELECT')",
       "    AND has_table_privilege(current_user, 'odf.workspace_members', 'INSERT') AS can_import_members,",
+      "  has_table_privilege(current_user, 'odf.workspace_scopes', 'SELECT')",
+      "    AND has_table_privilege(current_user, 'odf.workspace_scopes', 'INSERT') AS can_import_workspace_scopes,",
       "  has_table_privilege(current_user, 'odf.audit_log', 'SELECT')",
       "    AND has_table_privilege(current_user, 'odf.audit_log', 'INSERT') AS can_import_audit,",
       "  has_sequence_privilege(current_user, 'odf.audit_log_id_seq', 'UPDATE') AS can_advance_audit_sequence,",
@@ -479,6 +550,7 @@ async function verifyCutoverPrincipal(client: RuntimeClient): Promise<void> {
       "    has_table_privilege(current_user, 'odf.workspaces', 'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') OR",
       "    has_table_privilege(current_user, 'odf.workspace_revisions', 'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') OR",
       "    has_table_privilege(current_user, 'odf.workspace_members', 'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') OR",
+      "    has_table_privilege(current_user, 'odf.workspace_scopes', 'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') OR",
       "    has_table_privilege(current_user, 'odf.audit_log', 'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') OR",
       "    has_table_privilege(current_user, 'odf.schema_migrations', 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')",
       '  ) AS has_forbidden_history_privileges,',
@@ -486,7 +558,7 @@ async function verifyCutoverPrincipal(client: RuntimeClient): Promise<void> {
       '    SELECT 1',
       '    FROM information_schema.tables AS candidate',
       "    WHERE candidate.table_schema = 'odf'",
-      "      AND candidate.table_name NOT IN ('schema_migrations', 'workspaces', 'workspace_revisions', 'workspace_members', 'audit_log')",
+      "      AND candidate.table_name NOT IN ('schema_migrations', 'workspaces', 'workspace_revisions', 'workspace_members', 'workspace_scopes', 'audit_log')",
       '      AND (',
       "        has_table_privilege(current_user, format('%I.%I', candidate.table_schema, candidate.table_name), 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')",
       '      )',
@@ -514,6 +586,7 @@ async function verifyCutoverPrincipal(client: RuntimeClient): Promise<void> {
     ['workspace import', row.can_import_workspaces],
     ['revision import', row.can_import_revisions],
     ['membership import', row.can_import_members],
+    ['workspace scope import', row.can_import_workspace_scopes],
     ['audit import', row.can_import_audit],
     ['audit sequence advance', row.can_advance_audit_sequence],
   ] as const;
@@ -559,6 +632,7 @@ export async function importSqliteCutoverBundle(
     assertCurrentSourceMatchesBundle(report, options.currentSource);
   }
   const correlationIds = createCorrelationIdMapping(report);
+  const targetScope = normalizedTargetScope(options.targetScope);
   const expectedTarget = createExpectedTargetData(report, correlationIds);
   const expectedTargetChecksums = checksums(expectedTarget);
   const client = await pool.connect();
@@ -579,20 +653,27 @@ export async function importSqliteCutoverBundle(
     await verifyRequiredMigrations(client);
     await verifyCutoverPrincipal(client);
     const initialCounts = await readTargetCounts(client);
-    if (!emptyCounts(initialCounts)) {
+    const initialWorkspaceScopeCount = await readWorkspaceScopeCount(client);
+    if (!emptyCounts(initialCounts) || initialWorkspaceScopeCount !== 0) {
       throw new Error(
-        `PostgreSQL cutover target must be empty (found ${JSON.stringify(initialCounts)})`,
+        `PostgreSQL cutover target must be empty (found ${JSON.stringify({ ...initialCounts, workspaceScopes: initialWorkspaceScopeCount })})`,
       );
     }
 
-    await insertTargetData(client, expectedTarget);
+    await insertTargetData(client, expectedTarget, targetScope);
     const importedCounts = await readTargetCounts(client);
     if (!countsAreEqual(importedCounts, report.counts)) {
       throw new Error(
         `PostgreSQL cutover target counts ${JSON.stringify(importedCounts)} do not match source ${JSON.stringify(report.counts)}`,
       );
     }
-    await verifyTargetIntegrity(client);
+    const importedWorkspaceScopeCount = await readWorkspaceScopeCount(client);
+    if (importedWorkspaceScopeCount !== report.counts.workspaces) {
+      throw new Error(
+        `PostgreSQL cutover target workspace scopes ${String(importedWorkspaceScopeCount)} do not match imported workspaces ${String(report.counts.workspaces)}`,
+      );
+    }
+    await verifyTargetIntegrity(client, targetScope);
     const actualTargetChecksums = checksums(await readTargetData(client));
     assertChecksums(actualTargetChecksums, expectedTargetChecksums);
 
@@ -610,6 +691,7 @@ export async function importSqliteCutoverBundle(
       counts: report.counts,
       sourceChecksums: report.checksums,
       targetChecksums: expectedTargetChecksums,
+      targetScope,
       correlationIds: {
         algorithm: CORRELATION_ID_MAPPING_ALGORITHM,
         uniqueSourceValues: correlationIds.values.size,

@@ -38,6 +38,15 @@ export interface TransactionContext {
   platformAdmin?: boolean;
 }
 
+/**
+ * Workspace history is legacy data, but production access is now always tied
+ * to the immutable workspace-to-project scope established at cutover.
+ */
+export interface WorkspaceScope extends TransactionContext {
+  tenantId: string;
+  projectId: string;
+}
+
 export interface ScopedTransaction extends TransactionClient {
   /**
    * Only database access is exposed. Complete network I/O before entering a
@@ -104,8 +113,18 @@ export interface WorkspaceMutationInput {
   changeSummary: string;
   actor: string;
   correlationId: string;
+  /**
+   * The durable audit action. The default preserves the original
+   * `workspace.saved` behavior for callers that do not need a more specific
+   * canvas action.
+   */
+  auditAction?: string;
+  /** Extra, JSON-safe fields to retain with the immutable audit record. */
+  auditDetails?: JsonObject;
   eventType?: string;
   topic?: string;
+  /** Extra, JSON-safe fields to retain with the transactional outbox event. */
+  eventPayload?: JsonObject;
   headers?: JsonObject;
   deduplicationKey?: string;
 }
@@ -124,11 +143,36 @@ export interface WorkspaceMembershipRemoveInput {
   correlationId: string;
 }
 
+export interface WorkspaceMemberUpsertResult {
+  member: WorkspaceMemberRecord;
+  created: boolean;
+}
+
+export interface WorkspaceRevisionPage {
+  items: WorkspaceRevisionRecord[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface WorkspaceRepository {
-  getWorkspace(context: TransactionContext, workspaceId: string): Promise<WorkspaceRecord>;
-  mutateWorkspace(context: TransactionContext, input: WorkspaceMutationInput): Promise<WorkspaceRecord>;
-  upsertWorkspaceMember(context: TransactionContext, input: WorkspaceMembershipUpsertInput): Promise<WorkspaceMemberRecord>;
-  removeWorkspaceMember(context: TransactionContext, input: WorkspaceMembershipRemoveInput): Promise<WorkspaceMemberRecord>;
+  getWorkspace(context: WorkspaceScope, workspaceId: string): Promise<WorkspaceRecord>;
+  getWorkspaceMember(context: WorkspaceScope, workspaceId: string): Promise<WorkspaceMemberRecord>;
+  listWorkspaceMembers(context: WorkspaceScope, workspaceId: string): Promise<WorkspaceMemberRecord[]>;
+  listWorkspaceRevisions(
+    context: WorkspaceScope,
+    workspaceId: string,
+    limit: number,
+    offset: number,
+  ): Promise<WorkspaceRevisionPage>;
+  getWorkspaceRevision(
+    context: WorkspaceScope,
+    workspaceId: string,
+    version: number,
+  ): Promise<WorkspaceRevisionRecord>;
+  mutateWorkspace(context: WorkspaceScope, input: WorkspaceMutationInput): Promise<WorkspaceRecord>;
+  upsertWorkspaceMember(context: WorkspaceScope, input: WorkspaceMembershipUpsertInput): Promise<WorkspaceMemberRecord>;
+  removeWorkspaceMember(context: WorkspaceScope, input: WorkspaceMembershipRemoveInput): Promise<WorkspaceMemberRecord>;
 }
 
 export type IngestionRunState =

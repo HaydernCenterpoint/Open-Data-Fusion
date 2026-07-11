@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { WorkspaceEventHub, type WorkspaceEvent, type WorkspaceMember } from '../src/collaboration.js';
+import { InMemorySharedEventDelivery } from '../src/shared-event-delivery.js';
 
 const owner: WorkspaceMember = {
   workspaceId: 'cooling-water-system',
@@ -88,5 +89,30 @@ describe('WorkspaceEventHub', () => {
 
     unsubscribeEditor();
     unsubscribeOwner();
+  });
+
+  it('fans committed workspace events across hubs while leaving presence local', async () => {
+    const delivery = new InMemorySharedEventDelivery();
+    const first = new WorkspaceEventHub(delivery);
+    const second = new WorkspaceEventHub(delivery);
+    const received: WorkspaceEvent[] = [];
+    const unsubscribe = second.subscribe(owner.workspaceId, owner, (event) => received.push(event));
+
+    first.publishWorkspaceUpdated({
+      workspaceId: owner.workspaceId,
+      version: 3,
+      actor: editor.userId,
+      changeSummary: 'Shared through Redis-compatible transport',
+    });
+
+    expect(received.findLast((event) => event.type === 'workspace.updated')).toMatchObject({
+      type: 'workspace.updated',
+      data: { workspaceId: owner.workspaceId, version: 3, actor: editor.userId },
+    });
+    expect(received.filter((event) => event.type === 'presence.updated')).toHaveLength(1);
+
+    unsubscribe();
+    await first.close();
+    await second.close();
   });
 });

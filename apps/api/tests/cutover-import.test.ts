@@ -29,13 +29,14 @@ type Row = Record<string, unknown>;
 
 interface StoredTarget {
   workspaces: Row[];
+  workspaceScopes: Row[];
   revisions: Row[];
   members: Row[];
   auditEvents: Row[];
 }
 
 function emptyTarget(): StoredTarget {
-  return { workspaces: [], revisions: [], members: [], auditEvents: [] };
+  return { workspaces: [], workspaceScopes: [], revisions: [], members: [], auditEvents: [] };
 }
 
 function cloneTarget(target: StoredTarget): StoredTarget {
@@ -61,6 +62,7 @@ class RecordingCutoverClient implements RuntimeClient {
     can_import_workspaces: true,
     can_import_revisions: true,
     can_import_members: true,
+    can_import_workspace_scopes: true,
     can_import_audit: true,
     can_advance_audit_sequence: true,
   };
@@ -101,12 +103,19 @@ class RecordingCutoverClient implements RuntimeClient {
         audit_events: String(this.target.auditEvents.length),
       }]) as unknown as SqlQueryResult<T>;
     }
+    if (sql === 'SELECT count(*) AS workspace_scopes FROM odf.workspace_scopes') {
+      return queryResult([{ workspace_scopes: String(this.target.workspaceScopes.length) }]) as unknown as SqlQueryResult<T>;
+    }
     if (sql.startsWith('INSERT INTO odf.workspaces')) {
       this.insert('workspaces', query);
       return queryResult([], this.lastBatchLength(query)) as SqlQueryResult<T>;
     }
     if (sql.startsWith('INSERT INTO odf.workspace_revisions')) {
       this.insert('revisions', query);
+      return queryResult([], this.lastBatchLength(query)) as SqlQueryResult<T>;
+    }
+    if (sql.startsWith('INSERT INTO odf.workspace_scopes')) {
+      this.insert('workspaceScopes', query);
       return queryResult([], this.lastBatchLength(query)) as SqlQueryResult<T>;
     }
     if (sql.startsWith('INSERT INTO odf.workspace_members')) {
@@ -123,6 +132,7 @@ class RecordingCutoverClient implements RuntimeClient {
         invalid_current_revision: false,
         invalid_revision_history: false,
         missing_owner: false,
+        invalid_workspace_scope: false,
       }]) as unknown as SqlQueryResult<T>;
     }
     if (sql.includes('FROM odf.workspaces ORDER BY id')) {
@@ -187,8 +197,18 @@ class RecordingCutoverPool implements RuntimePool {
   }
 }
 
+const targetScope = {
+  tenantId: '11111111-1111-1111-1111-111111111111',
+  projectId: '22222222-2222-2222-2222-222222222222',
+  assignedBy: 'cutover.operator@example.test',
+} as const;
+
+function dryRunOptions() {
+  return { targetScope } as const;
+}
+
 function applyOptions(report: SqliteCutoverPreflightReport) {
-  return { apply: true, currentSource: structuredClone(report) } as const;
+  return { apply: true, currentSource: structuredClone(report), targetScope } as const;
 }
 
 function refreshChecksums(report: SqliteCutoverPreflightReport): void {
@@ -219,7 +239,7 @@ describe('SQLite to PostgreSQL cutover import', () => {
   it('runs the complete import and verification transaction before rolling back by default', async () => {
     const pool = new RecordingCutoverPool();
 
-    const result = await importSqliteCutoverBundle(pool, report);
+    const result = await importSqliteCutoverBundle(pool, report, dryRunOptions());
 
     expect(result).toMatchObject({
       mode: 'dry-run',
@@ -248,6 +268,7 @@ describe('SQLite to PostgreSQL cutover import', () => {
     expect(pool.client.commands.map((query) => query.text)).not.toContain('ROLLBACK');
     expect(pool.client.commands.some((query) => query.text.startsWith('SELECT setval('))).toBe(true);
     expect(pool.client.target.workspaces).toHaveLength(report.counts.workspaces);
+    expect(pool.client.target.workspaceScopes).toHaveLength(report.counts.workspaces);
     expect(pool.client.target.revisions).toHaveLength(report.counts.revisions);
     expect(pool.client.target.members).toHaveLength(report.counts.members);
     expect(pool.client.target.auditEvents).toHaveLength(report.counts.auditEvents);
@@ -259,7 +280,7 @@ describe('SQLite to PostgreSQL cutover import', () => {
     for (const auditEvent of report.auditEvents) auditEvent.correlationId = correlationId;
     refreshChecksums(report);
 
-    const result = await importSqliteCutoverBundle(new RecordingCutoverPool(), report);
+    const result = await importSqliteCutoverBundle(new RecordingCutoverPool(), report, dryRunOptions());
 
     expect(result.correlationIds).toMatchObject({ uniqueSourceValues: 1, remappedValues: 0 });
   });
@@ -279,8 +300,8 @@ describe('SQLite to PostgreSQL cutover import', () => {
   it('requires every migration including the least-privilege cutover role', async () => {
     const pool = new RecordingCutoverPool(REQUIRED_CUTOVER_MIGRATIONS.slice(0, -1));
 
-    await expect(importSqliteCutoverBundle(pool, report)).rejects.toThrow(
-      'PostgreSQL cutover target is missing migrations: 004_sqlite_cutover_role',
+    await expect(importSqliteCutoverBundle(pool, report, dryRunOptions())).rejects.toThrow(
+      'PostgreSQL cutover target is missing migrations: 005_tenant_membership_and_workspace_scope',
     );
     expect(pool.client.commands.map((query) => query.text)).toContain('ROLLBACK');
   });
@@ -290,7 +311,7 @@ describe('SQLite to PostgreSQL cutover import', () => {
     pool.client.principal.is_superuser = true;
     pool.client.principal.role_name = 'postgres';
 
-    await expect(importSqliteCutoverBundle(pool, report)).rejects.toThrow(
+    await expect(importSqliteCutoverBundle(pool, report, dryRunOptions())).rejects.toThrow(
       "PostgreSQL cutover principal 'postgres' must not be a superuser",
     );
     expect(pool.client.commands.map((query) => query.text)).toContain('ROLLBACK');
@@ -299,13 +320,13 @@ describe('SQLite to PostgreSQL cutover import', () => {
   it('requires the principal to inherit only the narrow cutover role', async () => {
     const missingRole = new RecordingCutoverPool();
     missingRole.client.principal.has_cutover_role = false;
-    await expect(importSqliteCutoverBundle(missingRole, report)).rejects.toThrow(
+    await expect(importSqliteCutoverBundle(missingRole, report, dryRunOptions())).rejects.toThrow(
       "PostgreSQL cutover principal 'odf_cutover_login' must inherit the odf_cutover role",
     );
 
     const overprivileged = new RecordingCutoverPool();
     overprivileged.client.principal.has_other_odf_table_privileges = true;
-    await expect(importSqliteCutoverBundle(overprivileged, report)).rejects.toThrow(
+    await expect(importSqliteCutoverBundle(overprivileged, report, dryRunOptions())).rejects.toThrow(
       "PostgreSQL cutover principal 'odf_cutover_login' has privileges outside odf_cutover",
     );
   });
@@ -314,7 +335,7 @@ describe('SQLite to PostgreSQL cutover import', () => {
     const pool = new RecordingCutoverPool();
     pool.client.principal.can_advance_audit_sequence = false;
 
-    await expect(importSqliteCutoverBundle(pool, report)).rejects.toThrow(
+    await expect(importSqliteCutoverBundle(pool, report, dryRunOptions())).rejects.toThrow(
       "PostgreSQL cutover principal 'odf_cutover_login' is missing privileges: audit sequence advance",
     );
     expect(pool.client.commands.some((query) => query.text.startsWith('INSERT INTO'))).toBe(false);
@@ -333,7 +354,7 @@ describe('SQLite to PostgreSQL cutover import', () => {
 
   it('requires a fresh frozen-source report before apply and rejects a stale bundle', async () => {
     const missingSourcePool = new RecordingCutoverPool();
-    await expect(importSqliteCutoverBundle(missingSourcePool, report, { apply: true })).rejects.toThrow(
+    await expect(importSqliteCutoverBundle(missingSourcePool, report, { apply: true, targetScope })).rejects.toThrow(
       'Applying a cutover requires a fresh report from the frozen SQLite source',
     );
     expect(missingSourcePool.connectCount).toBe(0);
@@ -345,6 +366,7 @@ describe('SQLite to PostgreSQL cutover import', () => {
     await expect(importSqliteCutoverBundle(staleSourcePool, report, {
       apply: true,
       currentSource: staleSource,
+      targetScope,
     })).rejects.toThrow(
       "Frozen SQLite checksum 'workspaces' no longer matches the rehearsed bundle",
     );
@@ -355,31 +377,57 @@ describe('SQLite to PostgreSQL cutover import', () => {
     const pool = new RecordingCutoverPool();
     report.workspaces[0]!.name = 'Tampered workspace';
 
-    await expect(importSqliteCutoverBundle(pool, report)).rejects.toThrow(
+    await expect(importSqliteCutoverBundle(pool, report, dryRunOptions())).rejects.toThrow(
       "SQLite cutover bundle checksum 'workspaces' does not match its records",
     );
     expect(pool.connectCount).toBe(0);
   });
 
+  it('requires a UUID tenant/project scope before acquiring a PostgreSQL connection', async () => {
+    const pool = new RecordingCutoverPool();
+
+    await expect(importSqliteCutoverBundle(pool, report)).rejects.toThrow(
+      'SQLite cutover requires an explicit tenant, project, and assigning actor for workspace scope',
+    );
+    await expect(importSqliteCutoverBundle(pool, report, {
+      targetScope: { ...targetScope, tenantId: 'not-a-uuid' },
+    })).rejects.toThrow('SQLite cutover target tenantId must be a UUID');
+    expect(pool.connectCount).toBe(0);
+  });
+
   it('parses an explicit bundle and apply flag while defaulting to dry-run', () => {
-    expect(parseCutoverImportArguments(['--bundle', 'bundle.json'])).toEqual({
+    expect(parseCutoverImportArguments([
+      '--bundle', 'bundle.json',
+      '--tenant-id', targetScope.tenantId,
+      '--project-id', targetScope.projectId,
+      '--assigned-by', targetScope.assignedBy,
+    ])).toEqual({
       bundlePath: 'bundle.json',
+      tenantId: targetScope.tenantId,
+      projectId: targetScope.projectId,
+      assignedBy: targetScope.assignedBy,
       apply: false,
     });
     expect(parseCutoverImportArguments([
       '--apply',
       '--bundle', 'bundle.json',
       '--database', 'source.db',
+      '--tenant-id', targetScope.tenantId,
+      '--project-id', targetScope.projectId,
+      '--assigned-by', targetScope.assignedBy,
     ])).toEqual({
       bundlePath: 'bundle.json',
       databasePath: 'source.db',
+      tenantId: targetScope.tenantId,
+      projectId: targetScope.projectId,
+      assignedBy: targetScope.assignedBy,
       apply: true,
     });
     expect(() => parseCutoverImportArguments(['--apply', '--bundle', 'bundle.json'])).toThrow(
-      'Usage: cutover-import --bundle <preflight.json> [--database <sqlite-path>] [--apply]',
+      'Usage: cutover-import --bundle <preflight.json> --tenant-id <uuid> --project-id <uuid> --assigned-by <user> [--database <sqlite-path>] [--apply]',
     );
     expect(() => parseCutoverImportArguments(['--bundle', 'bundle.json', '--unknown'])).toThrow(
-      'Usage: cutover-import --bundle <preflight.json> [--database <sqlite-path>] [--apply]',
+      'Usage: cutover-import --bundle <preflight.json> --tenant-id <uuid> --project-id <uuid> --assigned-by <user> [--database <sqlite-path>] [--apply]',
     );
   });
 
@@ -390,7 +438,12 @@ describe('SQLite to PostgreSQL cutover import', () => {
     let suppliedConnectionString: string | undefined;
 
     const result = await runSqliteCutoverImportCli(
-      ['--bundle', bundlePath],
+      [
+        '--bundle', bundlePath,
+        '--tenant-id', targetScope.tenantId,
+        '--project-id', targetScope.projectId,
+        '--assigned-by', targetScope.assignedBy,
+      ],
       { ODF_POSTGRES_URL: 'postgresql://cutover.example.test/odf' },
       (connectionString) => {
         suppliedConnectionString = connectionString;
@@ -404,7 +457,12 @@ describe('SQLite to PostgreSQL cutover import', () => {
   });
 
   it('fails closed when the PostgreSQL URL is absent', async () => {
-    await expect(runSqliteCutoverImportCli(['--bundle', 'bundle.json'], {})).rejects.toThrow(
+    await expect(runSqliteCutoverImportCli([
+      '--bundle', 'bundle.json',
+      '--tenant-id', targetScope.tenantId,
+      '--project-id', targetScope.projectId,
+      '--assigned-by', targetScope.assignedBy,
+    ], {})).rejects.toThrow(
       'ODF_POSTGRES_URL is required for a PostgreSQL cutover rehearsal',
     );
   });

@@ -9,6 +9,7 @@ import { writebackPolicyFromEnvironment } from './advanced-platform.js';
 import { createIdentityProviderFromEnvironment } from './auth.js';
 import { WorkspaceEventHub } from './collaboration.js';
 import { FusionDatabase } from './database.js';
+import { createSharedEventDelivery } from './shared-event-delivery.js';
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const packageDirectory = basename(dirname(moduleDirectory)) === 'dist'
@@ -37,7 +38,22 @@ if (process.env.NODE_ENV === 'production' && !configuredObjectStorePath) {
   throw new Error('ODF_OBJECT_STORE_PATH is required in production');
 }
 const objectStoreMaxBytes = Number(process.env.ODF_OBJECT_STORE_MAX_BYTES ?? 50 * 1024 * 1024);
-const app = createApp(database, new WorkspaceEventHub(), {
+const sharedEventsRequiredValue = process.env.ODF_SHARED_EVENTS_REQUIRED?.trim().toLowerCase();
+if (sharedEventsRequiredValue && sharedEventsRequiredValue !== 'true' && sharedEventsRequiredValue !== 'false') {
+  throw new Error('ODF_SHARED_EVENTS_REQUIRED must be true or false');
+}
+const sharedEventsRequired = sharedEventsRequiredValue === undefined
+  ? process.env.NODE_ENV === 'production'
+  : sharedEventsRequiredValue === 'true';
+const sharedEventDelivery = await createSharedEventDelivery({
+  logger: { warn: (message) => console.warn(message) },
+});
+if (sharedEventsRequired && sharedEventDelivery.mode !== 'redis') {
+  await sharedEventDelivery.close();
+  throw new Error('ODF_REDIS_URL is required when shared event delivery is required');
+}
+const eventHub = new WorkspaceEventHub(sharedEventDelivery);
+const app = createApp(database, eventHub, {
   identityProvider,
   writebackPolicy: writebackPolicyFromEnvironment(),
   rawLandingDirectory: process.env.ODF_RAW_LANDING_PATH ?? defaultRawLandingPath,
@@ -55,6 +71,7 @@ function shutdown(signal: string): void {
   console.log(`${signal} received; closing Open Data Fusion API`);
   server.close(async () => {
     database.close();
+    await eventHub.close();
     await shutdownTelemetry();
     process.exit(0);
   });

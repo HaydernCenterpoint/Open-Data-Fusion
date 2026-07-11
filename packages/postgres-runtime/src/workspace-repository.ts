@@ -3,55 +3,72 @@ import {
   ForbiddenError,
   NotFoundError,
 } from "./errors.js";
+import { PolicyAwareRepository } from "./platform-repository-base.js";
+import type { ProjectAccessResolver } from "./platform-types.js";
 import {
   json,
   workspaceFromRow,
   workspaceMemberFromRow,
+  workspaceRevisionFromRow,
 } from "./mappers.js";
 import type {
   JsonObject,
   ScopedTransaction,
-  TransactionContext,
   TransactionRunner,
   WorkspaceMemberRecord,
   WorkspaceMembershipRemoveInput,
   WorkspaceMembershipUpsertInput,
+  WorkspaceMemberUpsertResult,
   WorkspaceMutationInput,
   WorkspaceRecord,
   WorkspaceRepository,
+  WorkspaceRevisionPage,
+  WorkspaceRevisionRecord,
+  WorkspaceScope,
 } from "./types.js";
 
-function assertActor(context: TransactionContext, actor: string): void {
+function assertActor(context: WorkspaceScope, actor: string): void {
   if (context.platformAdmin === true) return;
   if (context.userId !== actor) {
     throw new ForbiddenError("Actor must match the transaction user");
   }
 }
 
-export class PostgresWorkspaceRepository implements WorkspaceRepository {
-  constructor(private readonly runner: TransactionRunner) {}
+export class PostgresWorkspaceRepository extends PolicyAwareRepository implements WorkspaceRepository {
+  constructor(runner: TransactionRunner, policy: ProjectAccessResolver) {
+    super(runner, policy);
+  }
 
-  async getWorkspace(context: TransactionContext, workspaceId: string): Promise<WorkspaceRecord> {
-    return this.runner.withTransaction(context, async (transaction) => {
+  async getWorkspace(context: WorkspaceScope, workspaceId: string): Promise<WorkspaceRecord> {
+    return this.read(context, async (transaction) => {
       const result = await transaction.query({
         text: [
           "SELECT workspace.id, workspace.name, workspace.snapshot, workspace.version,",
           "       workspace.created_by, workspace.created_at, workspace.updated_by, workspace.updated_at",
           "FROM odf.workspaces AS workspace",
+          "JOIN odf.workspace_scopes AS scope ON scope.workspace_id = workspace.id",
           "WHERE workspace.id = $1",
+          "  AND scope.tenant_id = $2::uuid",
+          "  AND scope.project_id = $3::uuid",
           "  AND EXISTS (",
           "    SELECT 1 FROM odf.workspace_members AS membership",
           "    WHERE membership.workspace_id = workspace.id",
-          "      AND membership.user_id = $2",
+          "      AND membership.user_id = $4",
           "  )",
         ].join("\n"),
-        values: [workspaceId, context.userId],
+        values: [workspaceId, context.tenantId, context.projectId, context.userId],
       });
       const row = result.rows[0];
       if (!row) {
         const existing = await transaction.query({
-          text: "SELECT id FROM odf.workspaces WHERE id = $1",
-          values: [workspaceId],
+          text: [
+            "SELECT workspace.id FROM odf.workspaces AS workspace",
+            "JOIN odf.workspace_scopes AS scope ON scope.workspace_id = workspace.id",
+            "WHERE workspace.id = $1",
+            "  AND scope.tenant_id = $2::uuid",
+            "  AND scope.project_id = $3::uuid",
+          ].join("\n"),
+          values: [workspaceId, context.tenantId, context.projectId],
         });
         if (existing.rows[0]) throw new ForbiddenError("Workspace membership is required");
         throw new NotFoundError("Workspace was not found");
@@ -60,9 +77,98 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
     });
   }
 
-  async mutateWorkspace(context: TransactionContext, input: WorkspaceMutationInput): Promise<WorkspaceRecord> {
+  async getWorkspaceMember(
+    context: WorkspaceScope,
+    workspaceId: string,
+  ): Promise<WorkspaceMemberRecord> {
+    return this.read(context, async (transaction) => (
+      this.assertWorkspaceMember(transaction, context, workspaceId, context.userId)
+    ));
+  }
+
+  async listWorkspaceMembers(
+    context: WorkspaceScope,
+    workspaceId: string,
+  ): Promise<WorkspaceMemberRecord[]> {
+    return this.read(context, async (transaction) => {
+      await this.assertWorkspaceMember(transaction, context, workspaceId, context.userId);
+      const result = await transaction.query({
+        text: [
+          "SELECT workspace_id, user_id, display_name, role, created_at",
+          "FROM odf.workspace_members",
+          "WHERE workspace_id = $1",
+          "ORDER BY CASE role",
+          "  WHEN 'owner' THEN 0",
+          "  WHEN 'editor' THEN 1",
+          "  WHEN 'reviewer' THEN 2",
+          "  ELSE 3",
+          "END, display_name, user_id",
+        ].join("\n"),
+        values: [workspaceId],
+      });
+      return result.rows.map(workspaceMemberFromRow);
+    });
+  }
+
+  async listWorkspaceRevisions(
+    context: WorkspaceScope,
+    workspaceId: string,
+    limit: number,
+    offset: number,
+  ): Promise<WorkspaceRevisionPage> {
+    return this.read(context, async (transaction) => {
+      await this.assertWorkspaceMember(transaction, context, workspaceId, context.userId);
+      const count = await transaction.query({
+        text: "SELECT count(*) AS total FROM odf.workspace_revisions WHERE workspace_id = $1",
+        values: [workspaceId],
+      });
+      const revisions = await transaction.query({
+        text: [
+          "SELECT workspace_id, version, snapshot, change_summary, actor, created_at, correlation_id",
+          "FROM odf.workspace_revisions",
+          "WHERE workspace_id = $1",
+          "ORDER BY version DESC",
+          "LIMIT $2 OFFSET $3",
+        ].join("\n"),
+        values: [workspaceId, limit, offset],
+      });
+      const total = Number(count.rows[0]?.total ?? 0);
+      if (!Number.isSafeInteger(total) || total < 0) {
+        throw new ConflictError("Workspace revision count is invalid");
+      }
+      return {
+        items: revisions.rows.map(workspaceRevisionFromRow),
+        total,
+        limit,
+        offset,
+      };
+    });
+  }
+
+  async getWorkspaceRevision(
+    context: WorkspaceScope,
+    workspaceId: string,
+    version: number,
+  ): Promise<WorkspaceRevisionRecord> {
+    return this.read(context, async (transaction) => {
+      await this.assertWorkspaceMember(transaction, context, workspaceId, context.userId);
+      const result = await transaction.query({
+        text: [
+          "SELECT workspace_id, version, snapshot, change_summary, actor, created_at, correlation_id",
+          "FROM odf.workspace_revisions",
+          "WHERE workspace_id = $1 AND version = $2",
+        ].join("\n"),
+        values: [workspaceId, version],
+      });
+      const row = result.rows[0];
+      if (!row) throw new NotFoundError("Workspace revision was not found");
+      return workspaceRevisionFromRow(row);
+    });
+  }
+
+  async mutateWorkspace(context: WorkspaceScope, input: WorkspaceMutationInput): Promise<WorkspaceRecord> {
     assertActor(context, input.actor);
-    return this.runner.withTransaction(context, async (transaction) => {
+    return this.write(context, async (transaction) => {
       const snapshot = json(input.snapshot);
       const updated = await transaction.query({
         text: [
@@ -74,27 +180,45 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
           "WHERE id = $3",
           "  AND version = $4",
           "  AND EXISTS (",
-          "    SELECT 1 FROM odf.workspace_members",
+            "    SELECT 1 FROM odf.workspace_members",
+            "    WHERE workspace_id = $3",
+            "      AND user_id = $2",
+            "      AND role IN ('owner', 'editor')",
+          "  )",
+          "  AND EXISTS (",
+          "    SELECT 1 FROM odf.workspace_scopes",
           "    WHERE workspace_id = $3",
-          "      AND user_id = $2",
-          "      AND role IN ('owner', 'editor')",
+          "      AND tenant_id = $5::uuid",
+          "      AND project_id = $6::uuid",
           "  )",
           "RETURNING id, name, snapshot, version, created_by, created_at, updated_by, updated_at",
         ].join("\n"),
-        values: [snapshot, input.actor, input.workspaceId, input.expectedVersion],
+        values: [snapshot, input.actor, input.workspaceId, input.expectedVersion, context.tenantId, context.projectId],
       });
       const row = updated.rows[0];
       if (!row) {
         const membership = await transaction.query({
           text: [
-            "SELECT role FROM odf.workspace_members",
-            "WHERE workspace_id = $1 AND user_id = $2",
+          "SELECT role FROM odf.workspace_members",
+          "WHERE workspace_id = $1 AND user_id = $2",
+          "  AND EXISTS (",
+          "    SELECT 1 FROM odf.workspace_scopes",
+          "    WHERE workspace_id = $1",
+          "      AND tenant_id = $3::uuid",
+          "      AND project_id = $4::uuid",
+          "  )",
           ].join("\n"),
-          values: [input.workspaceId, input.actor],
+          values: [input.workspaceId, input.actor, context.tenantId, context.projectId],
         });
         const existing = await transaction.query({
-          text: "SELECT id FROM odf.workspaces WHERE id = $1",
-          values: [input.workspaceId],
+          text: [
+            "SELECT workspace.id FROM odf.workspaces AS workspace",
+            "JOIN odf.workspace_scopes AS scope ON scope.workspace_id = workspace.id",
+            "WHERE workspace.id = $1",
+            "  AND scope.tenant_id = $2::uuid",
+            "  AND scope.project_id = $3::uuid",
+          ].join("\n"),
+          values: [input.workspaceId, context.tenantId, context.projectId],
         });
         if (!existing.rows[0]) throw new NotFoundError("Workspace was not found");
         const role = membership.rows[0]?.role;
@@ -106,11 +230,13 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
 
       const workspace = workspaceFromRow(row);
       const auditDetails: JsonObject = {
+        ...(input.auditDetails ?? {}),
         previousVersion: input.expectedVersion,
         version: workspace.version,
         changeSummary: input.changeSummary,
       };
       const eventPayload: JsonObject = {
+        ...(input.eventPayload ?? {}),
         workspaceId: workspace.id,
         version: workspace.version,
         actor: input.actor,
@@ -137,7 +263,7 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
       await this.insertAudit(
         transaction,
         input.actor,
-        "workspace.saved",
+        input.auditAction ?? "workspace.saved",
         "workspace",
         workspace.id,
         auditDetails,
@@ -160,12 +286,23 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
   }
 
   async upsertWorkspaceMember(
-    context: TransactionContext,
+    context: WorkspaceScope,
     input: WorkspaceMembershipUpsertInput,
   ): Promise<WorkspaceMemberRecord> {
+    return (await this.upsertWorkspaceMemberWithOutcome(context, input)).member;
+  }
+
+  /**
+   * Keeps the API's 201-versus-200 membership response deterministic without
+   * a race-prone preliminary read outside the write transaction.
+   */
+  async upsertWorkspaceMemberWithOutcome(
+    context: WorkspaceScope,
+    input: WorkspaceMembershipUpsertInput,
+  ): Promise<WorkspaceMemberUpsertResult> {
     assertActor(context, input.actor);
-    return this.runner.withTransaction(context, async (transaction) => {
-      await this.assertWorkspaceOwner(transaction, input.workspaceId, input.actor);
+    return this.write(context, async (transaction) => {
+      await this.assertWorkspaceOwner(transaction, context, input.workspaceId, input.actor);
       const before = await transaction.query({
         text: [
           "SELECT workspace_id, user_id, display_name, role, created_at",
@@ -222,17 +359,17 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
         "workspace-member:" + input.workspaceId + ":" + input.member.userId + ":" + input.correlationId,
         input.correlationId,
       );
-      return member;
+      return { member, created: !before.rows[0] };
     });
   }
 
   async removeWorkspaceMember(
-    context: TransactionContext,
+    context: WorkspaceScope,
     input: WorkspaceMembershipRemoveInput,
   ): Promise<WorkspaceMemberRecord> {
     assertActor(context, input.actor);
-    return this.runner.withTransaction(context, async (transaction) => {
-      await this.assertWorkspaceOwner(transaction, input.workspaceId, input.actor);
+    return this.write(context, async (transaction) => {
+      await this.assertWorkspaceOwner(transaction, context, input.workspaceId, input.actor);
       // Migration 002 serializes owner deletion and rejects removal of the
       // final owner. Its constraint is mapped to ConflictError by the runtime.
       const result = await transaction.query({
@@ -281,6 +418,7 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
 
   private async assertWorkspaceOwner(
     transaction: ScopedTransaction,
+    context: WorkspaceScope,
     workspaceId: string,
     userId: string,
   ): Promise<void> {
@@ -288,12 +426,55 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
       text: [
         "SELECT role FROM odf.workspace_members",
         "WHERE workspace_id = $1 AND user_id = $2",
+        "  AND EXISTS (",
+        "    SELECT 1 FROM odf.workspace_scopes",
+        "    WHERE workspace_id = $1",
+        "      AND tenant_id = $3::uuid",
+        "      AND project_id = $4::uuid",
+        "  )",
       ].join("\n"),
-      values: [workspaceId, userId],
+      values: [workspaceId, userId, context.tenantId, context.projectId],
     });
     if (result.rows[0]?.role !== "owner") {
       throw new ForbiddenError("Workspace owner permission is required");
     }
+  }
+
+  private async assertWorkspaceMember(
+    transaction: ScopedTransaction,
+    context: WorkspaceScope,
+    workspaceId: string,
+    userId: string,
+  ): Promise<WorkspaceMemberRecord> {
+    const membership = await transaction.query({
+      text: [
+        "SELECT workspace_id, user_id, display_name, role, created_at",
+        "FROM odf.workspace_members",
+        "WHERE workspace_id = $1 AND user_id = $2",
+        "  AND EXISTS (",
+        "    SELECT 1 FROM odf.workspace_scopes",
+        "    WHERE workspace_id = $1",
+        "      AND tenant_id = $3::uuid",
+        "      AND project_id = $4::uuid",
+        "  )",
+      ].join("\n"),
+      values: [workspaceId, userId, context.tenantId, context.projectId],
+    });
+    const row = membership.rows[0];
+    if (row) return workspaceMemberFromRow(row);
+
+    const workspace = await transaction.query({
+      text: [
+        "SELECT workspace.id FROM odf.workspaces AS workspace",
+        "JOIN odf.workspace_scopes AS scope ON scope.workspace_id = workspace.id",
+        "WHERE workspace.id = $1",
+        "  AND scope.tenant_id = $2::uuid",
+        "  AND scope.project_id = $3::uuid",
+      ].join("\n"),
+      values: [workspaceId, context.tenantId, context.projectId],
+    });
+    if (!workspace.rows[0]) throw new NotFoundError("Workspace was not found");
+    throw new ForbiddenError("Workspace membership is required");
   }
 
   private async insertAudit(

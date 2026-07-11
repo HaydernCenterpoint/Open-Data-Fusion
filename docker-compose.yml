@@ -90,6 +90,9 @@ services:
       ODF_RAW_LANDING_PATH: /var/lib/odf/raw
       ODF_OBJECT_STORE_PATH: /var/lib/odf/objects
       ODF_OBJECT_STORE_MAX_BYTES: "52428800"
+      # API instances require the same Redis Streams transport in production.
+      ODF_REDIS_URL: "redis://:${ODF_REDIS_PASSWORD:?Set ODF_REDIS_PASSWORD via a secret manager or environment variable}@odf-redis:6379/0"
+      ODF_SHARED_EVENTS_REQUIRED: "true"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${ODF_OTEL_EXPORTER_OTLP_ENDPOINT:-}"
       PORT: "4310"
     ports:

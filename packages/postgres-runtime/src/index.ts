@@ -6,6 +6,7 @@ export * from "./model-repository.js";
 export * from "./pipeline-quality-repository.js";
 export * from "./pool.js";
 export * from "./platform-events.js";
+export * from "./postgres-project-access-resolver.js";
 export * from "./platform-support.js";
 export * from "./platform-types.js";
 export * from "./queue-repository.js";

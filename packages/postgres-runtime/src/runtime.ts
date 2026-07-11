@@ -71,7 +71,7 @@ export class PostgresRuntime implements TransactionRunner {
     dependencies: PostgresRuntimeDependencies = {},
   ) {
     const policy = dependencies.projectAccessResolver ?? new FailClosedProjectAccessResolver();
-    this.workspaces = new PostgresWorkspaceRepository(this);
+    this.workspaces = new PostgresWorkspaceRepository(this, policy);
     this.ingestion = new PostgresIngestionRepository(this);
     this.queues = new PostgresQueueRepository(this);
     this.catalog = new PostgresCatalogRepository(this, policy);
