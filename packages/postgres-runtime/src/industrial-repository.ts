@@ -616,7 +616,11 @@ export class PostgresIndustrialRepository extends PolicyAwareRepository implemen
 
   async reviewRelationCandidate(scope: ProjectScope, candidateId: string, input: ReviewRelationCandidateInput): Promise<RelationCandidateRecord> {
     requiredText(input.correlationId, "correlationId");
-    return this.review(scope, async (transaction) => {
+    // Legacy contextualization review permits editors as well as dedicated
+    // reviewers. Keep the authorization check explicit instead of widening
+    // the shared review policy used by unrelated repositories.
+    await this.resolveRole(scope, ["owner", "editor", "reviewer"]);
+    return this.runner.withTransaction(scope, async (transaction) => {
       const selected = await transaction.query({
         text: [
           "SELECT " + RELATION_CANDIDATE_COLUMNS,

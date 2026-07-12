@@ -1,5 +1,7 @@
 export * from "./errors.js";
 export * from "./catalog-repository.js";
+export * from "./administration-repository.js";
+export * from "./advanced-platform-repository.js";
 export * from "./industrial-repository.js";
 export * from "./ingestion-repository.js";
 export * from "./model-repository.js";

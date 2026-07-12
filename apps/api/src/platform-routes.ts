@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { DataPlanePermission, IdentityProvider } from './auth.js';
 import { ForbiddenError } from './database.js';
 import type { PlatformDiscoveryPersistence } from './platform-discovery.js';
+import type { PlatformAdministrationPersistence } from './platform-administration.js';
 import {
   candidateCreateSchema,
   candidateReviewSchema,
@@ -17,9 +18,12 @@ import {
   platformIdSchema,
   platformSearchQuerySchema,
   projectCreateSchema,
+  projectUpdateSchema,
   qualityRuleCreateSchema,
   sourceCreateSchema,
   tenantCreateSchema,
+  tenantMemberUpsertSchema,
+  tenantUpdateSchema,
   type PlatformContext,
 } from './platform-schemas.js';
 import { PlatformCatalog, type PlatformProjectRole } from './platform.js';
@@ -64,6 +68,8 @@ export function registerPlatformRoutes(
   catalog: PlatformCatalog,
   identityProvider: IdentityProvider,
   discovery: PlatformDiscoveryPersistence,
+  administration?: PlatformAdministrationPersistence,
+  postgresMode = discovery.mode === 'postgres',
 ): void {
   app.get('/api/v1/platform/tenants', async (request, response) => {
     const identity = await requirePermission(identityProvider, request, 'data:read');
@@ -73,11 +79,25 @@ export function registerPlatformRoutes(
 
   app.post('/api/v1/platform/tenants', async (request, response) => {
     const identity = await requirePermission(identityProvider, request, 'platform:admin');
-    if (discovery.mode === 'postgres') {
+    if (postgresMode) {
       throw new ForbiddenError('Tenant creation is an operational PostgreSQL provisioning workflow');
     }
     const input = parse(tenantCreateSchema, request.body);
     response.status(201).json(catalog.createTenant(input, identity.userId, response.locals.correlationId));
+  });
+
+  app.patch('/api/v1/platform/tenants/:tenantId', async (request, response) => {
+    const identity = await requirePermission(identityProvider, request, 'platform:admin');
+    if (!administration) {
+      throw new ForbiddenError('Tenant administration is not configured for this persistence profile');
+    }
+    const tenantId = parse(platformIdSchema, request.params.tenantId);
+    const input = parse(tenantUpdateSchema, request.body);
+    response.json(await administration.updateTenant(tenantId, identity.userId, {
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      correlationId: response.locals.correlationId,
+    }));
   });
 
   app.get('/api/v1/platform/tenants/:tenantId/projects', async (request, response) => {
@@ -89,12 +109,81 @@ export function registerPlatformRoutes(
 
   app.post('/api/v1/platform/tenants/:tenantId/projects', async (request, response) => {
     const identity = await requirePermission(identityProvider, request, 'platform:admin');
-    if (discovery.mode === 'postgres') {
-      throw new ForbiddenError('Project creation is an operational PostgreSQL provisioning workflow');
-    }
     const tenantId = parse(platformIdSchema, request.params.tenantId);
     const input = parse(projectCreateSchema, request.body);
+    if (administration) {
+      const project = await administration.createProject(tenantId, identity.userId, {
+        projectId: input.id,
+        slug: input.slug ?? input.id.toLowerCase(),
+        name: input.name,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        correlationId: response.locals.correlationId,
+      });
+      response.status(project.created ? 201 : 200).json(project);
+      return;
+    }
+    if (postgresMode) {
+      throw new ForbiddenError('Project creation is an operational PostgreSQL provisioning workflow');
+    }
     response.status(201).json(catalog.createProject(tenantId, input, identity.userId, response.locals.correlationId));
+  });
+
+  app.patch('/api/v1/platform/tenants/:tenantId/projects/:projectId', async (request, response) => {
+    const identity = await requirePermission(identityProvider, request, 'platform:admin');
+    if (!administration) {
+      throw new ForbiddenError('Project administration is not configured for this persistence profile');
+    }
+    const tenantId = parse(platformIdSchema, request.params.tenantId);
+    const projectId = parse(platformIdSchema, request.params.projectId);
+    const input = parse(projectUpdateSchema, request.body);
+    response.json(await administration.updateProject(tenantId, projectId, identity.userId, {
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      correlationId: response.locals.correlationId,
+    }));
+  });
+
+  app.get('/api/v1/platform/tenants/:tenantId/members', async (request, response) => {
+    const identity = await requirePermission(identityProvider, request, 'data:read');
+    if (!administration) {
+      throw new ForbiddenError('Tenant administration is not configured for this persistence profile');
+    }
+    const tenantId = parse(platformIdSchema, request.params.tenantId);
+    response.json(await administration.listTenantMembers(
+      tenantId,
+      identity.userId,
+      parse(cursorListQuerySchema, request.query),
+    ));
+  });
+
+  app.put('/api/v1/platform/tenants/:tenantId/members/:userId', async (request, response) => {
+    const identity = await requirePermission(identityProvider, request, 'platform:admin');
+    if (!administration) {
+      throw new ForbiddenError('Tenant administration is not configured for this persistence profile');
+    }
+    const tenantId = parse(platformIdSchema, request.params.tenantId);
+    const userId = parse(workspaceUserIdSchema, request.params.userId);
+    const input = parse(tenantMemberUpsertSchema, request.body);
+    const result = await administration.upsertTenantMember(
+      tenantId,
+      identity.userId,
+      userId,
+      input.role,
+      response.locals.correlationId,
+    );
+    response.status(result.created ? 201 : 200).json(result.member);
+  });
+
+  app.delete('/api/v1/platform/tenants/:tenantId/members/:userId', async (request, response) => {
+    const identity = await requirePermission(identityProvider, request, 'platform:admin');
+    if (!administration) {
+      throw new ForbiddenError('Tenant administration is not configured for this persistence profile');
+    }
+    const tenantId = parse(platformIdSchema, request.params.tenantId);
+    const userId = parse(workspaceUserIdSchema, request.params.userId);
+    await administration.removeTenantMember(tenantId, identity.userId, userId, response.locals.correlationId);
+    response.status(204).end();
   });
 
   app.get('/api/v1/platform/datasets', async (request, response) => {

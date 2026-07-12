@@ -1,0 +1,141 @@
+admin:
+  access_log_path: /tmp/envoy-admin-access.log
+  address:
+    socket_address:
+      address: 127.0.0.1
+      port_value: 9901
+
+static_resources:
+  listeners:
+    - name: odf_connector_mtls
+      per_connection_buffer_limit_bytes: 1048576
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9443
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: odf_connector_ingress
+                generate_request_id: true
+                use_remote_address: true
+                normalize_path: true
+                merge_slashes: true
+                request_headers_to_remove:
+                  - x-odf-mtls-verified
+                  - x-forwarded-client-cert
+                forward_client_cert_details: SANITIZE_SET
+                set_current_client_cert_details:
+                  subject: true
+                  uri: true
+                  dns: true
+                common_http_protocol_options:
+                  idle_timeout: 60s
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          timestamp: "%START_TIME%"
+                          request_id: "%REQ(X-REQUEST-ID)%"
+                          method: "%REQ(:METHOD)%"
+                          path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                          response_code: "%RESPONSE_CODE%"
+                          duration_ms: "%DURATION%"
+                          upstream_host: "%UPSTREAM_HOST%"
+                          client_certificate_subject: "%DOWNSTREAM_PEER_SUBJECT%"
+                route_config:
+                  name: odf_connector_routes
+                  virtual_hosts:
+                    - name: odf_connector_api
+                      domains: ["*"]
+                      request_headers_to_add:
+                        - header:
+                            key: x-forwarded-proto
+                            value: https
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                        - header:
+                            key: x-odf-mtls-verified
+                            value: "true"
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                      response_headers_to_add:
+                        - header:
+                            key: strict-transport-security
+                            value: max-age=31536000; includeSubDomains
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                        - header:
+                            key: x-content-type-options
+                            value: nosniff
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                      routes:
+                        - match:
+                            prefix: /api/v1/ingest/
+                          route:
+                            cluster: odf_api
+                            timeout: 60s
+                        - match:
+                            prefix: /api/v1/platform/ingestion/
+                          route:
+                            cluster: odf_api
+                            timeout: 60s
+                        - match:
+                            prefix: /
+                          direct_response:
+                            status: 404
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_2
+                  tls_maximum_protocol_version: TLSv1_3
+                tls_certificates:
+                  - certificate_chain:
+                      filename: /run/secrets/odf_ingress_tls_cert
+                    private_key:
+                      filename: /run/secrets/odf_ingress_tls_key
+                validation_context:
+                  trusted_ca:
+                    filename: /run/secrets/odf_ingress_client_ca
+
+  clusters:
+    - name: odf_api
+      connect_timeout: 2s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: odf_api
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: api
+                      port_value: 4310
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: 256
+            max_pending_requests: 256
+            max_requests: 1024
+      health_checks:
+        - timeout: 2s
+          interval: 10s
+          unhealthy_threshold: 3
+          healthy_threshold: 2
+          http_health_check:
+            path: /ready
+      outlier_detection:
+        consecutive_5xx: 5
+        interval: 10s
+        base_ejection_time: 30s
+        max_ejection_percent: 50

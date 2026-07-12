@@ -15,7 +15,12 @@ export interface EdgeAgentRuntimeDependencies {
   logger?: EdgeAgentLogger;
 }
 
-async function createConnectors(configuration: EdgeAgentConfig, environment: NodeJS.ProcessEnv): Promise<ManagedConnector[]> {
+/**
+ * Builds only the read-only source connectors.  Keeping this separate from
+ * delivery lets an operator rehearse a source safely before it is allowed to
+ * archive, enqueue, or send any data to the platform.
+ */
+export async function createConnectors(configuration: EdgeAgentConfig, environment: NodeJS.ProcessEnv): Promise<ManagedConnector[]> {
   const managed: ManagedConnector[] = [];
   for (const connector of configuration.connectors) {
     if (connector.type === "csv") {

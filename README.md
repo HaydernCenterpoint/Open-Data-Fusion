@@ -50,20 +50,18 @@ Open Data Fusion is an open-source platform for building trustworthy industrial 
 - immutable workspace revisions, audit history, and collaboration events;
 - OIDC authentication, server-side authorization, and least-privilege infrastructure foundations.
 
-The project is deliberately **local-first**, but it no longer requires demonstration data. A clean start creates an empty, durable SQLite database; `ODF_SEED=true` is an explicit opt-in for the legacy UI/collaboration fixture. `ODF_DATA_PERSISTENCE=sqlite|postgres` selects one authoritative backend for the industrial core (asset, telemetry, relation, audit, and bundle-ingest APIs) and Canvas/workspace data. The PostgreSQL profile adds forced row-level security, transactional outbox, and Redis-backed cross-instance events. It never dual-writes authoritative industrial/Canvas state to both databases.
+The project is deliberately **local-first**, but it no longer requires demonstration data. A clean start creates an empty, durable SQLite database; `ODF_SEED=true` is an explicit opt-in for the legacy UI/collaboration fixture. `ODF_DATA_PERSISTENCE=sqlite|postgres` selects one authoritative backend per process. In the PostgreSQL profile, the industrial core, Canvas, tenant/project administration, catalog compatibility contracts, advanced product records, cross-surface search projection, and write-back records all use PostgreSQL with forced row-level security where applicable. The profile never falls through to a replica-local SQLite store or dual-writes an authoritative product record.
 
-The cutover is intentionally bounded. Tenant/project selection follows the
-selected backend: PostgreSQL discovery exposes only active scopes where the
-authenticated identity is a project member. PostgreSQL tenant/project creation
-fails closed at the user-facing API and remains a controlled provisioning
-workflow. PostgreSQL replicas also use tenant/project-scoped raw-landing and
+Tenant bootstrap remains intentionally separate: creating an initial tenant is
+an audited provisioning workflow, while governed tenant/project updates and
+membership administration run through the PostgreSQL administration boundary.
+PostgreSQL replicas also use tenant/project-scoped raw-landing and
 governed-object metadata with a shared private S3-compatible object store;
-they never use a replica-local filesystem for those bytes. The remaining
-platform catalog, cross-surface search/content indexing, and advanced diagram,
-matching, spatial, and write-back surfaces still use SQLite adapters.
-PostgreSQL support is therefore suitable for the implemented industrial core,
-scope discovery, Canvas, and shared-object boundary, not yet a complete
-replacement for every product store.
+they never use a replica-local filesystem for those bytes. Industrial
+write-back execution remains deliberately gated by allowlisted policy,
+independent approvals, and an externally supplied executor; PostgreSQL stores
+the request, approval, safety, and event evidence even when execution is not
+configured.
 
 ### Design principles
 
@@ -108,7 +106,7 @@ Status legend:
 | Governed objects | **Available** | Immutable versions, streamed upload/download, SHA-256, strong ETags, bounded ranges, scoped access, audit events, and required server-side encryption; PostgreSQL uses shared versioned S3-compatible bytes plus forced-RLS metadata |
 | Telemetry serving | **Available** | SQLite- or PostgreSQL-backed raw, latest/as-of, and bounded aggregate queries with timestamp-derived charts and quality propagation |
 | Tenant/project discovery | **Available** | Backend-aligned, membership-scoped tenant/project selection; PostgreSQL returns active UUID scopes only |
-| Platform catalogs | **Available** | Full administration is available in SQLite; PostgreSQL has scope discovery only, with remaining catalog adapters pending |
+| Platform administration and catalogs | **Optional** | PostgreSQL governs project/tenant administration, memberships, datasets, sources, connectors, legacy model/pipeline/quality/context records, and write-back ledgers without SQLite fallback; initial tenant bootstrap remains operator-controlled |
 | Contextualization | **Gated** | Candidate assertions, confidence/evidence, explicit accept/reject review, and immutable review evidence |
 | Diagrams, matching, spatial | **Gated** | Text/tag extraction, proposal-ranked matching evaluation, and reviewable 4×4 spatial links |
 | Industrial write-back | **Gated** | Dry-run evidence, allowlisted operations, separation of duties, risk-based approvals, and external executor injection |
@@ -116,7 +114,7 @@ Status legend:
 | Edge collection | **Optional** | Read-only CSV, PostgreSQL, and OPC UA collection with checkpoints, durable local queueing, OAuth delivery, and retry |
 | PostgreSQL industrial core | **Optional** | Tenant/project-scoped assets, telemetry, relations, audit, and bundle ingest through a least-privilege API role with forced RLS |
 | PostgreSQL Canvas persistence | **Optional** | Tenant/project-scoped workspace reads and writes, immutable revisions/audit, transactional outbox, and Redis-backed committed events |
-| PostgreSQL remaining surfaces | **Foundation** | Remaining platform administration, cross-surface search/indexing, and advanced-product adapters stay SQLite-backed and require separate cutovers |
+| PostgreSQL product surfaces | **Optional** | Migration-gated PostgreSQL adapters cover administration, catalog compatibility, diagrams, matching, spatial links, cross-surface search, and write-back records; live connector and deployment rehearsal remain separate gates |
 | Workers and broker | **Optional** | Outbox worker publishes committed PostgreSQL events to Redis Streams; API replicas fan out shared Canvas events and the pipeline remains explicitly scoped/gated |
 | Observability | **Optional** | Redacted structured API logs, Prometheus metrics, optional OTLP traces, collector, alerts, Prometheus, and Grafana baseline |
 | SQLite workspace cutover | **Foundation** | Deterministic Canvas-history preflight, transactional dry-run import, frozen-source verification, checksums, and explicit apply gate |
@@ -132,18 +130,13 @@ flowchart TB
     Edge --> API
 
     subgraph Selected[One selected authoritative data backend]
-        SQLite[(SQLite industrial core and Canvas)]
-        PG[(PostgreSQL industrial core, Canvas, scope discovery, RLS, and outbox)]
+        SQLite[(SQLite product records)]
+        PG[(PostgreSQL industrial, Canvas, platform surfaces, RLS, and outbox)]
     end
 
     API -->|ODF_DATA_PERSISTENCE=sqlite| SQLite
     API -->|ODF_DATA_PERSISTENCE=postgres| PG
 
-    subgraph RemainingLocal[Current SQLite-only boundaries]
-        Metadata[(Remaining platform catalog and advanced metadata)]
-    end
-
-    API --> Metadata
     API --> SSE[In-process SSE and presence]
 
     subgraph SharedObjects[PostgreSQL shared object boundary]
@@ -398,9 +391,10 @@ Project-scoped platform routes require both `x-odf-tenant-id` and `x-odf-project
 > In the PostgreSQL profile, `GET /api/v1/platform/tenants` and
 > `GET /api/v1/platform/tenants/:tenantId/projects` read PostgreSQL through
 > membership-scoped discovery, so Explorer can select scopes created by
-> `tenant:provision`. Tenant/project POST
-> routes fail closed, and datasets, sources, connectors, models, pipelines,
-> quality, governed objects, and advanced surfaces still use SQLite adapters.
+> `tenant:provision`. Initial tenant creation remains fail-closed at the API,
+> while governed tenant/project administration, catalogs, compatibility
+> records, advanced surfaces, search, and governed objects use PostgreSQL
+> without SQLite fallback.
 
 See [`apps/api/README.md`](apps/api/README.md) for the endpoint catalog, request contracts, ingest example, storage behavior, and write-back policy variables.
 
@@ -466,8 +460,8 @@ The root `.env` is read by the API and Vite development processes. Important var
 | Variable | Purpose |
 | --- | --- |
 | `PORT` | API port; defaults to `4310` |
-| `ODF_DATABASE_PATH` | SQLite database path for the embedded profile and the SQLite-only catalog/object/advanced stores |
-| `ODF_DATA_PERSISTENCE` | Select exactly one industrial-core and Canvas backend: `sqlite` or `postgres`; required explicitly in production |
+| `ODF_DATABASE_PATH` | SQLite database path for the embedded profile |
+| `ODF_DATA_PERSISTENCE` | Select exactly one authoritative product backend: `sqlite` or `postgres`; required explicitly in production |
 | `ODF_SEED` | Set to `true` to opt into the legacy SQLite UI/Canvas fixture; unset/false starts clean |
 | `ODF_AUTH_MODE` | `development` or `oidc` |
 | `ODF_RAW_LANDING_PATH` | Local immutable raw landing directory |
@@ -675,7 +669,7 @@ CI also performs:
 
 ```text
 apps/
-  api/                 Express API, SQLite/PostgreSQL industrial and Canvas adapters, local metadata stores, cutover tooling, auth
+  api/                 Express API, SQLite/PostgreSQL product adapters, compatibility stores, cutover tooling, auth
   web/                 React/Vite Explorer, Canvas, and governed product surfaces
   edge-agent/          Read-only connectors and durable store-and-forward delivery
   outbox-worker/       PostgreSQL outbox to Redis Streams publisher
@@ -734,6 +728,7 @@ Additional references:
 - [x] Edge connectors with durable checkpointing and delivery
 - [x] Governed objects, search, latest/aggregate telemetry, and raw replay
 - [x] Tenant PostgreSQL schema, forced RLS, typed repositories, industrial-core and Canvas adapters, shared Redis event delivery, worker implementations, and workspace cutover rehearsal
+- [x] PostgreSQL tenant/project administration, catalog compatibility, advanced product records, cross-surface search projection, and write-back evidence with no SQLite fallback
 - [x] CI, security workflows, SBOM, container builds, and observability baseline
 
 ### Next production gates
@@ -742,12 +737,12 @@ Additional references:
 - [x] Switch asset, telemetry, relation, audit, and ingest reads/writes to PostgreSQL with `ODF_DATA_PERSISTENCE=postgres`, without dual-write
 - [x] Add an audited, least-privilege tenant/project bootstrap workflow with an explicit dry-run/apply gate
 - [x] Move raw landing and governed-object metadata/content to PostgreSQL plus shared versioned S3-compatible storage without dual-write
-- [ ] Persist ongoing tenant administration and project membership through governed user-facing API workflows
-- [ ] Move platform catalog, cross-surface search/indexing, and advanced-product API reads/writes from SQLite to PostgreSQL without dual-write
+- [x] Persist governed PostgreSQL tenant/project administration and project membership workflows; retain initial tenant bootstrap as a separate operator boundary
+- [x] Move platform catalog compatibility, cross-surface search/indexing, advanced-product API records, and write-back ledgers to PostgreSQL without SQLite fallback
 - [ ] Rehearse backup/restore, broker failure, dead-letter, and multi-instance concurrency beyond the CI industrial/Canvas/outbox smoke
 - [ ] Complete production ingress, TLS/mTLS, secret-manager, and network-isolation design
 - [ ] Add durable trace/log storage, worker telemetry, SLOs, and operational runbooks
-- [ ] Validate production-like connector backfill, resume, and schema-evolution behavior with a design partner
+- [ ] Validate live design-partner CSV, JDBC/PostgreSQL, and OPC UA connector backfill, resume, authentication, and schema-evolution behavior in the target deployment
 
 ### Intentionally gated
 

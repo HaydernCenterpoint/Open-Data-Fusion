@@ -22,12 +22,19 @@ const event = (eventId: string, attemptCount = 1): OutboxEvent => ({
 class FakeRepository implements OutboxRepository {
   readonly published: string[] = [];
   readonly released: Array<{ eventId: string; error: string; delay: number }> = [];
+  readonly deadLetters: Array<{ eventId: string; error: string }> = [];
 
   constructor(private readonly events: OutboxEvent[]) {}
   async claim(): Promise<OutboxEvent[]> { return this.events; }
   async markPublished(eventId: string): Promise<void> { this.published.push(eventId); }
   async release(eventId: string, _workerId: string, error: string, delay: number): Promise<void> {
     this.released.push({ eventId, error, delay });
+  }
+  async deadLetter(eventId: string, _workerId: string, error: string): Promise<void> {
+    this.deadLetters.push({ eventId, error });
+  }
+  async operationalSnapshot() {
+    return { pendingEvents: 0, deadLetteredEvents: this.deadLetters.length, oldestPendingAgeSeconds: 0 };
   }
 }
 
@@ -46,7 +53,7 @@ describe("OutboxPump", () => {
     const repository = new FakeRepository([event("1"), event("2")]);
     const publisher = new FakePublisher();
     const result = await new OutboxPump(repository, publisher, { workerId: "worker" }).runOnce();
-    expect(result).toEqual({ claimed: 2, published: 2, failed: 0 });
+    expect(result).toEqual({ claimed: 2, published: 2, failed: 0, deadLettered: 0 });
     expect(publisher.events).toEqual(["1", "2"]);
     expect(repository.published).toEqual(["1", "2"]);
   });
@@ -57,7 +64,7 @@ describe("OutboxPump", () => {
       workerId: "worker",
       maximumRetryDelayMilliseconds: 10_000,
     }).runOnce();
-    expect(result).toEqual({ claimed: 2, published: 1, failed: 1 });
+    expect(result).toEqual({ claimed: 2, published: 1, failed: 1, deadLettered: 0 });
     expect(repository.released).toEqual([{ eventId: "1", error: "broker failed with a transient error", delay: 10_000 }]);
     expect(repository.published).toEqual(["2"]);
   });
@@ -87,8 +94,20 @@ describe("OutboxPump", () => {
     expect(repository.published).toEqual([]);
 
     releaseFirstEvent?.();
-    await expect(running).resolves.toEqual({ claimed: 2, published: 2, failed: 0 });
+    await expect(running).resolves.toEqual({ claimed: 2, published: 2, failed: 0, deadLettered: 0 });
     expect(started).toEqual(["1", "2"]);
     expect(repository.published).toEqual(["1", "2"]);
+  });
+
+  it("dead-letters a poison event after the configured attempt ceiling", async () => {
+    const repository = new FakeRepository([event("poison", 3)]);
+    const result = await new OutboxPump(repository, new FakePublisher("poison"), {
+      workerId: "worker",
+      maximumDeliveryAttempts: 3,
+    }).runOnce();
+
+    expect(result).toEqual({ claimed: 1, published: 0, failed: 1, deadLettered: 1 });
+    expect(repository.released).toEqual([]);
+    expect(repository.deadLetters).toEqual([{ eventId: "poison", error: "broker failed with a transient error" }]);
   });
 });

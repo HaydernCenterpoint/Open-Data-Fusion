@@ -312,6 +312,12 @@ jobs:
       - name: Prove PostgreSQL industrial ingest plus Canvas outbox, Redis, and replica SSE
         run: bash infra/ci/production-like-smoke.sh
 
+      - name: Rehearse quiesced PostgreSQL backup and isolated restore
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml \
+            --profile production-like stop api api-replica outbox-worker
+          bash infra/ci/postgres-backup-restore-rehearsal.sh
+
       - name: Show integration service logs after failure
         if: failure()
         run: |

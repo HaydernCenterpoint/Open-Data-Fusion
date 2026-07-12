@@ -4,10 +4,12 @@ Backend vertical slice for industrial asset context, telemetry, ingestion, prove
 
 ## Run
 
-Node.js 24 or newer is required. The embedded profile and remaining platform
-catalog/advanced stores use the built-in `node:sqlite` module. In PostgreSQL
-mode, raw-landing and governed-object metadata use PostgreSQL and their bytes
-use a shared private S3-compatible store.
+Node.js 24 or newer is required. The embedded profile uses the built-in
+`node:sqlite` module. In PostgreSQL mode, the industrial core, Canvas,
+tenant/project administration, catalog compatibility contracts, advanced
+product records, cross-surface search, raw-landing/governed-object metadata,
+and write-back records use PostgreSQL; governed-object bytes use a shared
+private S3-compatible store. PostgreSQL routes do not fall back to SQLite.
 
 ```sh
 npm install
@@ -36,10 +38,11 @@ both databases.
 | Assets, time series, telemetry, relations, industrial audit, bundle ingest | SQLite, project scoped | PostgreSQL, project scoped with forced RLS |
 | Canvas/workspaces | SQLite | PostgreSQL with transactional outbox |
 | Tenant/project GET discovery | SQLite membership catalog | PostgreSQL active project membership, UUID cursor pagination, no admin bypass |
-| Tenant/project creation | `platform:admin` API | API blocked; use the audited `tenant:provision` workflow |
-| Remaining platform catalog and membership administration | SQLite | SQLite, not automatically coupled to PostgreSQL scopes |
+| Tenant/project administration | `platform:admin` API | PostgreSQL administration routines for tenant/project updates and memberships; initial tenant bootstrap remains the audited `tenant:provision` workflow |
+| Catalog compatibility and membership administration | SQLite | PostgreSQL, project-scoped with forced RLS and no SQLite fallback |
 | Raw landing and governed objects | SQLite/local files | PostgreSQL RLS metadata plus shared versioned S3-compatible bytes |
-| Diagrams, matching, spatial, write-back | SQLite/local files | SQLite/local files |
+| Diagrams, matching, spatial, contextualization, write-back | SQLite/local files | PostgreSQL records, review/approval/event evidence, and policy gates; a write-back executor remains external and optional |
+| Cross-surface search | SQLite FTS5 or scoped fallback | PostgreSQL search projection and full-text query with project scope |
 
 The SQLite profile is intended for an embedded or single-API-instance
 deployment:
@@ -200,22 +203,23 @@ Project-scoped platform routes require both `x-odf-tenant-id` and
 project before reading or writing any resource. New list endpoints use opaque
 keyset cursors through `?limit=&cursor=` and return `nextCursor`.
 
-When `ODF_DATA_PERSISTENCE=postgres`, the two tenant/project GET routes use
-PostgreSQL discovery functions. They return only active UUID tenants/projects
-for which the authenticated identity has project membership, with opaque
-`{id}` keyset cursors; `platform:admin` does not bypass that filter. Tenant and
-project POST routes fail closed and direct operators to the controlled
-`tenant:provision` workflow.
-
-All remaining routes in this section are still SQLite-backed and are not
-automatically coupled to the discovered PostgreSQL scope. In particular,
-creating a SQLite source/connector does not create the active PostgreSQL
-`odf.source_connections` record required by PostgreSQL bundle ingest.
+When `ODF_DATA_PERSISTENCE=postgres`, discovery, governed tenant/project
+administration, catalog compatibility, advanced product records, search, and
+write-back records use PostgreSQL. Discovery returns only active UUID
+tenants/projects for which the authenticated identity has project membership,
+with opaque `{id}` keyset cursors; `platform:admin` does not bypass that
+filter. Initial tenant creation remains fail-closed at the user-facing API and
+uses the controlled `tenant:provision` workflow. PostgreSQL startup verifies
+the required migration tables and grants before serving these routes, and no
+listed platform route falls through to SQLite.
 
 - `GET /api/v1/platform/tenants` (selected-backend discovery)
 - `POST /api/v1/platform/tenants` (SQLite only; PostgreSQL fails closed)
+- `PATCH /api/v1/platform/tenants/:tenantId` (PostgreSQL governed administration)
 - `GET /api/v1/platform/tenants/:tenantId/projects` (selected-backend discovery)
-- `POST /api/v1/platform/tenants/:tenantId/projects` (SQLite only; PostgreSQL fails closed)
+- `POST|PATCH /api/v1/platform/tenants/:tenantId/projects` (PostgreSQL governed administration after tenant bootstrap)
+- `GET /api/v1/platform/tenants/:tenantId/members`
+- `PUT|DELETE /api/v1/platform/tenants/:tenantId/members/:userId` (PostgreSQL tenant membership administration)
 - `GET|POST /api/v1/platform/datasets`
 - `GET|POST /api/v1/platform/sources`
 - `GET|POST /api/v1/platform/connectors`
@@ -233,7 +237,7 @@ creating a SQLite source/connector does not create the active PostgreSQL
 - `GET|POST /api/v1/platform/spatial/asset-links`
 - `POST /api/v1/platform/spatial/asset-links/:linkId/review`
 - `GET /api/v1/platform/project/members`
-- `PUT|DELETE /api/v1/platform/project/members/:userId` (project owner plus `platform:admin`)
+- `PUT|DELETE /api/v1/platform/project/members/:userId` (PostgreSQL project membership administration)
 - `GET|POST /api/v1/platform/writeback/requests`
 - `POST /api/v1/platform/writeback/requests/:requestId/approvals`
 - `POST /api/v1/platform/writeback/requests/:requestId/execute`
@@ -249,10 +253,11 @@ creating a SQLite source/connector does not create the active PostgreSQL
 
 `data:read` allows project reads, `data:ingest` plus project owner/editor
 allows catalog writes and pipeline triggers, and `relations:review` plus
-owner/editor/reviewer allows candidate review. Creating tenants or projects
-through the SQLite profile requires the global `platform:admin` permission; the
-same POST routes are blocked in PostgreSQL mode. Connector configuration
-rejects inline credential-shaped fields; store only secret references.
+owner/editor/reviewer allows candidate review. `platform:admin` governs
+PostgreSQL tenant/project administration and membership changes; the initial
+tenant bootstrap route remains blocked in PostgreSQL mode. Connector
+configuration rejects inline credential-shaped fields; store only secret
+references.
 
 In the SQLite profile, `ODF_SEED=true` creates the optional legacy tenant,
 project, and Canvas-role fixture. The scoped industrial adapter does not import
@@ -275,7 +280,10 @@ Write-back uses independent verified permissions: `writeback:request`,
 dry-run evidence. Operations must be allowlisted; the requester cannot approve
 their own request; high-risk operations require at least two distinct
 non-requester approvers; critical operations are always cancelled and cannot be
-executed. Approval and event ledgers are append-only at the database layer.
+executed. Approval and event ledgers are append-only at the database layer. In
+PostgreSQL mode, requests, safety/blocked reasons, approvals, execution
+results, and events are stored in PostgreSQL compatibility records under
+project scope.
 
 The server profile is disabled by default. Configure policy with:
 
@@ -310,8 +318,9 @@ membership. Uploads require `data:ingest` plus project owner/editor role.
 Only conservative passive MIME types (`text/plain`, CSV/TSV, and JSON/NDJSON)
 are incrementally decoded as UTF-8 for search. HTML, SVG, scripts, XML, and
 other active formats are stored as opaque bytes and are never executed or
-parsed. Search uses SQLite FTS5 when available and automatically falls back to
-the existing scoped `LIKE` index.
+parsed. SQLite uses FTS5 when available and a scoped fallback otherwise;
+PostgreSQL uses its forced-RLS cross-surface search projection and full-text
+query path.
 
 Latest and aggregate telemetry routes use the selected industrial backend and
 require `x-odf-tenant-id`, `x-odf-project-id`, verified `data:read`, and project
@@ -326,10 +335,11 @@ proxy verified S3 bytes through the API; they do not expose a bucket URL.
 The following creates an asset and series together with its first measurement,
 so it works against a clean SQLite project. For PostgreSQL, replace the example
 tenant/project strings with the UUIDs created by `tenant:provision` and first
-register an active `odf.source_connections` row whose `external_id` exactly
-matches `source.system`. The provisioning CLI creates the required default
-model space but does not yet create that source connection; use the controlled
-least-privilege transaction in the
+create the project source through `POST /api/v1/platform/sources`; its `id`
+must exactly match `source.system`. The PostgreSQL catalog adapter creates the
+scoped source-connection record without SQLite fallback. Validating a real
+partner endpoint, credentials, backfill, and schema evolution remains a
+deployment/design-partner gate; see the
 [production-like runbook](../../docs/operations/postgres-canvas-production-like.md#bootstrap-and-bring-up-a-fresh-rehearsal).
 
 ```bash

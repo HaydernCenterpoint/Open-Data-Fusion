@@ -22,7 +22,29 @@ export const cursorListQuerySchema = z.object({
 });
 
 export const tenantCreateSchema = z.object({ id: platformIdSchema, name: nameSchema }).strict();
-export const projectCreateSchema = z.object({ id: platformIdSchema, name: nameSchema, description: descriptionSchema }).strict();
+export const tenantUpdateSchema = z.object({
+  name: nameSchema.optional(),
+  status: z.enum(['active', 'suspended', 'retired']).optional(),
+}).strict().refine((input) => input.name !== undefined || input.status !== undefined, {
+  message: 'Provide at least one tenant field to update',
+});
+const slugSchema = z.string().trim().min(2).max(63).regex(/^[a-z0-9][a-z0-9-]*$/, 'Use a lowercase slug');
+export const projectCreateSchema = z.object({
+  id: platformIdSchema,
+  slug: slugSchema.optional(),
+  name: nameSchema,
+  description: descriptionSchema,
+}).strict();
+export const projectUpdateSchema = z.object({
+  name: nameSchema.optional(),
+  description: descriptionSchema,
+  status: z.enum(['active', 'suspended', 'archived']).optional(),
+}).strict().refine((input) => input.name !== undefined || input.description !== undefined || input.status !== undefined, {
+  message: 'Provide at least one project field to update',
+});
+export const tenantMemberUpsertSchema = z.object({
+  role: z.enum(['owner', 'admin', 'viewer']),
+}).strict();
 export const datasetCreateSchema = z.object({ id: platformIdSchema, name: nameSchema, description: descriptionSchema }).strict();
 export const sourceCreateSchema = z.object({
   id: platformIdSchema,
@@ -120,7 +142,10 @@ export const platformSearchQuerySchema = cursorListQuerySchema.extend({
 export type PlatformContext = z.infer<typeof platformContextSchema>;
 export type CursorListQuery = z.infer<typeof cursorListQuerySchema>;
 export type TenantCreate = z.infer<typeof tenantCreateSchema>;
+export type TenantUpdate = z.infer<typeof tenantUpdateSchema>;
 export type ProjectCreate = z.infer<typeof projectCreateSchema>;
+export type ProjectUpdate = z.infer<typeof projectUpdateSchema>;
+export type TenantMemberUpsert = z.infer<typeof tenantMemberUpsertSchema>;
 export type DatasetCreate = z.infer<typeof datasetCreateSchema>;
 export type SourceCreate = z.infer<typeof sourceCreateSchema>;
 export type ConnectorCreate = z.infer<typeof connectorCreateSchema>;

@@ -12,11 +12,8 @@ import type { KeysetPage, TransactionRunner } from "./types.js";
 
 function searchResultFromRow(row: Record<string, unknown>): UnifiedSearchResult {
   const entityType = requiredRowString(row, "entity_type");
-  if (!["asset", "document", "sourceConnection", "dataset", "pipeline", "modelSpace"].includes(entityType)) {
-    throw new TypeError("Unexpected unified search entity type from PostgreSQL");
-  }
   return {
-    entityType: entityType as UnifiedSearchResult["entityType"],
+    entityType,
     entityId: requiredRowString(row, "entity_id"),
     title: requiredRowString(row, "title"),
     summary: optionalRowString(row, "summary") ?? "",
@@ -25,9 +22,11 @@ function searchResultFromRow(row: Record<string, unknown>): UnifiedSearchResult 
 }
 
 /**
- * Migration 003 has no search projection or tsvector index. This bounded,
- * static UNION is deliberately project/RLS-scoped; introduce migration 004
- * before replacing it with a persistent full-text projection at scale.
+ * Reads the rebuildable migration-013 projection rather than reconstructing
+ * a static UNION on every request. The index remains fully tenant/project
+ * scoped by both query predicates and forced RLS. If tokenization has no
+ * match (for example a punctuation-heavy external identifier), it falls back
+ * to a bounded substring query against the same projection.
  */
 export class PostgresSearchRepository extends PolicyAwareRepository implements SearchRepository {
   constructor(runner: TransactionRunner, policy: ProjectAccessResolver) {
@@ -39,53 +38,42 @@ export class PostgresSearchRepository extends PolicyAwareRepository implements S
     query: string,
     limit: number,
     cursor?: UnifiedSearchCursor,
+    entityType?: string,
   ): Promise<KeysetPage<UnifiedSearchResult, UnifiedSearchCursor>> {
     const text = requiredText(query, "query");
     if (text.length > 200) throw new RangeError("query must not exceed 200 characters");
+    const selectedEntityType = entityType === undefined ? null : requiredText(entityType, "entityType");
+    if (selectedEntityType !== null && selectedEntityType.length > 100) {
+      throw new RangeError("entityType must not exceed 100 characters");
+    }
     const bounded = boundedPageSize(limit, 100);
     return this.read(scope, async (transaction) => {
       const result = await transaction.query({
         text: [
-          "WITH candidates AS (",
-          "  SELECT 'asset'::text AS entity_type, asset_id::text AS entity_id, name AS title,",
-          "         COALESCE(description, asset_type) AS summary, updated_at",
-          "  FROM odf.assets",
+          "WITH fts_matches AS MATERIALIZED (",
+          "  SELECT entity_type, entity_id, title, body AS summary, updated_at",
+          "  FROM odf.platform_search_index",
           "  WHERE tenant_id = $1::uuid AND project_id = $2::uuid",
-          "    AND (name ILIKE '%' || $3 || '%' OR COALESCE(description, '') ILIKE '%' || $3 || '%' OR asset_type ILIKE '%' || $3 || '%')",
+          "    AND ($4::text IS NULL OR entity_type = $4)",
+          "    AND search_vector @@ websearch_to_tsquery('simple'::regconfig, $3)",
+          "), candidates AS (",
+          "  SELECT entity_type, entity_id, title, summary, updated_at FROM fts_matches",
           "  UNION ALL",
-          "  SELECT 'document'::text, document_id::text, title, COALESCE(mime_type, source_system), updated_at",
-          "  FROM odf.documents",
-          "  WHERE tenant_id = $1::uuid AND project_id = $2::uuid",
-          "    AND (title ILIKE '%' || $3 || '%' OR COALESCE(mime_type, '') ILIKE '%' || $3 || '%' OR source_system ILIKE '%' || $3 || '%')",
-          "  UNION ALL",
-          "  SELECT 'sourceConnection'::text, source_connection_id::text, name, connector_kind, updated_at",
-          "  FROM odf.source_connections",
-          "  WHERE tenant_id = $1::uuid AND project_id = $2::uuid",
-          "    AND (name ILIKE '%' || $3 || '%' OR external_id ILIKE '%' || $3 || '%' OR connector_kind ILIKE '%' || $3 || '%')",
-          "  UNION ALL",
-          "  SELECT 'dataset'::text, dataset_id::text, name, COALESCE(description, classification), updated_at",
-          "  FROM odf.datasets",
-          "  WHERE tenant_id = $1::uuid AND project_id = $2::uuid",
-          "    AND (name ILIKE '%' || $3 || '%' OR external_id ILIKE '%' || $3 || '%' OR COALESCE(description, '') ILIKE '%' || $3 || '%')",
-          "  UNION ALL",
-          "  SELECT 'pipeline'::text, pipeline_id::text, name, COALESCE(description, external_id), updated_at",
-          "  FROM odf.pipelines",
-          "  WHERE tenant_id = $1::uuid AND project_id = $2::uuid",
-          "    AND (name ILIKE '%' || $3 || '%' OR external_id ILIKE '%' || $3 || '%' OR COALESCE(description, '') ILIKE '%' || $3 || '%')",
-          "  UNION ALL",
-          "  SELECT 'modelSpace'::text, space_id::text, name, COALESCE(description, external_id), updated_at",
-          "  FROM odf.model_spaces",
-          "  WHERE tenant_id = $1::uuid AND project_id = $2::uuid",
-          "    AND (name ILIKE '%' || $3 || '%' OR external_id ILIKE '%' || $3 || '%' OR COALESCE(description, '') ILIKE '%' || $3 || '%')",
+          "  SELECT entity_type, entity_id, title, body AS summary, updated_at",
+          "  FROM odf.platform_search_index",
+          "  WHERE NOT EXISTS (SELECT 1 FROM fts_matches)",
+          "    AND tenant_id = $1::uuid AND project_id = $2::uuid",
+          "    AND ($4::text IS NULL OR entity_type = $4)",
+          "    AND (title ILIKE '%' || $3 || '%' OR body ILIKE '%' || $3 || '%')",
           ")",
           "SELECT entity_type, entity_id, title, summary, updated_at",
           "FROM candidates",
-          "WHERE ($4::timestamptz IS NULL OR (updated_at, entity_type, entity_id) < ($4::timestamptz, $5, $6))",
+          "WHERE ($5::timestamptz IS NULL OR (updated_at, entity_type, entity_id) < ($5::timestamptz, $6, $7))",
           "ORDER BY updated_at DESC, entity_type DESC, entity_id DESC",
-          "LIMIT $7",
+          "LIMIT $8",
         ].join("\n"),
         values: [
-          scope.tenantId, scope.projectId, text, cursor?.timestamp ?? null, cursor?.entityType ?? null,
+          scope.tenantId, scope.projectId, text, selectedEntityType, cursor?.timestamp ?? null, cursor?.entityType ?? null,
           cursor?.entityId ?? null, bounded + 1,
         ],
       });

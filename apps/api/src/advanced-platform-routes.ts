@@ -17,6 +17,7 @@ import {
 } from './advanced-platform.js';
 import type { DataPlanePermission, IdentityProvider } from './auth.js';
 import { ForbiddenError } from './database.js';
+import type { PlatformAdministrationPersistence } from './platform-administration.js';
 import { cursorListQuerySchema, platformContextSchema, platformIdSchema, type PlatformContext } from './platform-schemas.js';
 import { PlatformCatalog, type PlatformProjectRole } from './platform.js';
 import { workspaceUserIdSchema } from './schemas.js';
@@ -64,6 +65,10 @@ const memberPaths = ['/api/v1/platform/project/members', '/api/v1/platform/proje
 
 export interface AdvancedPlatformRouteOptions {
   writebackExecutor?: IndustrialWritebackExecutor;
+  /** PostgreSQL membership authority; avoids shadow SQLite memberships. */
+  platformAdministration?: PlatformAdministrationPersistence;
+  /** Deny legacy membership fallback when the process serves PostgreSQL data. */
+  postgresMode?: boolean;
 }
 
 export function registerAdvancedPlatformRoutes(
@@ -130,6 +135,20 @@ export function registerAdvancedPlatformRoutes(
   });
 
   app.get(memberPaths, async (request, response) => {
+    if (options.platformAdministration) {
+      const identity = await requirePermission(identityProvider, request, 'data:read');
+      const context = requestContext(request);
+      response.json(await options.platformAdministration.listProjectMembers(
+        context.tenantId,
+        context.projectId,
+        identity.userId,
+        parse(cursorListQuerySchema, request.query),
+      ));
+      return;
+    }
+    if (options.postgresMode) {
+      throw new ForbiddenError('PostgreSQL project membership administration is not configured');
+    }
     const { context } = await requireProjectAccess(projectCatalog, identityProvider, request, 'data:read');
     response.json(catalog.listProjectMembers(context, parse(cursorListQuerySchema, request.query)));
   });
@@ -137,6 +156,25 @@ export function registerAdvancedPlatformRoutes(
     '/api/v1/platform/project/members/:userId',
     '/api/v1/platform/project-members/:userId',
   ], async (request, response) => {
+    if (options.platformAdministration) {
+      const identity = await requirePermission(identityProvider, request, 'platform:admin');
+      const context = requestContext(request);
+      const userId = parse(workspaceUserIdSchema, request.params.userId);
+      const input = parse(projectMemberUpsertSchema, request.body);
+      const result = await options.platformAdministration.upsertProjectMember(
+        context.tenantId,
+        context.projectId,
+        identity.userId,
+        userId,
+        input.role,
+        response.locals.correlationId,
+      );
+      response.status(result.created ? 201 : 200).json(result.member);
+      return;
+    }
+    if (options.postgresMode) {
+      throw new ForbiddenError('PostgreSQL project membership administration is not configured');
+    }
     const { context, identity } = await requireProjectAccess(projectCatalog, identityProvider, request, 'platform:admin', ownerRoles);
     const userId = parse(workspaceUserIdSchema, request.params.userId);
     const created = !catalog.hasProjectMember(context, userId);
@@ -153,6 +191,23 @@ export function registerAdvancedPlatformRoutes(
     '/api/v1/platform/project/members/:userId',
     '/api/v1/platform/project-members/:userId',
   ], async (request, response) => {
+    if (options.platformAdministration) {
+      const identity = await requirePermission(identityProvider, request, 'platform:admin');
+      const context = requestContext(request);
+      const userId = parse(workspaceUserIdSchema, request.params.userId);
+      await options.platformAdministration.removeProjectMember(
+        context.tenantId,
+        context.projectId,
+        identity.userId,
+        userId,
+        response.locals.correlationId,
+      );
+      response.status(204).end();
+      return;
+    }
+    if (options.postgresMode) {
+      throw new ForbiddenError('PostgreSQL project membership administration is not configured');
+    }
     const { context, identity } = await requireProjectAccess(projectCatalog, identityProvider, request, 'platform:admin', ownerRoles);
     const userId = parse(workspaceUserIdSchema, request.params.userId);
     catalog.removeProjectMember(context, userId, identity.userId, response.locals.correlationId);

@@ -11,12 +11,14 @@ import type {
   PipelineRunRecordV2,
   PipelineVersionRecord,
   ProjectRecord,
+  ProjectMemberRecord,
   QualityResultRecord,
   QualityRuleRecord,
   RelationCandidateRecord,
   RelationRecord,
   SourceConnectionRecord,
   TenantRecord,
+  TenantMemberRecord,
   TimeSeriesPointRecord,
   TimeSeriesRecord,
   WritebackApprovalRecord,
@@ -93,6 +95,31 @@ export function projectFromRow(row: Row): ProjectRecord {
     slug: requiredRowString(row, "slug"), name: requiredRowString(row, "name"), description: optionalRowString(row, "description"),
     status: oneOf(requiredRowString(row, "status"), ["active", "suspended", "archived"], "project status"),
     createdAt: requiredRowString(row, "created_at"), updatedAt: requiredRowString(row, "updated_at"),
+  };
+}
+
+export function tenantMemberFromRow(row: Row): TenantMemberRecord {
+  const role = oneOf(requiredRowString(row, "role"), ["owner", "admin", "viewer"], "tenant member role");
+  return {
+    tenantId: requiredRowString(row, "tenant_id"),
+    userId: requiredRowString(row, "user_id"),
+    role,
+    createdBy: requiredRowString(row, "created_by"),
+    createdAt: requiredRowString(row, "created_at"),
+    updatedAt: requiredRowString(row, "updated_at"),
+  };
+}
+
+export function projectMemberFromRow(row: Row): ProjectMemberRecord {
+  const role = oneOf(requiredRowString(row, "role"), ["owner", "editor", "reviewer", "viewer"], "project member role");
+  return {
+    tenantId: requiredRowString(row, "tenant_id"),
+    projectId: requiredRowString(row, "project_id"),
+    userId: requiredRowString(row, "user_id"),
+    role,
+    createdBy: requiredRowString(row, "created_by"),
+    createdAt: requiredRowString(row, "created_at"),
+    updatedAt: requiredRowString(row, "updated_at"),
   };
 }
 

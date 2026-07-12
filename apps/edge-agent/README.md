@@ -28,6 +28,24 @@ PostgreSQL sessions also set `default_transaction_read_only=on`. OPC-UA supports
 username authentication, configurable message security, per-node mapping/scaling, status-to-quality conversion, and
 per-node timestamp checkpoints.
 
+## Source rehearsal before a pilot
+
+Run the bounded rehearsal against the real, read-only connector identity before a production backfill. It reads up to
+two batches from each source, then reuses the returned checkpoint to prove resume behavior. It never creates an
+archive, queue entry, OAuth token, or API request. The JSON output records the mapped schema contract so a design
+partner can explicitly approve a source-schema change before ingest is enabled.
+
+```powershell
+$env:ODF_EDGE_CONFIG = "C:\\secure-config\\odf-edge-pilot.json"
+$env:ODF_EDGE_HISTORIAN_URL = "postgresql://read_only_connector:..."
+npm run rehearse:connectors --workspace @open-data-fusion/edge-agent -- --batches 2
+```
+
+For CSV, replacing or rewriting rows before the persisted checkpoint fails closed; migrate that checkpoint through a
+reviewed change. PostgreSQL tolerates extra query fields but refuses a removed or renamed checkpoint/mapped field.
+OPC-UA node additions or removals require a reviewed configuration change. Record the rehearsal JSON with the source
+owner's approval before enabling a backfill.
+
 ```powershell
 $env:ODF_EDGE_CONFIG = "apps/edge-agent/config.example.json"
 $env:ODF_EDGE_CLIENT_ID = "open-data-fusion-edge"

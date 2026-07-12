@@ -58,6 +58,16 @@ def validate_migrations(migration_paths: list[Path]) -> None:
         require(re.search(r"^COMMIT;\s*$", sql, re.MULTILINE) is not None, f"{path.name} must commit its transaction")
         require("ADD CONSTRAINT IF NOT EXISTS" not in sql.upper(), f"{path.name} uses unsupported ADD CONSTRAINT IF NOT EXISTS")
         require("CREATE INDEX CONCURRENTLY" not in sql.upper(), f"{path.name} cannot use concurrent indexes inside its transaction")
+        require(
+            re.search(
+                rf"INSERT INTO odf\.schema_migrations\s*\(version, description\)\s*"
+                rf"VALUES\s*\(\s*'{re.escape(path.stem)}'\s*,",
+                sql,
+                re.DOTALL,
+            )
+            is not None,
+            f"{path.name} must record its own migration version for idempotent runner execution",
+        )
 
     platform = read(MIGRATIONS / "003_tenant_industrial_data_plane.sql")
     required_tables = [
@@ -287,6 +297,100 @@ def validate_migrations(migration_paths: list[Path]) -> None:
         "shared object metadata must not grant application deletes for immutable evidence",
     )
 
+    legacy_compatibility = read(MIGRATIONS / "014_platform_legacy_compatibility.sql")
+    legacy_tables = [
+        "platform_legacy_model_versions",
+        "platform_legacy_pipelines",
+        "platform_legacy_pipeline_runs",
+        "platform_legacy_quality_rules",
+        "platform_legacy_quality_results",
+        "platform_legacy_context_candidates",
+        "platform_legacy_writeback_requests",
+        "platform_legacy_writeback_approvals",
+        "platform_legacy_writeback_events",
+    ]
+    for table in legacy_tables:
+        for guardrail in [
+            f"CREATE TABLE IF NOT EXISTS odf.{table}",
+            f"ALTER TABLE odf.{table} ENABLE ROW LEVEL SECURITY;",
+            f"ALTER TABLE odf.{table} FORCE ROW LEVEL SECURITY;",
+            f"CREATE POLICY {table}_scope ON odf.{table}",
+        ]:
+            require(guardrail in legacy_compatibility, f"missing PostgreSQL legacy compatibility guardrail: {guardrail}")
+    require(
+        legacy_compatibility.count(
+            "USING (tenant_id = odf.current_tenant_id() AND project_id = odf.current_project_id())"
+        )
+        >= len(legacy_tables),
+        "legacy compatibility policies must scope every table to tenant and project",
+    )
+    for guardrail in [
+        "SET LOCAL lock_timeout = '10s';",
+        "SET LOCAL statement_timeout = '120s';",
+        "SELECT pg_advisory_xact_lock(hashtextextended('odf:postgres:migrations', 0));",
+        "UNIQUE (tenant_id, project_id, pipeline_id, idempotency_key)",
+        "REFERENCES odf.source_connections(project_id, external_id) ON UPDATE RESTRICT ON DELETE RESTRICT",
+        "REFERENCES odf.datasets(project_id, external_id) ON UPDATE RESTRICT ON DELETE RESTRICT",
+        "platform_legacy_model_versions_cursor_idx",
+        "platform_legacy_pipelines_cursor_idx",
+        "platform_legacy_pipeline_runs_cursor_idx",
+        "platform_legacy_quality_rules_cursor_idx",
+        "platform_legacy_quality_results_cursor_idx",
+        "platform_legacy_context_candidates_cursor_idx",
+        "platform_legacy_writeback_requests_cursor_idx",
+        "platform_legacy_writeback_events_cursor_idx",
+        "CHECK (jsonb_typeof(schema_json) = 'object')",
+        "CHECK (jsonb_typeof(check_json) = 'object')",
+        "CHECK (jsonb_typeof(blocked_reasons_json) = 'array')",
+        "CHECK (execution_result_json IS NULL OR jsonb_typeof(execution_result_json) = 'object')",
+        "CREATE OR REPLACE FUNCTION odf.enforce_platform_legacy_pipeline_run_initial_state()",
+        "CREATE OR REPLACE FUNCTION odf.enforce_platform_legacy_candidate_initial_state()",
+        "CREATE OR REPLACE FUNCTION odf.enforce_platform_legacy_writeback_initial_state()",
+        "CREATE OR REPLACE FUNCTION odf.enforce_platform_legacy_independent_writeback_approval()",
+        "CREATE OR REPLACE FUNCTION odf.enforce_platform_legacy_writeback_transition()",
+        "state IN ('draft', 'pending_approval', 'approved', 'executing', 'succeeded', 'failed', 'cancelled')",
+        "NEW.state NOT IN ('draft', 'pending_approval', 'cancelled')",
+        "(OLD.state = 'draft' AND NEW.state IN ('pending_approval', 'cancelled'))",
+        "platform_legacy_writeback_requires_approval",
+        "SET row_security = on",
+        "SET search_path = pg_catalog, odf, pg_temp",
+        "SECURITY DEFINER",
+        "OWNER TO odf_platform_search_projection_owner",
+        "'legacy:' || NEW",
+        "'legacy:' || OLD",
+        "GRANT USAGE, SELECT ON SEQUENCE odf.platform_legacy_quality_results_result_id_seq",
+    ]:
+        require(guardrail in legacy_compatibility, f"missing legacy compatibility guardrail: {guardrail}")
+    for trigger, event, table, function in [
+        ("platform_legacy_pipeline_runs_initial_state", "BEFORE INSERT", "platform_legacy_pipeline_runs", "enforce_platform_legacy_pipeline_run_initial_state"),
+        ("platform_legacy_context_candidates_initial_state", "BEFORE INSERT", "platform_legacy_context_candidates", "enforce_platform_legacy_candidate_initial_state"),
+        ("platform_legacy_writeback_requests_initial_state", "BEFORE INSERT", "platform_legacy_writeback_requests", "enforce_platform_legacy_writeback_initial_state"),
+        ("platform_legacy_writeback_approvals_independent_actor", "BEFORE INSERT", "platform_legacy_writeback_approvals", "enforce_platform_legacy_independent_writeback_approval"),
+        ("platform_legacy_pipeline_runs_transition", "BEFORE UPDATE", "platform_legacy_pipeline_runs", "enforce_platform_legacy_pipeline_run_transition"),
+        ("platform_legacy_context_candidates_transition", "BEFORE UPDATE", "platform_legacy_context_candidates", "enforce_platform_legacy_candidate_transition"),
+        ("platform_legacy_writeback_requests_transition", "BEFORE UPDATE", "platform_legacy_writeback_requests", "enforce_platform_legacy_writeback_transition"),
+        ("platform_legacy_model_versions_search_projection", "AFTER INSERT OR UPDATE OR DELETE", "platform_legacy_model_versions", "sync_platform_legacy_search_index"),
+        ("platform_legacy_pipelines_search_projection", "AFTER INSERT OR UPDATE OR DELETE", "platform_legacy_pipelines", "sync_platform_legacy_search_index"),
+        ("platform_legacy_quality_rules_search_projection", "AFTER INSERT OR UPDATE OR DELETE", "platform_legacy_quality_rules", "sync_platform_legacy_search_index"),
+        ("platform_legacy_context_candidates_search_projection", "AFTER INSERT OR UPDATE OR DELETE", "platform_legacy_context_candidates", "sync_platform_legacy_search_index"),
+        ("platform_legacy_writeback_requests_search_projection", "AFTER INSERT OR UPDATE OR DELETE", "platform_legacy_writeback_requests", "sync_platform_legacy_search_index"),
+    ]:
+        require(
+            re.search(
+                rf"CREATE TRIGGER {trigger}\s+{event} ON odf\.{table}\s+"
+                rf"FOR EACH ROW EXECUTE FUNCTION odf\.{function}\(\);",
+                legacy_compatibility,
+                re.DOTALL,
+            )
+            is not None,
+            f"legacy compatibility lifecycle/projection trigger is missing or detached: {trigger}",
+        )
+    require(
+        re.search(r"GRANT\s+[^;]*(?:\bDELETE\b|\bALL(?:\s+PRIVILEGES)?\b)[^;]*\s+TO\s+odf_app\s*;", legacy_compatibility, re.DOTALL)
+        is None,
+        "legacy compatibility tables must not grant DELETE or ALL privileges to odf_app",
+    )
+
 
 def validate_tenant_foreign_keys(sql: str) -> None:
     """Catch scope-breaking composite FKs before a migration reaches PostgreSQL.
@@ -356,6 +460,22 @@ def validate_tenant_foreign_keys(sql: str) -> None:
 
 def validate_runtime_artifacts() -> None:
     validate_build_context()
+
+    migration_runner = read(ROOT / "infra" / "postgres" / "scripts" / "migrate.sh")
+    for guardrail in [
+        "SELECT pg_advisory_lock(hashtextextended('odf:postgres:migrations', 0));",
+        "SELECT to_regclass('odf.schema_migrations') IS NOT NULL AS odf_migration_registry_exists \\gset",
+        "AS odf_migration_already_applied \\gset",
+        "\\set odf_migration_already_applied false",
+        "\\if :odf_migration_already_applied",
+        "\\i $migration",
+        "SELECT pg_advisory_unlock(hashtextextended('odf:postgres:migrations', 0));",
+    ]:
+        require(guardrail in migration_runner, f"migration runner missing concurrent-migrator guardrail: {guardrail}")
+    require(
+        "--file=\"$migration\"" not in migration_runner,
+        "migration runner must not check a version in one session then apply it in another",
+    )
 
     compose = read(ROOT / "docker-compose.yml")
     for service in ["odf-postgres:", "odf-redis:", "outbox-worker:", "otel-collector:", "prometheus:", "grafana:"]:
@@ -502,6 +622,10 @@ def validate_runtime_artifacts() -> None:
         "/api/v1/platform/tenants?limit=100",
         "/projects?limit=100",
         "authenticated PostgreSQL tenant discovery",
+        "ci-compat-model",
+        "ci-compat-pipeline",
+        "cross-replica PostgreSQL compatibility pipeline run was not durably idempotent",
+        "shared PostgreSQL search projection did not index compatibility records",
         "/api/v1/ingest/bundle",
         "ci-industrial-run-1",
         "cross-replica PostgreSQL ingest was not idempotent",

@@ -14,10 +14,29 @@ export interface OutboxEvent {
   attemptCount: number;
 }
 
+export interface OutboxOperationalSnapshot {
+  pendingEvents: number;
+  deadLetteredEvents: number;
+  oldestPendingAgeSeconds: number;
+}
+
+export interface DeadLetteredOutboxEvent {
+  eventId: string;
+  aggregateType: string;
+  aggregateId: string;
+  eventType: string;
+  correlationId: string;
+  occurredAt: string;
+  attemptCount: number;
+  lastError: string;
+}
+
 export interface OutboxRepository {
   claim(batchSize: number, workerId: string, leaseMilliseconds: number): Promise<OutboxEvent[]>;
   markPublished(eventId: string, workerId: string): Promise<void>;
   release(eventId: string, workerId: string, error: string, delayMilliseconds: number): Promise<void>;
+  deadLetter(eventId: string, workerId: string, error: string): Promise<void>;
+  operationalSnapshot(): Promise<OutboxOperationalSnapshot>;
 }
 
 export interface SharedEventPublisher {

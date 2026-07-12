@@ -138,6 +138,93 @@ if (projects.items.length !== 1 || projects.items[0].tenantId !== process.argv[3
 }
 ' "${tmp_dir}/tenants.json" "${tmp_dir}/projects.json" "$tenant_id" "$project_id"
 
+# Prove the public compatibility catalog is genuinely PostgreSQL-backed. API
+# A writes the model/pipeline/run while API B reads both records and the shared
+# search projection. A local SQLite fallback could not make that replica read
+# or the durable idempotency replay succeed.
+compat_model_status="$(curl --silent --show-error --output "${tmp_dir}/compat-model.json" --write-out '%{http_code}' \
+  -X POST "${api_base}/api/v1/platform/data-models/ci-compat-model/versions" \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  -H 'x-correlation-id: 15151515-1515-4151-8151-151515151515' \
+  -H 'content-type: application/json' \
+  --data '{"name":"CI compatibility model","schema":{"type":"object","properties":{"tag":{"type":"string"}}},"status":"published"}')"
+if [ "$compat_model_status" != "201" ]; then
+  echo "Expected PostgreSQL compatibility model creation to return 201, received ${compat_model_status}" >&2
+  exit 1
+fi
+
+compat_pipeline_status="$(curl --silent --show-error --output "${tmp_dir}/compat-pipeline.json" --write-out '%{http_code}' \
+  -X POST "${api_base}/api/v1/platform/pipelines" \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  -H 'x-correlation-id: 16161616-1616-4161-8161-161616161616' \
+  -H 'content-type: application/json' \
+  --data '{"id":"ci-compat-pipeline","name":"CI compatibility pipeline","sourceId":"ci-opcua","definition":{"purpose":"production-like compatibility smoke"},"enabled":true}')"
+if [ "$compat_pipeline_status" != "201" ]; then
+  echo "Expected PostgreSQL compatibility pipeline creation to return 201, received ${compat_pipeline_status}" >&2
+  exit 1
+fi
+
+compat_run_status="$(curl --silent --show-error --output "${tmp_dir}/compat-run-first.json" --write-out '%{http_code}' \
+  -X POST "${api_base}/api/v1/platform/pipelines/ci-compat-pipeline/runs" \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  -H 'x-correlation-id: 17171717-1717-4171-8171-171717171717' \
+  -H 'content-type: application/json' \
+  --data '{"idempotencyKey":"ci-compat-run-1","input":{"tag":"CI-COMPAT"}}')"
+if [ "$compat_run_status" != "201" ]; then
+  echo "Expected PostgreSQL compatibility pipeline run to return 201, received ${compat_run_status}" >&2
+  exit 1
+fi
+
+compat_retry_status="$(curl --silent --show-error --output "${tmp_dir}/compat-run-retry.json" --write-out '%{http_code}' \
+  -X POST "${replica_base}/api/v1/platform/pipelines/ci-compat-pipeline/runs" \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  -H 'x-correlation-id: 18181818-1818-4181-8181-181818181818' \
+  -H 'content-type: application/json' \
+  --data '{"idempotencyKey":"ci-compat-run-1","input":{"tag":"CI-COMPAT"}}')"
+if [ "$compat_retry_status" != "200" ]; then
+  echo "Expected cross-replica PostgreSQL compatibility idempotency replay to return 200, received ${compat_retry_status}" >&2
+  exit 1
+fi
+
+curl --fail --silent --show-error \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  "${replica_base}/api/v1/platform/data-models?limit=100" >"${tmp_dir}/compat-models.json"
+curl --fail --silent --show-error \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  "${replica_base}/api/v1/platform/pipelines?limit=100" >"${tmp_dir}/compat-pipelines.json"
+curl --fail --silent --show-error \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  "${replica_base}/api/v1/platform/search?q=compatibility&limit=100" >"${tmp_dir}/compat-search.json"
+node -e '
+const fs = require("node:fs");
+const model = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const pipeline = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const first = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const retry = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
+const models = JSON.parse(fs.readFileSync(process.argv[5], "utf8"));
+const pipelines = JSON.parse(fs.readFileSync(process.argv[6], "utf8"));
+const search = JSON.parse(fs.readFileSync(process.argv[7], "utf8"));
+if (model.id !== "ci-compat-model" || model.version !== 1 || model.status !== "published") {
+  throw new Error("PostgreSQL compatibility model response is invalid");
+}
+if (pipeline.id !== "ci-compat-pipeline" || pipeline.sourceId !== "ci-opcua") {
+  throw new Error("PostgreSQL compatibility pipeline response is invalid");
+}
+if (first.status !== "completed" || first.replayed !== false || retry.replayed !== true || retry.id !== first.id) {
+  throw new Error("cross-replica PostgreSQL compatibility pipeline run was not durably idempotent");
+}
+if (!models.items?.some((item) => item.id === "ci-compat-model" && item.version === 1)
+    || !pipelines.items?.some((item) => item.id === "ci-compat-pipeline")) {
+  throw new Error("replica did not read PostgreSQL compatibility catalog records");
+}
+if (!search.items?.some((item) => item.entityType === "dataModel" && item.entityId === "ci-compat-model@1")
+    || !search.items?.some((item) => item.entityType === "pipeline" && item.entityId === "ci-compat-pipeline")) {
+  throw new Error("shared PostgreSQL search projection did not index compatibility records");
+}
+' "${tmp_dir}/compat-model.json" "${tmp_dir}/compat-pipeline.json" \
+  "${tmp_dir}/compat-run-first.json" "${tmp_dir}/compat-run-retry.json" \
+  "${tmp_dir}/compat-models.json" "${tmp_dir}/compat-pipelines.json" "${tmp_dir}/compat-search.json"
+
 # A clean real project must be able to create its first Canvas without demo
 # seed data or operator SQL. This crosses the workspace/scope RLS boundary only
 # through the governed owner-only PostgreSQL function.

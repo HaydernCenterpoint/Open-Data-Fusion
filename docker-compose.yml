@@ -145,8 +145,13 @@ services:
       ODF_OUTBOX_BATCH_SIZE: "${ODF_OUTBOX_BATCH_SIZE:-50}"
       ODF_OUTBOX_LEASE_MS: "${ODF_OUTBOX_LEASE_MS:-30000}"
       ODF_OUTBOX_POLL_MS: "${ODF_OUTBOX_POLL_MS:-1000}"
+      ODF_OUTBOX_MAX_ATTEMPTS: "${ODF_OUTBOX_MAX_ATTEMPTS:-12}"
+      ODF_OUTBOX_MAX_RETRY_DELAY_MS: "${ODF_OUTBOX_MAX_RETRY_DELAY_MS:-300000}"
+      ODF_OUTBOX_METRICS_PORT: "9465"
       ODF_OUTBOX_HEALTH_FILE: /tmp/odf-outbox-health.json
       ODF_OUTBOX_HEALTH_MAX_AGE_MS: "${ODF_OUTBOX_HEALTH_MAX_AGE_MS:-30000}"
+    expose:
+      - "9465"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -228,6 +233,15 @@ services:
       retries: 3
       start_period: 15s
 
+  otel-storage-init:
+    image: alpine:3.21.3
+    profiles: ["observability"]
+    restart: "no"
+    network_mode: none
+    command: ["sh", "-ec", "chown 10001:10001 /var/lib/otel && chmod 0700 /var/lib/otel"]
+    volumes:
+      - odf-otel-data:/var/lib/otel
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.121.0
     profiles: ["observability"]
@@ -235,11 +249,14 @@ services:
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ./infra/observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - odf-otel-data:/var/lib/otel
     ports:
       - "127.0.0.1:${ODF_OTLP_GRPC_PORT:-4317}:4317"
       - "127.0.0.1:${ODF_OTLP_HTTP_PORT:-4318}:4318"
       - "127.0.0.1:${ODF_OTEL_METRICS_PORT:-9464}:9464"
     depends_on:
+      otel-storage-init:
+        condition: service_completed_successfully
       odf-postgres:
         condition: service_healthy
       odf-redis:
@@ -256,6 +273,7 @@ services:
     volumes:
       - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./infra/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./infra/observability/slo.yml:/etc/prometheus/slo.yml:ro
       - odf-prometheus-data:/prometheus
     secrets:
       - odf_metrics_token
@@ -287,6 +305,7 @@ volumes:
   odf-redis-data:
   odf-api-preview-data:
   odf-edge-data:
+  odf-otel-data:
   odf-prometheus-data:
   odf-grafana-data:
 

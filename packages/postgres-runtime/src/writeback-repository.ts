@@ -62,27 +62,53 @@ export class PostgresWritebackRepository extends PolicyAwareRepository implement
   async createWritebackRequest(scope: ProjectScope, input: CreateWritebackRequestInput): Promise<WritebackRequestRecord> {
     requiredText(input.correlationId, "correlationId");
     return this.write(scope, async (transaction) => {
+      const blockedReasons = [...(input.blockedReasons ?? [])];
+      const initialState = blockedReasons.length > 0 ? "draft" : "pending_approval";
       const inserted = await transaction.query({
         text: [
           "INSERT INTO odf.writeback_requests",
           "  (writeback_request_id, tenant_id, project_id, source_connection_id, target_instance_id, target_external_id, operation, payload, risk, state, requested_by, dry_run_result)",
-          "VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8::jsonb, $9, 'pending_approval', $10, $11::jsonb)",
+          "VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8::jsonb, $9, $10, $11, $12::jsonb)",
           "ON CONFLICT (tenant_id, project_id, writeback_request_id) DO NOTHING",
           "RETURNING " + WRITEBACK_REQUEST_COLUMNS,
         ].join("\n"),
         values: [
           input.writebackRequestId, scope.tenantId, scope.projectId, input.sourceConnectionId, input.targetInstanceId ?? null,
-          input.targetExternalId, input.operation, json(input.payload), input.risk, scope.userId,
+          input.targetExternalId, input.operation, json(input.payload), input.risk, initialState, scope.userId,
           input.dryRunResult === undefined || input.dryRunResult === null ? null : json(input.dryRunResult),
         ],
       });
       const row = inserted.rows[0];
       if (row) {
-        const request = writebackRequestFromRow(row);
+        let request = writebackRequestFromRow(row);
+        if (blockedReasons.length > 0) {
+          const cancelled = await transaction.query({
+            text: [
+              "UPDATE odf.writeback_requests",
+              "SET state = 'cancelled', updated_at = now()",
+              "WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND writeback_request_id = $3::uuid AND state = 'draft'",
+              "RETURNING " + WRITEBACK_REQUEST_COLUMNS,
+            ].join("\n"),
+            values: [scope.tenantId, scope.projectId, input.writebackRequestId],
+          });
+          const cancelledRow = cancelled.rows[0];
+          if (!cancelledRow) throw new ConflictError("Blocked write-back request could not be cancelled");
+          request = writebackRequestFromRow(cancelledRow);
+        }
         await appendPlatformAuditAndOutbox(transaction, {
-          actor: scope.userId, action: "platform.writeback_request_created", entityType: "writebackRequest", entityId: request.writebackRequestId,
+          actor: scope.userId,
+          action: blockedReasons.length > 0 ? "platform.writeback_request_blocked" : "platform.writeback_request_created",
+          entityType: "writebackRequest", entityId: request.writebackRequestId,
           tenantId: scope.tenantId, projectId: scope.projectId, correlationId: input.correlationId,
-          details: { sourceConnectionId: request.sourceConnectionId, targetExternalId: request.targetExternalId, operation: request.operation, risk: request.risk, state: request.state },
+          details: {
+            sourceConnectionId: request.sourceConnectionId,
+            targetExternalId: request.targetExternalId,
+            operation: request.operation,
+            risk: request.risk,
+            state: request.state,
+            ...(input.legacyId ? { legacyId: input.legacyId } : {}),
+            ...(blockedReasons.length > 0 ? { blockedReasons } : {}),
+          },
         });
         return request;
       }
@@ -235,7 +261,11 @@ export class PostgresWritebackRepository extends PolicyAwareRepository implement
       await appendPlatformAuditAndOutbox(transaction, {
         actor: scope.userId, action: "platform.writeback_execution_" + nextState, entityType: "writebackRequest", entityId: request.writebackRequestId,
         tenantId: scope.tenantId, projectId: scope.projectId, correlationId: input.correlationId,
-        details: { state: request.state, executedAt: request.executedAt },
+        details: {
+          state: request.state,
+          executedAt: request.executedAt,
+          ...(input.executionResult === undefined ? {} : { executionResult: input.executionResult }),
+        },
       });
       return request;
     });

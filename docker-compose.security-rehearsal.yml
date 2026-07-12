@@ -1,0 +1,34 @@
+# Local validation overlay for the connector-facing mTLS ingress contract.
+# It assumes docker-compose.yml + docker-compose.production-like.yml and binds
+# only to loopback. Production publishes through its managed load balancer.
+services:
+  odf-mtls-gateway:
+    image: "${ODF_ENVOY_IMAGE:?Set ODF_ENVOY_IMAGE to an approved Envoy image pinned by digest}"
+    profiles: ["security-rehearsal"]
+    restart: unless-stopped
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    volumes:
+      - ./infra/security/envoy-connector-mtls.yaml:/etc/envoy/envoy.yaml:ro
+    secrets:
+      - odf_ingress_tls_cert
+      - odf_ingress_tls_key
+      - odf_ingress_client_ca
+    ports:
+      - "127.0.0.1:${ODF_CONNECTOR_MTLS_PORT:-9443}:9443"
+    depends_on:
+      api:
+        condition: service_healthy
+
+secrets:
+  odf_ingress_tls_cert:
+    file: "${ODF_INGRESS_TLS_CERT_FILE:?Set ODF_INGRESS_TLS_CERT_FILE}"
+  odf_ingress_tls_key:
+    file: "${ODF_INGRESS_TLS_KEY_FILE:?Set ODF_INGRESS_TLS_KEY_FILE}"
+  odf_ingress_client_ca:
+    file: "${ODF_INGRESS_CLIENT_CA_FILE:?Set ODF_INGRESS_CLIENT_CA_FILE}"

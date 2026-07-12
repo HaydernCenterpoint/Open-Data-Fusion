@@ -13,6 +13,8 @@ import { PostgresModelRepository } from "./model-repository.js";
 import { PostgresPipelineQualityRepository } from "./pipeline-quality-repository.js";
 import { PostgresSearchRepository } from "./search-repository.js";
 import { PostgresWritebackRepository } from "./writeback-repository.js";
+import { PostgresTenantProjectAdministrationRepository } from "./administration-repository.js";
+import { PostgresAdvancedPlatformRepository } from "./advanced-platform-repository.js";
 import { FailClosedProjectAccessResolver } from "./platform-support.js";
 import type { ProjectAccessResolver } from "./platform-types.js";
 import type {
@@ -69,6 +71,8 @@ export class PostgresRuntime implements TransactionRunner {
   readonly pipelines: PostgresPipelineQualityRepository;
   readonly search: PostgresSearchRepository;
   readonly writeback: PostgresWritebackRepository;
+  readonly administration: PostgresTenantProjectAdministrationRepository;
+  readonly advanced: PostgresAdvancedPlatformRepository;
 
   constructor(
     private readonly pool: RuntimePool,
@@ -87,6 +91,8 @@ export class PostgresRuntime implements TransactionRunner {
     this.pipelines = new PostgresPipelineQualityRepository(this, policy);
     this.search = new PostgresSearchRepository(this, policy);
     this.writeback = new PostgresWritebackRepository(this, policy);
+    this.administration = new PostgresTenantProjectAdministrationRepository(this);
+    this.advanced = new PostgresAdvancedPlatformRepository(this, policy);
   }
 
   static connect(options: PostgresRuntimeOptions, dependencies: PostgresRuntimeDependencies = {}): PostgresRuntime {
@@ -191,6 +197,7 @@ export class PostgresRuntime implements TransactionRunner {
           "    AND NOT pg_has_role(current_user, 'odf_tenant_provisioner', 'member')",
           "    AND NOT pg_has_role(current_user, 'odf_project_discovery_owner', 'member')",
           "    AND NOT pg_has_role(current_user, 'odf_workspace_bootstrap_owner', 'member')",
+          "    AND NOT pg_has_role(current_user, 'odf_tenant_project_admin_owner', 'member')",
           "    AND NOT has_table_privilege(current_user, 'odf.workspace_scopes', 'INSERT, UPDATE, DELETE')",
           "    AND NOT has_table_privilege(current_user, 'odf.outbox_events', 'UPDATE, DELETE, TRUNCATE')",
           "  ) AS api_principal_attested",

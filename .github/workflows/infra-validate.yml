@@ -37,9 +37,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Validate migration manifest and static infrastructure invariants
-        run: python3 infra/postgres/scripts/validate_static.py
+        run: |
+          python3 infra/postgres/scripts/validate_static.py
+          python3 infra/ci/validate-production-gates.py
+          bash -n infra/ci/postgres-backup-restore-rehearsal.sh
+          bash -n infra/security/generate-rehearsal-pki.sh
+          bash infra/security/generate-rehearsal-pki.sh "$RUNNER_TEMP/odf-rehearsal-pki"
       - name: Validate production compose syntax
         run: docker compose -f docker-compose.yml config --quiet
+      - name: Validate Prometheus and OpenTelemetry configuration
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/infra/observability:/etc/prometheus:ro" \
+            prom/prometheus:v3.3.0 check config /etc/prometheus/prometheus.yml
+          docker run --rm \
+            -v "$PWD/infra/observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+            otel/opentelemetry-collector-contrib:0.121.0 validate --config=/etc/otelcol-contrib/config.yaml
       - name: Validate local identity compose syntax
         run: docker compose -f docker-compose.identity.yml config --quiet
 

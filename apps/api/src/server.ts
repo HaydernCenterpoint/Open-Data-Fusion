@@ -11,6 +11,18 @@ import { WorkspaceEventHub } from './collaboration.js';
 import { FusionDatabase } from './database.js';
 import type { IndustrialPersistence } from './industrial-persistence.js';
 import { createS3BlobStoreFromEnvironment, type ImmutableBlobStore } from './object-storage.js';
+import {
+  PostgresPlatformAdministrationPersistence,
+  type PlatformAdministrationPersistence,
+} from './platform-administration.js';
+import {
+  PostgresPlatformDataStore,
+  type PostgresPlatformDataPersistence,
+} from './postgres-platform-data.js';
+import {
+  PostgresPlatformCompatibilityStore,
+  type PostgresPlatformCompatibilityPersistence,
+} from './postgres-platform-compatibility.js';
 import { PostgresPlatformDiscoveryPersistence, type PlatformDiscoveryPersistence } from './platform-discovery.js';
 import { PostgresIndustrialPersistence } from './postgres-industrial-persistence.js';
 import { PostgresWorkspacePersistence } from './postgres-workspace-persistence.js';
@@ -90,6 +102,7 @@ const objectStorageTemporaryPath = configuredPath(
   process.env.ODF_OBJECT_STORAGE_TEMP_PATH,
   defaultObjectStorageTemporaryPath,
 );
+const writebackPolicy = writebackPolicyFromEnvironment();
 
 async function assertSharedObjectMetadataReady(runtime: PostgresRuntime): Promise<void> {
   const result = await runtime.withTransaction({
@@ -129,6 +142,9 @@ async function assertSharedObjectMetadataReady(runtime: PostgresRuntime): Promis
 let workspacePersistence: PostgresWorkspacePersistence | undefined;
 let industrialPersistence: IndustrialPersistence;
 let platformDiscovery: PlatformDiscoveryPersistence | undefined;
+let platformAdministration: PlatformAdministrationPersistence | undefined;
+let platformDataPersistence: PostgresPlatformDataPersistence | undefined;
+let platformCompatibilityPersistence: PostgresPlatformCompatibilityPersistence | undefined;
 let postgresRuntime: PostgresRuntime | undefined;
 let sharedBlobStore: ImmutableBlobStore | undefined;
 if (dataPersistenceMode === 'postgres') {
@@ -157,6 +173,30 @@ if (dataPersistenceMode === 'postgres') {
     throw error;
   }
   platformDiscovery = postgresPlatformDiscovery;
+  const postgresPlatformAdministration = new PostgresPlatformAdministrationPersistence(postgresRuntime);
+  try {
+    await postgresPlatformAdministration.assertReady();
+  } catch (error) {
+    await postgresRuntime.close();
+    throw error;
+  }
+  platformAdministration = postgresPlatformAdministration;
+  const postgresPlatformData = new PostgresPlatformDataStore(postgresRuntime);
+  try {
+    await postgresPlatformData.assertReady();
+  } catch (error) {
+    await postgresRuntime.close();
+    throw error;
+  }
+  platformDataPersistence = postgresPlatformData;
+  const postgresPlatformCompatibility = new PostgresPlatformCompatibilityStore(postgresRuntime, writebackPolicy);
+  try {
+    await postgresPlatformCompatibility.assertReady();
+  } catch (error) {
+    await postgresRuntime.close();
+    throw error;
+  }
+  platformCompatibilityPersistence = postgresPlatformCompatibility;
   sharedBlobStore = createS3BlobStoreFromEnvironment();
   const objectStorageHealth = await sharedBlobStore.health();
   if (objectStorageHealth.status !== 'ok') {
@@ -189,7 +229,7 @@ if (sharedEventsRequired && sharedEventDelivery.mode !== 'redis') {
 const eventHub = new WorkspaceEventHub(sharedEventDelivery);
 const app = createApp(database, eventHub, {
   identityProvider,
-  writebackPolicy: writebackPolicyFromEnvironment(),
+  writebackPolicy,
   objectStoreMaxBytes,
   ...(dataPersistenceMode === 'sqlite' ? {
     rawLandingDirectory: configuredPath(process.env.ODF_RAW_LANDING_PATH, defaultRawLandingPath),
@@ -202,6 +242,9 @@ const app = createApp(database, eventHub, {
   ...(workspacePersistence ? { workspacePersistence } : {}),
   industrialPersistence,
   ...(platformDiscovery ? { platformDiscovery } : {}),
+  ...(platformAdministration ? { platformAdministration } : {}),
+  ...(platformDataPersistence ? { platformDataPersistence } : {}),
+  ...(platformCompatibilityPersistence ? { platformCompatibilityPersistence } : {}),
   sharedEventsRequired,
   ...(metricsToken ? { metricsToken } : {}),
 });

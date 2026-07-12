@@ -36,6 +36,15 @@ import {
   SqlitePlatformDiscoveryPersistence,
   type PlatformDiscoveryPersistence,
 } from './platform-discovery.js';
+import type { PlatformAdministrationPersistence } from './platform-administration.js';
+import {
+  registerPostgresPlatformDataRoutes,
+} from './postgres-platform-data-routes.js';
+import type { PostgresPlatformDataPersistence } from './postgres-platform-data.js';
+import {
+  registerPostgresPlatformCompatibilityRoutes,
+} from './postgres-platform-compatibility-routes.js';
+import type { PostgresPlatformCompatibilityPersistence } from './postgres-platform-compatibility.js';
 import { registerPlatformRoutes } from './platform-routes.js';
 import { cursorListQuerySchema, platformContextSchema, platformIdSchema, type PlatformContext } from './platform-schemas.js';
 import { PlatformCatalog } from './platform.js';
@@ -256,6 +265,12 @@ export interface CreateAppOptions {
   industrialPersistence?: IndustrialPersistence;
   /** Tenant/project discovery selected with the process data backend. */
   platformDiscovery?: PlatformDiscoveryPersistence;
+  /** PostgreSQL governed tenant/project and membership administration. */
+  platformAdministration?: PlatformAdministrationPersistence;
+  /** PostgreSQL-backed remaining platform catalog and advanced data routes. */
+  platformDataPersistence?: PostgresPlatformDataPersistence;
+  /** PostgreSQL compatibility persistence for the remaining public v1 platform contracts. */
+  platformCompatibilityPersistence?: PostgresPlatformCompatibilityPersistence;
   /** Explicit convenience scope for tests or a single-project embedded deployment. */
   defaultPlatformContext?: PlatformContext;
   /** Redis delivery must remain healthy for this API instance to be ready. */
@@ -498,9 +513,30 @@ export function createApp(
     response.json(await industrialPersistence.listAudit(scope, query));
   });
 
-  registerPlatformRoutes(app, platformCatalog, identityProvider, platformDiscovery);
+  const postgresPlatformMode = industrialPersistence.mode === 'postgres' || platformDiscovery.mode === 'postgres';
+  if (options.platformCompatibilityPersistence) {
+    registerPostgresPlatformCompatibilityRoutes(
+      app,
+      options.platformCompatibilityPersistence,
+      identityProvider,
+      options.writebackExecutor ? { writebackExecutor: options.writebackExecutor } : {},
+    );
+  }
+  if (options.platformDataPersistence) {
+    registerPostgresPlatformDataRoutes(app, options.platformDataPersistence, identityProvider);
+  }
+  registerPlatformRoutes(
+    app,
+    platformCatalog,
+    identityProvider,
+    platformDiscovery,
+    options.platformAdministration,
+    postgresPlatformMode,
+  );
   registerAdvancedPlatformRoutes(app, platformCatalog, advancedPlatformCatalog, identityProvider, {
     ...(options.writebackExecutor ? { writebackExecutor: options.writebackExecutor } : {}),
+    ...(options.platformAdministration ? { platformAdministration: options.platformAdministration } : {}),
+    postgresMode: postgresPlatformMode,
   });
 
   app.get('/api/v1/platform/ingestion/raw', async (request, response) => {

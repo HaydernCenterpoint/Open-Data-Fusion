@@ -9,3 +9,59 @@ groups:
         annotations:
           summary: Open Data Fusion telemetry collector is unreachable
           runbook: Investigate the collector deployment, OTLP client errors, and network policy before relying on observability data.
+      - alert: OdfOutboxWorkerDown
+        expr: up{job="open-data-fusion-outbox"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Open Data Fusion outbox worker metrics endpoint is unreachable
+          runbook: docs/operations/outbox-dead-letter-recovery.md
+      - alert: OdfOutboxDeadLettersPresent
+        expr: odf_outbox_dead_letter_events > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: One or more ordered outbox aggregates are blocked by a dead-letter event
+          runbook: docs/operations/outbox-dead-letter-recovery.md
+      - alert: OdfOutboxBacklogStale
+        expr: odf_outbox_oldest_pending_age_seconds > 300
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: The oldest deliverable outbox event has exceeded the five-minute SLO
+          runbook: docs/operations/outbox-dead-letter-recovery.md
+      - alert: OdfOutboxBrokerUnavailable
+        expr: odf_outbox_redis_ready == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The outbox publisher cannot reach its Redis Streams broker
+          runbook: docs/operations/outbox-dead-letter-recovery.md
+      - alert: OdfApiAvailabilityFastBurn
+        expr: odf:api_http_error_ratio:ratio_5m > 0.014 and odf:api_http_error_ratio:ratio_1h > 0.014
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: API is consuming the 99.9% availability error budget at more than 14x
+          runbook: docs/operations/observability-slos.md
+      - alert: OdfApiAvailabilitySlowBurn
+        expr: odf:api_http_error_ratio:ratio_30m > 0.006 and odf:api_http_error_ratio:ratio_6h > 0.006
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: API is consuming the 99.9% availability error budget at more than 6x
+          runbook: docs/operations/observability-slos.md
+      - alert: OdfApiLatencyP95High
+        expr: odf:api_http_latency_p95_seconds:5m > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: API p95 latency has exceeded one second
+          runbook: docs/operations/observability-slos.md

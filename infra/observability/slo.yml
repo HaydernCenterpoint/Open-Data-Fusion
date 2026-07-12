@@ -1,0 +1,41 @@
+groups:
+  - name: open-data-fusion-slo-recording
+    interval: 30s
+    rules:
+      - record: odf:api_http_error_ratio:ratio_5m
+        expr: |
+          sum(rate(odf_api_http_requests_total{status_class="5xx"}[5m]))
+          /
+          clamp_min(sum(rate(odf_api_http_requests_total[5m])), 0.000001)
+      - record: odf:api_http_error_ratio:ratio_1h
+        expr: |
+          sum(rate(odf_api_http_requests_total{status_class="5xx"}[1h]))
+          /
+          clamp_min(sum(rate(odf_api_http_requests_total[1h])), 0.000001)
+      - record: odf:api_http_error_ratio:ratio_30m
+        expr: |
+          sum(rate(odf_api_http_requests_total{status_class="5xx"}[30m]))
+          /
+          clamp_min(sum(rate(odf_api_http_requests_total[30m])), 0.000001)
+      - record: odf:api_http_error_ratio:ratio_6h
+        expr: |
+          sum(rate(odf_api_http_requests_total{status_class="5xx"}[6h]))
+          /
+          clamp_min(sum(rate(odf_api_http_requests_total[6h])), 0.000001)
+      - record: odf:api_http_availability:ratio_5m
+        expr: 1 - odf:api_http_error_ratio:ratio_5m
+      - record: odf:api_http_latency_p95_seconds:5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(odf_api_http_request_duration_seconds_bucket[5m]))
+          )
+      - record: odf:outbox_publish_success:ratio_5m
+        expr: |
+          sum(rate(odf_outbox_events_published_total[5m]))
+          /
+          clamp_min(
+            sum(rate(odf_outbox_events_published_total[5m]))
+            + sum(rate(odf_outbox_publish_failures_total[5m])),
+            0.000001
+          )

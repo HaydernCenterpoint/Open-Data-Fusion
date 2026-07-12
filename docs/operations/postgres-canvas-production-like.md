@@ -1,18 +1,18 @@
-# PostgreSQL industrial-core and Canvas production-like validation runbook
+# PostgreSQL product-surface production-like validation runbook
 
 This runbook validates `ODF_DATA_PERSISTENCE=postgres` for the project-scoped
-industrial core (assets, telemetry, relations, audit, and bundle ingest) and
-Canvas with PostgreSQL, Redis Streams, Keycloak, two API instances, a private
-versioned S3-compatible reference store, and the outbox worker. It is a
-local/CI rehearsal only: services bind to loopback and Keycloak uses
-`start-dev`. PostgreSQL owns raw-landing/governed-object metadata while the
-reference bucket owns their bytes; remaining platform catalog and advanced
-product surfaces still retain local SQLite adapters. It is not an
-internet-facing production deployment.
+industrial core, Canvas, tenant/project administration, catalog compatibility,
+advanced product records, cross-surface search, and write-back records with
+PostgreSQL, Redis Streams, Keycloak, two API instances, a private versioned
+S3-compatible reference store, and the outbox worker. It is a local/CI
+rehearsal only: services bind to loopback and Keycloak uses `start-dev`.
+PostgreSQL owns raw-landing/governed-object metadata while the reference bucket
+owns their bytes. No PostgreSQL product route falls back to local SQLite. It is
+not an internet-facing production deployment.
 
-The API selects one authoritative industrial/Canvas backend. This profile does
-not dual-write authoritative industrial/Canvas state to SQLite and PostgreSQL,
-and `ODF_WORKSPACE_PERSISTENCE` cannot be set to a different value from
+The API selects one authoritative product backend. This profile does not
+dual-write authoritative state to SQLite and PostgreSQL, and
+`ODF_WORKSPACE_PERSISTENCE` cannot be set to a different value from
 `ODF_DATA_PERSISTENCE`.
 
 ## Preconditions and credential separation
@@ -96,30 +96,7 @@ npm run tenant:provision --workspace @open-data-fusion/api -- `
   --model-space-slug default --model-space-name "Default model space" `
   --provisioned-by local-platform-operator --apply
 
-# 5. Register an active source connection whose external_id exactly matches the
-#    ingest bundle's source.system. Run this as the odf_app login, under RLS.
-@'
-BEGIN;
-SELECT odf.set_tenant_context('8f45343a-bcd4-4f6f-9a77-50e385bb47c0'::uuid);
-SELECT set_config('odf.project_id', '14e09a33-e58f-4aaa-a66d-9ca86c040db1', true);
-INSERT INTO odf.source_connections (
-  source_connection_id, tenant_id, project_id, external_id, name,
-  connector_kind, state, endpoint, secret_ref, connector_config
-) VALUES (
-  '5ee92aa6-a412-459f-80c6-64ec32993bed'::uuid,
-  '8f45343a-bcd4-4f6f-9a77-50e385bb47c0'::uuid,
-  '14e09a33-e58f-4aaa-a66d-9ca86c040db1'::uuid,
-  'site-a-opcua', 'Site A OPC UA', 'opcua', 'ready',
-  'opc.tcp://opcua.site-a.example:4840',
-  'secret://open-data-fusion/site-a-opcua',
-  '{"readOnly":true}'::jsonb
-);
-COMMIT;
-'@ | docker compose -f docker-compose.yml -f docker-compose.production-like.yml `
-  --profile production-like exec -T odf-postgres `
-  psql "$env:ODF_API_POSTGRES_URL" --no-psqlrc --set=ON_ERROR_STOP=1
-
-# 6. Start Keycloak, two API replicas, and the outbox publisher.
+# 5. Start Keycloak, two API replicas, and the outbox publisher.
 npm run infra:production-like
 ```
 
@@ -152,14 +129,14 @@ useful for local UI/container work, but must not be mistaken for PostgreSQL
 validation. Both profiles start with `ODF_SEED=false`; real tenant/project and
 source data must be created or ingested explicitly.
 
-The two tenant/project GET discovery routes use PostgreSQL in this profile and
-return only active scopes where the authenticated identity has project
-membership. Tenant/project POST routes fail closed and require the controlled
-provisioning workflow. Other platform catalog routes remain SQLite-backed; in
-particular, posting a platform source/connector does not create an
-`odf.source_connections` row. PostgreSQL bundle ingest therefore requires the
-controlled source-registration transaction above (or an equivalent reviewed
-operator workflow) until that administration surface is cut over.
+The tenant/project discovery, governed administration, catalog compatibility,
+advanced product, search, and write-back routes use PostgreSQL in this profile
+and return only active scopes where the authenticated identity has project
+membership. Initial tenant bootstrap remains a controlled provisioning
+workflow. Project sources and connectors are created through the PostgreSQL
+platform API; creating a source creates the scoped source-connection record
+that bundle ingest resolves by `source.system`. Do not use a direct table write
+as a substitute for the API boundary.
 
 Tenant provisioning creates the active project owner and default model space;
 it does not manufacture a Canvas fixture. After authentication, that project
@@ -169,13 +146,14 @@ bootstrap behind a narrowly granted `SECURITY DEFINER` function and records
 revision 1, audit, and outbox evidence. Do not turn on `ODF_SEED` in this
 profile.
 
-## Validate the industrial-core and Canvas boundaries
+## Validate the PostgreSQL product boundaries
 
 1. Check both API instances return HTTP 200 from `/ready`. Confirm
    `industrialPersistence.mode` is `postgres`, the industrial and workspace
    health statuses are `ok`, `objectStorage.status` is `ok`, and required
    shared event delivery is healthy. The smoke then proves cross-replica raw
-   replay and governed-object range reads; see the
+   replay, governed-object range reads, and migration-gated product-surface
+   readiness; see the
    [shared object-storage runbook](shared-object-storage.md) for recovery and
    credential rotation.
 2. Obtain an OIDC token for the exact user ID provisioned as project owner. The
@@ -206,9 +184,28 @@ profile.
      -Headers $authHeaders
    ```
 
-   Tenant/project POST requests must fail closed in this profile; provisioning
-   remains the audited operational workflow.
-4. Create the first empty Canvas workspace through the first API instance:
+   Initial tenant creation must fail closed in this profile; provisioning
+   remains the audited operational workflow. Governed project and membership
+   administration is available only after that tenant bootstrap and requires
+   the appropriate `platform:admin` permission.
+4. Create the project's PostgreSQL source through the first API instance before
+   ingest. Its `id` must match the bundle's `source.system`:
+
+   ```powershell
+   $headers = @{
+     Authorization = "Bearer <OIDC-access-token>"
+     "x-odf-tenant-id" = "8f45343a-bcd4-4f6f-9a77-50e385bb47c0"
+     "x-odf-project-id" = "14e09a33-e58f-4aaa-a66d-9ca86c040db1"
+   }
+   $source = @{ id = "site-a-opcua"; name = "Site A OPC UA"; type = "opcua"; description = "Production OPC UA source" } |
+     ConvertTo-Json
+   Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:4310/api/v1/platform/sources" `
+     -Headers $headers -ContentType "application/json" -Body $source
+   ```
+
+   Expect HTTP 201. This proves the PostgreSQL catalog route, RLS scope, and
+   source-connection bridge; it does not prove connectivity to a plant endpoint.
+5. Create the first empty Canvas workspace through the first API instance:
 
    ```powershell
    $headers = @{
@@ -225,9 +222,8 @@ profile.
    Expect HTTP 201, version 1, an empty node/edge snapshot, and the caller as
    owner. Set `VITE_WORKSPACE_ID=site-a-operations` for the web deployment.
    Reusing the ID returns HTTP 409.
-5. Submit a complete source bundle through the first API instance. Its
-   `source.system` must match the active PostgreSQL source connection registered
-   during bootstrap:
+6. Submit a complete source bundle through the first API instance. Its
+   `source.system` must match the PostgreSQL source created in the prior step:
 
    ```powershell
    $headers = @{
@@ -271,28 +267,42 @@ profile.
      -Headers $headers
    ```
 
-6. Replay the exact bundle and expect HTTP 200 with
+7. Replay the exact bundle and expect HTTP 200 with
    `status: already_processed`. Change the payload while retaining the same
    `runId` and expect HTTP 409. Verify the original measurement is unchanged.
-7. Make a versioned Canvas update through `api` and hold an SSE connection to
+8. Make a versioned Canvas update through `api` and hold an SSE connection to
    the same workspace through `api-replica`. Verify the replica receives the
    committed `workspace.updated` event.
-8. Verify one matching `odf.outbox_events` row has `published_at` set and
+9. Verify one matching `odf.outbox_events` row has `published_at` set and
    Redis stream `odf:workspace-events` contains the event. Duplicate delivery
    is expected-safe; consumers deduplicate by event identifier/key and reload
    the durable workspace version when needed.
-9. Validate a stale Canvas version returns HTTP 409, a tenant/project scope
+10. Validate a stale Canvas version returns HTTP 409, a tenant/project scope
    mismatch returns HTTP 403/404 without disclosing industrial or Canvas data,
    the API role cannot bypass RLS, and the outbox role cannot alter application
    tables.
 
 The GitHub Actions `Production-like PostgreSQL Canvas integration and industrial data smoke` workflow
 currently automates readiness, OIDC, membership-scoped tenant/project
-discovery, active source registration, real bundle ingest, cross-replica
+discovery, PostgreSQL source registration, real bundle ingest, cross-replica
 idempotency and asset/telemetry read-back, scoped raw/audit evidence,
 wrong-scope denial, Canvas/outbox/SSE, and role-boundary checks against fresh
-containers. Run the environment-specific steps above as deployment rehearsal;
-CI is evidence for the checked-in topology, not a substitute for a pilot drill.
+containers. Migration/readiness gates for PostgreSQL administration,
+compatibility, advanced/search, and write-back records are part of API startup.
+Run the environment-specific steps above as deployment rehearsal; CI is
+evidence for the checked-in topology, not a substitute for a pilot drill.
+
+## Explicitly pending before a pilot
+
+- Validate CSV, JDBC/PostgreSQL, and OPC UA connectors against a design-partner
+  endpoint, including credential rotation, restart/resume, backfill volume,
+  schema evolution, and network failure behavior.
+- Rehearse deployment-specific ingress, TLS/mTLS, secret-manager integration,
+  network isolation, backup/restore, broker outage/dead-letter recovery, and
+  multi-instance load/concurrency behavior.
+- Do not treat a configured write-back policy or persisted PostgreSQL request
+  as permission to control equipment: validate the external executor and
+  safety review in the target operational environment.
 
 ## Failure response and recovery
 

@@ -219,7 +219,7 @@ describe("industrial and governance query boundaries", () => {
         correlation_id: "99999999-9999-9999-9999-999999999999",
         occurred_at: "2026-07-11T00:00:00.000Z",
       }]);
-      if (query.text.includes("WITH candidates AS")) return result([{
+      if (query.text.includes("FROM odf.platform_search_index")) return result([{
         entity_type: "asset",
         entity_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         title: "P-101",
@@ -236,7 +236,7 @@ describe("industrial and governance query boundaries", () => {
     await expect(runtime.search.search(scope, "pump", 10)).resolves.toMatchObject({ items: [{ entityType: "asset", title: "P-101" }] });
 
     const events = client.queries.find((entry) => entry.text.includes("FROM odf.audit_log"));
-    const search = client.queries.find((entry) => entry.text.includes("WITH candidates AS"));
+    const search = client.queries.find((entry) => entry.text.includes("FROM odf.platform_search_index"));
     expect(events?.text).not.toContain("writeback_events");
     expect(search?.text).toContain("tenant_id = $1::uuid AND project_id = $2::uuid");
     expect(search?.text).not.toContain("pump");

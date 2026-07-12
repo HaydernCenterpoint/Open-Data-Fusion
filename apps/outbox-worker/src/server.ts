@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import { loadEnvFile } from "node:process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { Pool } from "pg";
 import { createClient } from "redis";
@@ -9,6 +10,7 @@ import { OutboxPump } from "./outbox.js";
 import { OutboxHealthFile } from "./health.js";
 import { PostgresOutboxRepository } from "./postgres.js";
 import { RedisStreamPublisher } from "./redis.js";
+import { closeTelemetryServer, OutboxTelemetry, startOutboxTelemetryServer } from "./telemetry.js";
 
 try {
   loadEnvFile();
@@ -17,7 +19,10 @@ try {
 }
 
 function required(name: string): string {
-  const value = process.env[name]?.trim();
+  const literal = process.env[name]?.trim();
+  const file = process.env[`${name}_FILE`]?.trim();
+  if (literal && file) throw new Error(`${name} and ${name}_FILE cannot both be set`);
+  const value = file ? readFileSync(file, "utf8").trim() : literal;
   if (!value) throw new Error(`${name} is required`);
   return value;
 }
@@ -50,12 +55,17 @@ await redis.connect();
 
 const workerId = `${hostname()}:${process.pid}:${randomUUID()}`;
 const publisher = new RedisStreamPublisher(redis);
-const pump = new OutboxPump(new PostgresOutboxRepository(pool), publisher, {
+const repository = new PostgresOutboxRepository(pool);
+const pump = new OutboxPump(repository, publisher, {
   workerId,
   batchSize: positiveInteger("ODF_OUTBOX_BATCH_SIZE", 50),
   leaseMilliseconds: positiveInteger("ODF_OUTBOX_LEASE_MS", 30_000),
+  maximumRetryDelayMilliseconds: positiveInteger("ODF_OUTBOX_MAX_RETRY_DELAY_MS", 300_000),
+  maximumDeliveryAttempts: positiveInteger("ODF_OUTBOX_MAX_ATTEMPTS", 12),
 });
 const pollMilliseconds = positiveInteger("ODF_OUTBOX_POLL_MS", 1_000);
+const telemetry = new OutboxTelemetry();
+const telemetryServer = await startOutboxTelemetryServer(positiveInteger("ODF_OUTBOX_METRICS_PORT", 9_465), telemetry);
 let stopping = false;
 
 function delay(milliseconds: number): Promise<void> {
@@ -66,7 +76,7 @@ async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
   console.log(JSON.stringify({ level: "info", component: "outbox", message: "stopping", signal, workerId }));
-  await Promise.allSettled([publisher.close(), pool.end()]);
+  await Promise.allSettled([closeTelemetryServer(telemetryServer), publisher.close(), pool.end()]);
 }
 
 process.once("SIGINT", () => void shutdown("SIGINT"));
@@ -82,7 +92,9 @@ console.log(JSON.stringify({
 while (!stopping) {
   try {
     const result = await pump.runOnce();
-    if (result.failed === 0 && redis.isReady) {
+    const snapshot = await repository.operationalSnapshot();
+    telemetry.observeCycle(result, snapshot, redis.isReady);
+    if (result.failed === 0 && snapshot.deadLetteredEvents === 0 && redis.isReady) {
       await healthFile.markSuccess();
     } else {
       console.error(JSON.stringify({
@@ -90,12 +102,17 @@ while (!stopping) {
         component: "outbox",
         message: "delivery dependency is unavailable or an event could not be published",
         failed: result.failed,
+        deadLettered: result.deadLettered,
+        deadLetteredEvents: snapshot.deadLetteredEvents,
+        pendingEvents: snapshot.pendingEvents,
+        oldestPendingAgeSeconds: snapshot.oldestPendingAgeSeconds,
         redisReady: redis.isReady,
       }));
     }
     if (result.claimed === 0) await delay(pollMilliseconds);
     else console.log(JSON.stringify({ level: "info", component: "outbox", ...result }));
   } catch (error) {
+    telemetry.observeLoopError(redis.isReady);
     console.error(JSON.stringify({ level: "error", component: "outbox", message: error instanceof Error ? error.message : "unknown error" }));
     await delay(pollMilliseconds);
   }

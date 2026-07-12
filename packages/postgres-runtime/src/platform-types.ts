@@ -15,6 +15,28 @@ export interface TenantScope extends TransactionContext {
 }
 
 export type ProjectRole = "owner" | "editor" | "reviewer" | "viewer";
+export type TenantMemberRole = "owner" | "admin" | "viewer";
+
+/** Durable tenant-wide membership, managed only through migration 012 routines. */
+export interface TenantMemberRecord {
+  tenantId: string;
+  userId: string;
+  role: TenantMemberRole;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Durable project membership, distinct from per-workspace Canvas membership. */
+export interface ProjectMemberRecord {
+  tenantId: string;
+  projectId: string;
+  userId: string;
+  role: ProjectRole;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 /**
  * Migration 003 deliberately has no project-membership table. Callers inject
@@ -374,7 +396,8 @@ export interface WritebackEventRecord {
 }
 
 export interface UnifiedSearchResult {
-  entityType: "asset" | "document" | "sourceConnection" | "dataset" | "pipeline" | "modelSpace";
+  /** Projection entity type; migration-013 is intentionally extensible. */
+  entityType: string;
   entityId: string;
   title: string;
   summary: string;
@@ -396,6 +419,58 @@ export interface UpdateProjectInput {
   description?: string | null;
   status?: ProjectRecord["status"];
   correlationId: string;
+}
+
+/** Inputs for the governed user-facing project administration boundary. */
+export interface ManagedProjectCreateInput {
+  projectId: string;
+  slug: string;
+  name: string;
+  description?: string | null;
+  correlationId: string;
+}
+
+export interface ManagedTenantUpdateInput {
+  name?: string;
+  status?: TenantRecord["status"];
+  correlationId: string;
+}
+
+export interface ManagedProjectUpdateInput {
+  name?: string;
+  /** `undefined` leaves it unchanged while `null` clears the description. */
+  description?: string | null;
+  status?: ProjectRecord["status"];
+  correlationId: string;
+}
+
+export interface TenantMemberUpsertInput {
+  userId: string;
+  role: TenantMemberRole;
+  correlationId: string;
+}
+
+export interface ProjectMemberUpsertInput {
+  userId: string;
+  role: ProjectRole;
+  correlationId: string;
+}
+
+export interface ManagedProjectMutation {
+  project: ProjectRecord;
+  created?: boolean;
+  changed: boolean;
+}
+
+export interface ManagedTenantMutation {
+  tenant: TenantRecord;
+  changed: boolean;
+}
+
+export interface ManagedMemberMutation<TMember> {
+  member: TMember;
+  created: boolean;
+  changed: boolean;
 }
 
 export interface CreateDatasetInput {
@@ -609,6 +684,10 @@ export interface CreateWritebackRequestInput {
   payload: JsonObject;
   risk: WritebackRequestRecord["risk"];
   dryRunResult?: JsonObject | null;
+  /** Optional API compatibility identifier retained in immutable audit details. */
+  legacyId?: string;
+  /** Safety-gate reasons for an immediately cancelled draft request. */
+  blockedReasons?: readonly string[];
   correlationId: string;
 }
 
@@ -623,6 +702,8 @@ export interface CompleteWritebackInput {
   writebackRequestId: string;
   expectedState: "executing";
   succeeded: boolean;
+  /** Durable executor outcome retained with the completion audit event. */
+  executionResult?: JsonObject;
   correlationId: string;
 }
 
@@ -633,6 +714,23 @@ export interface TenantProjectRepository {
   createProject(scope: TenantScope, input: CreateProjectInput): Promise<ProjectRecord>;
   updateProject(scope: ProjectScope, input: UpdateProjectInput): Promise<ProjectRecord>;
   resolveMember(scope: ProjectScope, allowedRoles?: readonly ProjectRole[]): Promise<ProjectRole>;
+}
+
+/**
+ * Purpose-specific tenant/project administration. Its implementation invokes
+ * security-definer routines rather than granting the application role direct
+ * membership or project mutation privileges.
+ */
+export interface TenantProjectAdministrationRepository {
+  updateTenant(scope: TenantScope, input: ManagedTenantUpdateInput): Promise<ManagedTenantMutation>;
+  createProject(scope: TenantScope, input: ManagedProjectCreateInput): Promise<ManagedProjectMutation>;
+  updateProject(scope: ProjectScope, input: ManagedProjectUpdateInput): Promise<ManagedProjectMutation>;
+  listTenantMembers(scope: TenantScope, limit: number, cursor?: TextCursor): Promise<KeysetPage<TenantMemberRecord, TextCursor>>;
+  upsertTenantMember(scope: TenantScope, input: TenantMemberUpsertInput): Promise<ManagedMemberMutation<TenantMemberRecord>>;
+  removeTenantMember(scope: TenantScope, userId: string, correlationId: string): Promise<void>;
+  listProjectMembers(scope: ProjectScope, limit: number, cursor?: TextCursor): Promise<KeysetPage<ProjectMemberRecord, TextCursor>>;
+  upsertProjectMember(scope: ProjectScope, input: ProjectMemberUpsertInput): Promise<ManagedMemberMutation<ProjectMemberRecord>>;
+  removeProjectMember(scope: ProjectScope, userId: string, correlationId: string): Promise<void>;
 }
 
 export interface CatalogRepository {
@@ -700,5 +798,11 @@ export interface WritebackRepository {
 }
 
 export interface SearchRepository {
-  search(scope: ProjectScope, query: string, limit: number, cursor?: UnifiedSearchCursor): Promise<KeysetPage<UnifiedSearchResult, UnifiedSearchCursor>>;
+  search(
+    scope: ProjectScope,
+    query: string,
+    limit: number,
+    cursor?: UnifiedSearchCursor,
+    entityType?: string,
+  ): Promise<KeysetPage<UnifiedSearchResult, UnifiedSearchCursor>>;
 }
