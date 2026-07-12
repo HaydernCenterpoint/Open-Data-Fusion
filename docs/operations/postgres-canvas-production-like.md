@@ -2,11 +2,13 @@
 
 This runbook validates `ODF_DATA_PERSISTENCE=postgres` for the project-scoped
 industrial core (assets, telemetry, relations, audit, and bundle ingest) and
-Canvas with PostgreSQL, Redis Streams, Keycloak, two API instances, and the
-outbox worker. It is a local/CI rehearsal only: services bind to loopback,
-Keycloak uses `start-dev`, and local filesystem/SQLite storage remains in use
-for raw-landing metadata, platform catalog, governed objects, and advanced
-product surfaces. It is not an internet-facing production deployment.
+Canvas with PostgreSQL, Redis Streams, Keycloak, two API instances, a private
+versioned S3-compatible reference store, and the outbox worker. It is a
+local/CI rehearsal only: services bind to loopback and Keycloak uses
+`start-dev`. PostgreSQL owns raw-landing/governed-object metadata while the
+reference bucket owns their bytes; remaining platform catalog and advanced
+product surfaces still retain local SQLite adapters. It is not an
+internet-facing production deployment.
 
 The API selects one authoritative industrial/Canvas backend. This profile does
 not dual-write authoritative industrial/Canvas state to SQLite and PostgreSQL,
@@ -21,10 +23,13 @@ There are no usable password defaults in either Compose profile.
 | Variable | Principal / purpose |
 | --- | --- |
 | `ODF_POSTGRES_ADMIN_PASSWORD` | Migrator only; never supplied to API or workers |
-| `ODF_API_POSTGRES_URL` | Dedicated login inheriting `odf_app` only, used by all API replicas for PostgreSQL-backed boundaries; local raw/object/advanced surfaces remain replica-local |
+| `ODF_API_POSTGRES_URL` | Dedicated login inheriting `odf_app` only, used by all API replicas for PostgreSQL-backed boundaries |
 | `ODF_OUTBOX_POSTGRES_URL` | Dedicated login inheriting `odf_outbox_publisher` only |
 | `ODF_REDIS_PASSWORD` | Redis Streams authentication |
 | `ODF_METRICS_TOKEN` | API/Prometheus metrics bearer secret |
+| `ODF_MINIO_ROOT_USER` / `ODF_MINIO_ROOT_PASSWORD` | One-shot reference-bucket bootstrap only; never mounted into API replicas |
+| `ODF_MINIO_API_ACCESS_KEY` / `ODF_MINIO_API_SECRET_KEY` | Narrow S3-compatible API principal mounted as files into the API replicas |
+| `ODF_MINIO_KMS_SECRET_KEY` | Reference-only `<key-id>:<base64-32-byte-key>` static KMS secret for CI SSE-S3; use managed KMS in real production |
 | `ODF_GRAFANA_ADMIN_PASSWORD` | Required by the shared Compose configuration even when the observability profile is not started |
 | `KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME` / `KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD` | Local/CI identity bootstrap only |
 | `ODF_DEMO_USER_PASSWORD` / `ODF_CONNECTOR_CLIENT_SECRET` | Imported local-realm secrets; never browser values |
@@ -124,9 +129,10 @@ subject when rehearsing against another identity provider.
 
 The final command reruns the idempotent migration gate before API startup. A
 missing app/outbox connection URL, Redis password, metrics token, Keycloak
-secret, or provisioned application login fails Compose/API startup instead of
-falling back to SQLite or in-memory events. The tenant provisioning CLI fails
-independently if its dedicated URL is absent.
+secret, S3-compatible credential/bootstrap, or provisioned application login
+fails Compose/API startup instead of falling back to SQLite or in-memory
+events. The tenant provisioning CLI fails independently if its dedicated URL
+is absent.
 
 `api` listens on `127.0.0.1:4310` and `api-replica` on
 `127.0.0.1:4311` by default. The overlay configures:
@@ -134,6 +140,8 @@ independently if its dedicated URL is absent.
 - `ODF_DATA_PERSISTENCE=postgres` as the authoritative industrial/Canvas mode;
 - `ODF_WORKSPACE_PERSISTENCE=postgres` only as a matching compatibility value;
 - `ODF_API_POSTGRES_URL` for the least-privilege application login;
+- a private, versioned, default-encrypted S3-compatible bucket plus
+  file-mounted API credentials, with `ODF_OBJECT_STORAGE_SSE=AES256`;
 - `ODF_SHARED_EVENTS_REQUIRED=true` and authenticated Redis Streams;
 - OIDC verification using the Keycloak service hostname inside Compose; and
 - an outbox publisher with its own least-privilege database URL.
@@ -165,7 +173,11 @@ profile.
 
 1. Check both API instances return HTTP 200 from `/ready`. Confirm
    `industrialPersistence.mode` is `postgres`, the industrial and workspace
-   health statuses are `ok`, and required shared event delivery is healthy.
+   health statuses are `ok`, `objectStorage.status` is `ok`, and required
+   shared event delivery is healthy. The smoke then proves cross-replica raw
+   replay and governed-object range reads; see the
+   [shared object-storage runbook](shared-object-storage.md) for recovery and
+   credential rotation.
 2. Obtain an OIDC token for the exact user ID provisioned as project owner. The
    token must include the permission required by each operation. Send all three
    request boundaries on industrial-core and Canvas calls:

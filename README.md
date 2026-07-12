@@ -56,11 +56,14 @@ The cutover is intentionally bounded. Tenant/project selection follows the
 selected backend: PostgreSQL discovery exposes only active scopes where the
 authenticated identity is a project member. PostgreSQL tenant/project creation
 fails closed at the user-facing API and remains a controlled provisioning
-workflow. The rest of the platform catalog, governed-object metadata/content
-indexing, and advanced diagram, matching, spatial, and write-back surfaces still
-use SQLite adapters. PostgreSQL support is therefore suitable for the
-implemented industrial core, scope discovery, and Canvas boundary, not yet a
-complete replacement for every product store.
+workflow. PostgreSQL replicas also use tenant/project-scoped raw-landing and
+governed-object metadata with a shared private S3-compatible object store;
+they never use a replica-local filesystem for those bytes. The remaining
+platform catalog, cross-surface search/content indexing, and advanced diagram,
+matching, spatial, and write-back surfaces still use SQLite adapters.
+PostgreSQL support is therefore suitable for the implemented industrial core,
+scope discovery, Canvas, and shared-object boundary, not yet a complete
+replacement for every product store.
 
 ### Design principles
 
@@ -102,7 +105,7 @@ Status legend:
 | Industrial Canvas | **Available** | Move, add, edit, resize, connect, delete, undo/redo, keyboard positioning, inspector, layers, revisions, and rollback |
 | Collaboration | **Available** | Owner/editor/reviewer/viewer roles, owner-managed membership, optimistic concurrency, presence, and committed SSE updates |
 | Ingestion | **Available** | Project-scoped, atomic, idempotent asset, time-series, data-point, document, and relation bundles with provenance and audit on SQLite or PostgreSQL |
-| Governed objects | **Available** | SQLite-profile immutable file versions, streamed uploads, SHA-256, strong ETags, bounded ranges, passive-text indexing, and scoped access; PostgreSQL adapter pending |
+| Governed objects | **Available** | Immutable versions, streamed upload/download, SHA-256, strong ETags, bounded ranges, scoped access, audit events, and required server-side encryption; PostgreSQL uses shared versioned S3-compatible bytes plus forced-RLS metadata |
 | Telemetry serving | **Available** | SQLite- or PostgreSQL-backed raw, latest/as-of, and bounded aggregate queries with timestamp-derived charts and quality propagation |
 | Tenant/project discovery | **Available** | Backend-aligned, membership-scoped tenant/project selection; PostgreSQL returns active UUID scopes only |
 | Platform catalogs | **Available** | Full administration is available in SQLite; PostgreSQL has scope discovery only, with remaining catalog adapters pending |
@@ -113,7 +116,7 @@ Status legend:
 | Edge collection | **Optional** | Read-only CSV, PostgreSQL, and OPC UA collection with checkpoints, durable local queueing, OAuth delivery, and retry |
 | PostgreSQL industrial core | **Optional** | Tenant/project-scoped assets, telemetry, relations, audit, and bundle ingest through a least-privilege API role with forced RLS |
 | PostgreSQL Canvas persistence | **Optional** | Tenant/project-scoped workspace reads and writes, immutable revisions/audit, transactional outbox, and Redis-backed committed events |
-| PostgreSQL remaining surfaces | **Foundation** | Remaining platform administration, governed-object, and advanced-product adapters stay SQLite-backed and require separate cutovers |
+| PostgreSQL remaining surfaces | **Foundation** | Remaining platform administration, cross-surface search/indexing, and advanced-product adapters stay SQLite-backed and require separate cutovers |
 | Workers and broker | **Optional** | Outbox worker publishes committed PostgreSQL events to Redis Streams; API replicas fan out shared Canvas events and the pipeline remains explicitly scoped/gated |
 | Observability | **Optional** | Redacted structured API logs, Prometheus metrics, optional OTLP traces, collector, alerts, Prometheus, and Grafana baseline |
 | SQLite workspace cutover | **Foundation** | Deterministic Canvas-history preflight, transactional dry-run import, frozen-source verification, checksums, and explicit apply gate |
@@ -137,13 +140,18 @@ flowchart TB
     API -->|ODF_DATA_PERSISTENCE=postgres| PG
 
     subgraph RemainingLocal[Current SQLite-only boundaries]
-        Metadata[(Remaining platform catalog, governed objects, and advanced metadata)]
-        Files[(Raw landing and governed object files)]
+        Metadata[(Remaining platform catalog and advanced metadata)]
     end
 
     API --> Metadata
-    API --> Files
     API --> SSE[In-process SSE and presence]
+
+    subgraph SharedObjects[PostgreSQL shared object boundary]
+        ObjectMetadata[(PostgreSQL raw/governed metadata and RLS)]
+        Objects[(Private versioned S3-compatible objects)]
+    end
+    PG --> ObjectMetadata
+    API --> Objects
 
     subgraph SharedEvents[PostgreSQL multi-instance delivery]
         Pipeline[Pipeline worker] --> PG
@@ -191,7 +199,7 @@ Key invariants:
 | Web | React 18, TypeScript, Vite 8, Testing Library, Lucide |
 | API | Node.js 24, TypeScript, Express 5, Zod, built-in `node:sqlite` |
 | Identity | OIDC/OAuth 2.0, `jose`, Keycloak development realm |
-| Production persistence foundation | PostgreSQL 17, JSONB, forced RLS, transactional outbox |
+| Production persistence foundation | PostgreSQL 17, JSONB, forced RLS, transactional outbox, private versioned S3-compatible object storage |
 | Shared event delivery | Redis Streams with AOF and `noeviction` |
 | Edge | CSV, read-only PostgreSQL, OPC UA, SQLite store-and-forward queue |
 | Observability | Pino, Prometheus client, OpenTelemetry, Prometheus, Grafana |
@@ -502,7 +510,7 @@ Before starting infrastructure, supply unique secrets through the environment or
 > [!NOTE]
 > `application-preview` explicitly uses `ODF_DATA_PERSISTENCE=sqlite` and starts without demonstration data. The static web image has no `/api` reverse proxy, so the browser UI cannot reach the API until an ingress/proxy routes `/api` to port `4310`. The profile proves container build contexts and service startup; it is not a functional standalone deployment or the PostgreSQL production cutover.
 
-The [`production-like` runbook](docs/operations/postgres-canvas-production-like.md) documents the separate least-privilege API/outbox logins, required tenant/project UUID headers for industrial-core and Canvas calls, a real bundle-ingest check, and the multi-instance outbox/Redis/SSE rehearsal. It is a local/CI validation topology, not an internet-facing production deployment.
+The [`production-like` runbook](docs/operations/postgres-canvas-production-like.md) documents the separate least-privilege API/outbox logins, required tenant/project UUID headers for industrial-core and Canvas calls, a real bundle-ingest check, and the multi-instance outbox/Redis/SSE rehearsal. The [shared object-storage runbook](docs/operations/shared-object-storage.md) covers the versioned S3-compatible boundary, recovery, and credential rotation. This is a local/CI validation topology, not an internet-facing production deployment.
 
 ### Running workers
 
@@ -708,6 +716,7 @@ Additional references:
 - [API documentation](apps/api/README.md)
 - [PostgreSQL runtime contract](packages/postgres-runtime/README.md)
 - [PostgreSQL industrial-core and Canvas production-like runbook](docs/operations/postgres-canvas-production-like.md)
+- [Shared PostgreSQL object-storage runbook](docs/operations/shared-object-storage.md)
 - [Design system](docs/design/design-system.md)
 - [Authentication profiles](docs/security/authentication.md)
 - [Technical direction and pilot criteria](open-data-fusion-technical-report-source.md)
@@ -732,10 +741,10 @@ Additional references:
 - [x] Switch Canvas/workspace reads and writes together to the PostgreSQL runtime, with Redis-backed multi-instance event delivery
 - [x] Switch asset, telemetry, relation, audit, and ingest reads/writes to PostgreSQL with `ODF_DATA_PERSISTENCE=postgres`, without dual-write
 - [x] Add an audited, least-privilege tenant/project bootstrap workflow with an explicit dry-run/apply gate
+- [x] Move raw landing and governed-object metadata/content to PostgreSQL plus shared versioned S3-compatible storage without dual-write
 - [ ] Persist ongoing tenant administration and project membership through governed user-facing API workflows
-- [ ] Move platform catalog, governed-object, and advanced-product API reads/writes from SQLite to PostgreSQL without dual-write
+- [ ] Move platform catalog, cross-surface search/indexing, and advanced-product API reads/writes from SQLite to PostgreSQL without dual-write
 - [ ] Rehearse backup/restore, broker failure, dead-letter, and multi-instance concurrency beyond the CI industrial/Canvas/outbox smoke
-- [ ] Replace local file storage with encrypted, versioned object storage
 - [ ] Complete production ingress, TLS/mTLS, secret-manager, and network-isolation design
 - [ ] Add durable trace/log storage, worker telemetry, SLOs, and operational runbooks
 - [ ] Validate production-like connector backfill, resume, and schema-evolution behavior with a design partner

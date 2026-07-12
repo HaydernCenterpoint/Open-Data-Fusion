@@ -1,61 +1,41 @@
-import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 
 import type { Express, Request, RequestHandler } from 'express';
 import { z } from 'zod';
 
-import type { DataPlanePermission, IdentityProvider } from './auth.js';
-import { ForbiddenError } from './database.js';
+import type { DataPlanePermission } from './auth.js';
 import {
   governedObjectIdSchema,
   governedObjectListQuerySchema,
   governedUploadMetadataSchema,
   governedVersionSchema,
 } from './object-schemas.js';
-import { GovernedObjectStore, ObjectTooLargeError } from './object-store.js';
-import { platformContextSchema, type PlatformContext } from './platform-schemas.js';
-import { PlatformCatalog, type PlatformProjectRole } from './platform.js';
-import { workspaceUserIdSchema } from './schemas.js';
+import {
+  ObjectTooLargeError,
+  type GovernedObjectByteRange,
+  type GovernedObjectContext,
+  type GovernedObjectPersistence,
+} from './object-store.js';
+import type { PlatformProjectRole } from './platform.js';
 
 function parse<TSchema extends z.ZodTypeAny>(schema: TSchema, value: unknown): z.output<TSchema> {
   return schema.parse(value) as z.output<TSchema>;
 }
 
-async function requirePermission(identityProvider: IdentityProvider, request: Request, permission: DataPlanePermission) {
-  const identity = await identityProvider.authenticate(request);
-  const userId = parse(workspaceUserIdSchema, identity.userId);
-  if (!identity.permissions.has(permission)) throw new ForbiddenError(`Permission '${permission}' is required`);
-  return { ...identity, userId };
+export interface GovernedObjectRouteAuthorization {
+  identity: { userId: string };
+  context: GovernedObjectContext;
 }
 
-function requestContext(request: Request): PlatformContext {
-  return parse(platformContextSchema, {
-    tenantId: request.header('x-odf-tenant-id'),
-    projectId: request.header('x-odf-project-id'),
-  });
-}
-
-async function requireProjectAccess(
-  catalog: PlatformCatalog,
-  identityProvider: IdentityProvider,
+export type GovernedObjectRouteAuthorizer = (
   request: Request,
   permission: DataPlanePermission,
   roles?: readonly PlatformProjectRole[],
-) {
-  const identity = await requirePermission(identityProvider, request, permission);
-  const context = requestContext(request);
-  const role = catalog.assertProjectAccess(context, identity.userId, roles);
-  return { identity, context, role };
-}
-
-interface ByteRange {
-  start: number;
-  end: number;
-}
+) => Promise<GovernedObjectRouteAuthorization>;
 
 class InvalidRangeError extends Error {}
 
-function parseRange(value: string, size: number): ByteRange {
+function parseRange(value: string, size: number): GovernedObjectByteRange {
   if (size === 0 || value.includes(',')) throw new InvalidRangeError('Only one satisfiable byte range is supported');
   const match = value.match(/^bytes=(\d*)-(\d*)$/u);
   if (!match || (!match[1] && !match[2])) throw new InvalidRangeError('Invalid byte range');
@@ -94,8 +74,8 @@ function unavailable(response: Parameters<RequestHandler>[1]): void {
 async function sendContent(
   request: Request,
   response: Parameters<RequestHandler>[1],
-  store: GovernedObjectStore,
-  context: PlatformContext,
+  store: GovernedObjectPersistence,
+  context: GovernedObjectContext,
   actor: string,
   objectId: string,
   version: number | undefined,
@@ -111,7 +91,7 @@ async function sendContent(
     return;
   }
 
-  let range: ByteRange | null = null;
+  let range: GovernedObjectByteRange | null = null;
   const rangeHeader = request.header('range');
   const ifRange = request.header('if-range');
   if (rangeHeader && (!ifRange || ifRange === download.etag)) {
@@ -143,13 +123,13 @@ async function sendContent(
   } else {
     response.status(200);
   }
-  store.recordDownload(context, download, actor, response.locals.correlationId, range);
+  await store.recordDownload(context, download, actor, response.locals.correlationId, range);
   if (request.method === 'HEAD' || download.sizeBytes === 0) {
     response.end();
     return;
   }
   try {
-    await pipeline(createReadStream(download.absolutePath, range ? { start, end } : undefined), response);
+    await pipeline(await store.openContent(download, range ?? undefined), response);
   } catch (error) {
     if (!request.destroyed && !response.destroyed) throw error;
   }
@@ -157,18 +137,11 @@ async function sendContent(
 
 export function registerGovernedObjectRoutes(
   app: Express,
-  projectCatalog: PlatformCatalog,
-  store: GovernedObjectStore | null,
-  identityProvider: IdentityProvider,
+  store: GovernedObjectPersistence | null,
+  authorizeProject: GovernedObjectRouteAuthorizer,
 ): void {
   const upload: RequestHandler = async (request, response) => {
-    const { context, identity } = await requireProjectAccess(
-      projectCatalog,
-      identityProvider,
-      request,
-      'data:ingest',
-      ['owner', 'editor'],
-    );
+    const { context, identity } = await authorizeProject(request, 'data:ingest', ['owner', 'editor']);
     if (!store) {
       request.resume();
       unavailable(response);
@@ -224,27 +197,27 @@ export function registerGovernedObjectRoutes(
   app.put('/api/v1/platform/objects/:objectId/content', upload);
 
   app.get(['/api/v1/platform/objects', '/api/v1/platform/files'], async (request, response) => {
-    const { context } = await requireProjectAccess(projectCatalog, identityProvider, request, 'data:read');
+    const { context } = await authorizeProject(request, 'data:read');
     if (!store) return unavailable(response);
-    response.json(store.listObjects(context, parse(governedObjectListQuerySchema, request.query)));
+    response.json(await store.listObjects(context, parse(governedObjectListQuerySchema, request.query)));
   });
 
   app.get([
     '/api/v1/platform/objects/:objectId',
     '/api/v1/platform/files/:objectId',
   ], async (request, response) => {
-    const { context } = await requireProjectAccess(projectCatalog, identityProvider, request, 'data:read');
+    const { context } = await authorizeProject(request, 'data:read');
     if (!store) return unavailable(response);
-    response.json(store.getObject(context, parse(governedObjectIdSchema, request.params.objectId)));
+    response.json(await store.getObject(context, parse(governedObjectIdSchema, request.params.objectId)));
   });
 
   app.get([
     '/api/v1/platform/objects/:objectId/versions',
     '/api/v1/platform/files/:objectId/versions',
   ], async (request, response) => {
-    const { context } = await requireProjectAccess(projectCatalog, identityProvider, request, 'data:read');
+    const { context } = await authorizeProject(request, 'data:read');
     if (!store) return unavailable(response);
-    response.json(store.listVersions(
+    response.json(await store.listVersions(
       context,
       parse(governedObjectIdSchema, request.params.objectId),
       parse(governedObjectListQuerySchema, request.query),
@@ -255,9 +228,9 @@ export function registerGovernedObjectRoutes(
     '/api/v1/platform/objects/:objectId/events',
     '/api/v1/platform/files/:objectId/events',
   ], async (request, response) => {
-    const { context } = await requireProjectAccess(projectCatalog, identityProvider, request, 'audit:read');
+    const { context } = await authorizeProject(request, 'audit:read');
     if (!store) return unavailable(response);
-    response.json(store.listEvents(
+    response.json(await store.listEvents(
       context,
       parse(governedObjectIdSchema, request.params.objectId),
       parse(governedObjectListQuerySchema, request.query),
@@ -268,7 +241,7 @@ export function registerGovernedObjectRoutes(
     '/api/v1/platform/objects/:objectId/content',
     '/api/v1/platform/files/:objectId/content',
   ], async (request, response) => {
-    const { context, identity } = await requireProjectAccess(projectCatalog, identityProvider, request, 'data:read');
+    const { context, identity } = await authorizeProject(request, 'data:read');
     if (!store) return unavailable(response);
     await sendContent(
       request,
@@ -285,7 +258,7 @@ export function registerGovernedObjectRoutes(
     '/api/v1/platform/objects/:objectId/versions/:version/content',
     '/api/v1/platform/files/:objectId/versions/:version/content',
   ], async (request, response) => {
-    const { context, identity } = await requireProjectAccess(projectCatalog, identityProvider, request, 'data:read');
+    const { context, identity } = await authorizeProject(request, 'data:read');
     if (!store) return unavailable(response);
     await sendContent(
       request,

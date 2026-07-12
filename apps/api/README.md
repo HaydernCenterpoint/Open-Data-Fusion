@@ -4,10 +4,10 @@ Backend vertical slice for industrial asset context, telemetry, ingestion, prove
 
 ## Run
 
-Node.js 24 or newer is required. The embedded profile and the platform,
-governed-object, raw-landing metadata, and advanced stores use the built-in
-`node:sqlite` module even when the industrial core is configured for
-PostgreSQL.
+Node.js 24 or newer is required. The embedded profile and remaining platform
+catalog/advanced stores use the built-in `node:sqlite` module. In PostgreSQL
+mode, raw-landing and governed-object metadata use PostgreSQL and their bytes
+use a shared private S3-compatible store.
 
 ```sh
 npm install
@@ -15,9 +15,10 @@ npm run dev
 ```
 
 The API listens on `http://localhost:4310` by default. Set `PORT`,
-`ODF_DATABASE_PATH`, or `ODF_OBJECT_STORE_PATH` to override runtime defaults.
-Production requires an explicit `ODF_OBJECT_STORE_PATH` and an explicit
-`ODF_DATA_PERSISTENCE`. Demonstration data is disabled by default; set
+`ODF_DATABASE_PATH`, or `ODF_OBJECT_STORE_PATH` to override embedded runtime
+defaults. Production requires an explicit `ODF_DATA_PERSISTENCE`; SQLite also
+requires `ODF_OBJECT_STORE_PATH`, while PostgreSQL requires shared S3 storage.
+Demonstration data is disabled by default; set
 `ODF_SEED=true` only when the legacy SQLite UI/Canvas fixture is intentionally
 needed. Setting it back to false does not delete fixture rows from an existing
 database.
@@ -37,7 +38,8 @@ both databases.
 | Tenant/project GET discovery | SQLite membership catalog | PostgreSQL active project membership, UUID cursor pagination, no admin bypass |
 | Tenant/project creation | `platform:admin` API | API blocked; use the audited `tenant:provision` workflow |
 | Remaining platform catalog and membership administration | SQLite | SQLite, not automatically coupled to PostgreSQL scopes |
-| Governed objects, raw-landing metadata, diagrams, matching, spatial, write-back | SQLite/local files | SQLite/local files |
+| Raw landing and governed objects | SQLite/local files | PostgreSQL RLS metadata plus shared versioned S3-compatible bytes |
+| Diagrams, matching, spatial, write-back | SQLite/local files | SQLite/local files |
 
 The SQLite profile is intended for an embedded or single-API-instance
 deployment:
@@ -50,7 +52,11 @@ For PostgreSQL, set `ODF_DATA_PERSISTENCE=postgres`, point
 `ODF_API_POSTGRES_URL` at a dedicated non-superuser login inheriting only
 `odf_app`, and use `ODF_SHARED_EVENTS_REQUIRED=true` with an authenticated
 `ODF_REDIS_URL` for a multi-instance deployment. The API fails fast when the
-database migrations, role, or required shared event transport are unavailable.
+database migrations, role, required shared event transport, or shared object
+storage are unavailable. Configure `ODF_OBJECT_STORAGE_DRIVER=s3`, a private
+bucket/region, versioning, `ODF_OBJECT_STORAGE_SSE=AES256|aws:kms`, and either
+workload identity or the two `*_FILE` credential paths described in the
+[shared object-storage runbook](../../docs/operations/shared-object-storage.md).
 
 `ODF_WORKSPACE_PERSISTENCE` is retained for deployment compatibility. Omit it,
 or set it to the same value as `ODF_DATA_PERSISTENCE`; a mismatch is rejected
@@ -286,12 +292,15 @@ the blocked attempt, leaves an approved request retryable, and returns HTTP 503.
 
 ### Governed objects and time-series serving
 
-Object uploads are streamed directly to a mode-`0600` temporary file under the
-configured store. The service enforces `ODF_OBJECT_STORE_MAX_BYTES`, calculates
-SHA-256 while streaming, calls `fsync`, and atomically renames the completed
-file to a server-generated scoped path. Client object IDs and file names never
-become filesystem paths. Each upload creates an immutable numbered version and
-append-only audit event; previous bytes remain addressable.
+Object uploads are staged only in a mode-`0600` temporary file while streaming.
+The service enforces the configured object limit, calculates SHA-256, calls
+`fsync`, and writes a server-generated immutable locator. SQLite atomically
+renames into its configured filesystem store. PostgreSQL uploads to the shared
+private S3-compatible store, verifies the returned object version, then records
+the scoped locator, event, audit record, and outbox intent in PostgreSQL.
+Client object IDs and file names never become filesystem paths or S3 keys.
+Each upload creates an immutable numbered version and append-only audit event;
+previous bytes remain addressable.
 
 Upload metadata is supplied through `Content-Type`, `x-odf-file-name`, and
 `x-odf-title`. Downloads return a strong hash ETag, support one bounded `bytes`
@@ -308,8 +317,9 @@ Latest and aggregate telemetry routes use the selected industrial backend and
 require `x-odf-tenant-id`, `x-odf-project-id`, verified `data:read`, and project
 membership. Aggregation uses epoch-aligned buckets and returns the selected
 `avg|min|max|sum|count` value together with count, min/max/avg/sum, first/last
-values, and worst bucket quality. Governed object storage remains on its
-SQLite/local-file boundary in both persistence profiles.
+values, and worst bucket quality. PostgreSQL governed-object list, version,
+event, full-download, and range-download endpoints are project-scoped and
+proxy verified S3 bytes through the API; they do not expose a bucket URL.
 
 ### Ingest a real source bundle
 

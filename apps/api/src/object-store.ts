@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { createReadStream, mkdirSync } from 'node:fs';
 import { mkdir, open, rename, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -9,13 +9,14 @@ import { TextDecoder } from 'node:util';
 import { z } from 'zod';
 
 import { ConflictError, DataIntegrityError, NotFoundError } from './database.js';
+import type { BlobReference } from './object-storage.js';
 import type { GovernedObjectListQuery, GovernedUploadMetadata } from './object-schemas.js';
 import type { PlatformContext } from './platform-schemas.js';
 import type { PlatformCatalog } from './platform.js';
 
 type SqliteRow = Record<string, unknown>;
 
-const safeTextMimeTypes = new Set([
+export const safeTextMimeTypes = new Set([
   'text/plain',
   'text/csv',
   'text/tab-separated-values',
@@ -46,7 +47,54 @@ export interface GovernedDownload {
   sha256: string;
   etag: string;
   sizeBytes: number;
-  absolutePath: string;
+  /** Legacy embedded-store path. Shared stores keep this undefined. */
+  absolutePath?: string;
+  /** Private S3 locator used only by the shared storage adapter. */
+  blobReference?: BlobReference;
+}
+
+export interface GovernedObjectContext extends PlatformContext {
+  /** Required only by the PostgreSQL adapter to scope its transaction. */
+  userId?: string;
+}
+
+export interface GovernedObjectByteRange {
+  start: number;
+  end: number;
+}
+
+/** Common API contract for embedded SQLite and shared PostgreSQL object stores. */
+export interface GovernedObjectPersistence {
+  readonly maxObjectBytes: number;
+  upload(
+    context: GovernedObjectContext,
+    objectId: string,
+    metadata: GovernedUploadMetadata,
+    source: Readable,
+    actor: string,
+    correlationId: string,
+  ): Promise<Record<string, unknown>>;
+  listObjects(context: GovernedObjectContext, query: GovernedObjectListQuery): Promise<Record<string, unknown>> | Record<string, unknown>;
+  getObject(context: GovernedObjectContext, objectId: string): Promise<Record<string, unknown>> | Record<string, unknown>;
+  listVersions(
+    context: GovernedObjectContext,
+    objectId: string,
+    query: GovernedObjectListQuery,
+  ): Promise<Record<string, unknown>> | Record<string, unknown>;
+  download(context: GovernedObjectContext, objectId: string, version?: number): Promise<GovernedDownload>;
+  openContent(download: GovernedDownload, range?: GovernedObjectByteRange): Promise<Readable>;
+  recordDownload(
+    context: GovernedObjectContext,
+    download: GovernedDownload,
+    actor: string,
+    correlationId: string,
+    range: GovernedObjectByteRange | null,
+  ): Promise<void> | void;
+  listEvents(
+    context: GovernedObjectContext,
+    objectId: string,
+    query: GovernedObjectListQuery,
+  ): Promise<Record<string, unknown>> | Record<string, unknown>;
 }
 
 function nowIso(): string {
@@ -131,7 +179,7 @@ async function writeAll(file: Awaited<ReturnType<typeof open>>, buffer: Buffer):
   }
 }
 
-export class GovernedObjectStore {
+export class GovernedObjectStore implements GovernedObjectPersistence {
   readonly maxObjectBytes: number;
   private readonly rootPath: string;
   private readonly temporaryPath: string;
@@ -358,12 +406,17 @@ export class GovernedObjectStore {
     };
   }
 
+  async openContent(download: GovernedDownload, range?: GovernedObjectByteRange): Promise<Readable> {
+    if (!download.absolutePath) throw new DataIntegrityError('Governed object does not have an embedded storage path');
+    return createReadStream(download.absolutePath, range ? { start: range.start, end: range.end } : undefined);
+  }
+
   recordDownload(
     context: PlatformContext,
     download: GovernedDownload,
     actor: string,
     correlationId: string,
-    range: { start: number; end: number } | null,
+    range: GovernedObjectByteRange | null,
   ): void {
     this.transaction(() => {
       const timestamp = nowIso();

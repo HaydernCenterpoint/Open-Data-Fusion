@@ -9,7 +9,11 @@ import type { IngestBundle } from "./schemas.js";
 export interface RawLandingContext {
   tenantId: string;
   projectId: string;
+  /** Required by the PostgreSQL adapter; ignored by the embedded SQLite store. */
+  userId?: string;
 }
+
+export type RawLandingState = 'received' | 'accepted' | 'failed' | 'quarantined';
 
 interface RawLandingRow {
   id: string;
@@ -20,7 +24,7 @@ interface RawLandingRow {
   storage_key: string;
   sha256: string;
   byte_size: number;
-  state: "received" | "accepted" | "failed" | "quarantined";
+  state: RawLandingState;
   actor: string;
   correlation_id: string;
   error_summary: string | null;
@@ -39,7 +43,7 @@ export interface RawLandingRecord {
   rawObjectUri: string;
   sha256: string;
   byteSize: number;
-  state: RawLandingRow["state"];
+  state: RawLandingState;
   actor: string;
   correlationId: string;
   errorSummary: string | null;
@@ -47,6 +51,20 @@ export interface RawLandingRecord {
   completedAt: string | null;
   lastReplayedAt: string | null;
   lastReplayRunId: string | null;
+}
+
+/**
+ * Raw evidence is a persistence seam: SQLite is suitable for the embedded
+ * single-instance profile, while the PostgreSQL profile supplies an adapter
+ * backed by shared S3-compatible bytes and scoped PostgreSQL metadata.
+ */
+export interface RawLandingPersistence {
+  archive(context: RawLandingContext, bundle: IngestBundle, actor: string, correlationId: string): Promise<RawLandingRecord>;
+  complete(context: RawLandingContext, id: string, state: Exclude<RawLandingState, 'received'>, error?: string): Promise<RawLandingRecord>;
+  list(context: RawLandingContext, limit: number, cursor?: string): Promise<{ items: RawLandingRecord[]; nextCursor: string | null }>;
+  replayBundle(context: RawLandingContext, id: string): Promise<IngestBundle>;
+  markReplayed(context: RawLandingContext, id: string, replayRunId: string): Promise<RawLandingRecord>;
+  get(context: RawLandingContext, id: string): Promise<RawLandingRecord>;
 }
 
 function safeSegment(value: string): string {
@@ -89,7 +107,7 @@ function decodeCursor(cursor: string | undefined): [string, string] | null {
   }
 }
 
-export class RawLandingStore {
+export class RawLandingStore implements RawLandingPersistence {
   private readonly root: string;
 
   constructor(private readonly database: DatabaseSync, rootDirectory: string) {
@@ -174,7 +192,7 @@ export class RawLandingStore {
     return this.get(context, id);
   }
 
-  complete(context: RawLandingContext, id: string, state: "accepted" | "failed" | "quarantined", error?: string): RawLandingRecord {
+  async complete(context: RawLandingContext, id: string, state: Exclude<RawLandingState, 'received'>, error?: string): Promise<RawLandingRecord> {
     const result = this.database.prepare(`
       UPDATE platform_raw_ingest_objects
       SET state = ?, error_summary = ?, completed_at = ?
@@ -184,7 +202,7 @@ export class RawLandingStore {
     return this.get(context, id);
   }
 
-  list(context: RawLandingContext, limit: number, cursor?: string): { items: RawLandingRecord[]; nextCursor: string | null } {
+  async list(context: RawLandingContext, limit: number, cursor?: string): Promise<{ items: RawLandingRecord[]; nextCursor: string | null }> {
     const decoded = decodeCursor(cursor);
     const rows = this.database.prepare(`
       SELECT * FROM platform_raw_ingest_objects
@@ -209,7 +227,7 @@ export class RawLandingStore {
     return JSON.parse(bytes.toString("utf8")) as IngestBundle;
   }
 
-  markReplayed(context: RawLandingContext, id: string, replayRunId: string): RawLandingRecord {
+  async markReplayed(context: RawLandingContext, id: string, replayRunId: string): Promise<RawLandingRecord> {
     const result = this.database.prepare(`
       UPDATE platform_raw_ingest_objects SET last_replayed_at = ?, last_replay_run_id = ?
       WHERE tenant_id = ? AND project_id = ? AND id = ?
@@ -218,7 +236,7 @@ export class RawLandingStore {
     return this.get(context, id);
   }
 
-  get(context: RawLandingContext, id: string): RawLandingRecord {
+  async get(context: RawLandingContext, id: string): Promise<RawLandingRecord> {
     return recordFromRow(this.row(context, id));
   }
 

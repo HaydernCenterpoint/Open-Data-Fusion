@@ -261,6 +261,32 @@ def validate_migrations(migration_paths: list[Path]) -> None:
         "workspace bootstrap must not grant direct workspace INSERT to the application role",
     )
 
+    shared_objects = read(MIGRATIONS / "011_shared_object_storage_metadata.sql")
+    for guardrail in [
+        "CREATE TABLE IF NOT EXISTS odf.raw_landing_objects",
+        "CREATE TABLE IF NOT EXISTS odf.raw_landing_events",
+        "CREATE TABLE IF NOT EXISTS odf.governed_objects",
+        "CREATE TABLE IF NOT EXISTS odf.governed_object_versions",
+        "CREATE TABLE IF NOT EXISTS odf.governed_object_events",
+        "object_key text NOT NULL",
+        "object_version_id text NOT NULL",
+        "governed_objects_current_version_fk",
+        "UNIQUE (tenant_id, project_id, landing_id)",
+        "enforce_governed_object_version_transition",
+        "reject_platform_history_mutation",
+        "FORCE ROW LEVEL SECURITY",
+        "odf.current_project_id()",
+        "GRANT SELECT, INSERT ON odf.raw_landing_objects, odf.raw_landing_events TO odf_app",
+        "GRANT SELECT, INSERT, UPDATE ON odf.governed_objects TO odf_app",
+        "GRANT SELECT, INSERT ON odf.governed_object_versions, odf.governed_object_events TO odf_app",
+    ]:
+        require(guardrail in shared_objects, f"missing shared object storage guardrail: {guardrail}")
+    require(
+        "GRANT DELETE ON odf.governed_objects" not in shared_objects
+        and "GRANT DELETE ON odf.raw_landing_objects" not in shared_objects,
+        "shared object metadata must not grant application deletes for immutable evidence",
+    )
+
 
 def validate_tenant_foreign_keys(sql: str) -> None:
     """Catch scope-breaking composite FKs before a migration reaches PostgreSQL.
@@ -378,7 +404,7 @@ def validate_runtime_artifacts() -> None:
     )
 
     production_like = read(ROOT / "docker-compose.production-like.yml")
-    for service in ["keycloak:", "api:", "api-replica:", "outbox-worker:"]:
+    for service in ["keycloak:", "odf-minio:", "minio-bootstrap:", "api:", "api-replica:", "outbox-worker:"]:
         require(service in production_like, f"production-like Compose profile missing {service}")
     for guardrail in [
         "profiles: [\"production-like\"]",
@@ -388,10 +414,59 @@ def validate_runtime_artifacts() -> None:
         "ODF_SEED: \"false\"",
         "ODF_OUTBOX_POSTGRES_URL:",
         "ODF_SHARED_EVENTS_REQUIRED: \"true\"",
+        "ODF_OBJECT_STORAGE_DRIVER: s3",
+        "ODF_OBJECT_STORAGE_REQUIRE_VERSIONING: \"true\"",
+        "ODF_OBJECT_STORAGE_SSE: AES256",
+        "ODF_OBJECT_STORAGE_ACCESS_KEY_ID_FILE:",
+        "odf_minio_root_user",
+        "odf_minio_api_secret_key",
+        "odf_minio_kms_secret_key",
+        "minio/mc@sha256:",
+        "dockerfile: infra/minio/Dockerfile",
         "KC_HOSTNAME: http://keycloak:8080",
         "service_completed_successfully",
     ]:
         require(guardrail in production_like, f"production-like Compose profile missing guardrail: {guardrail}")
+    require(
+        "minio/minio:RELEASE." not in production_like,
+        "production-like profile must not pull an unpatched mutable MinIO server tag",
+    )
+
+    minio_dockerfile = read(ROOT / "infra" / "minio" / "Dockerfile")
+    for guardrail in [
+        "golang:1.24.8-bookworm@sha256:",
+        "debian:bookworm-slim@sha256:",
+        "MINIO_RELEASE=RELEASE.2025-10-15T17-29-55Z",
+        "MINIO_COMMIT=9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a",
+        "test \"$(git rev-parse HEAD)\" = \"${MINIO_COMMIT}\"",
+    ]:
+        require(guardrail in minio_dockerfile, f"MinIO source image is missing immutable build guardrail: {guardrail}")
+
+    minio_bootstrap = read(ROOT / "infra" / "minio" / "bootstrap.sh")
+    for guardrail in [
+        "mc version enable",
+        "mc encrypt set sse-s3",
+        "mc anonymous set none",
+        '"arn:aws:s3:::${bucket}/odf/v1/*"',
+        "mc admin user remove",
+        "sh /verify.sh admin",
+    ]:
+        require(guardrail in minio_bootstrap, f"MinIO bootstrap missing least-privilege guardrail: {guardrail}")
+    require("s3:ListBucket" not in minio_bootstrap, "MinIO API policy must not grant bucket enumeration")
+
+    minio_verify = read(ROOT / "infra" / "minio" / "verify.sh")
+    for guardrail in [
+        "mc version info --json",
+        "mc encrypt info --json",
+        "mc anonymous get --json",
+        "expect_denied mc ls",
+        "outside-odf-prefix",
+        "expect_denied mc rm --force",
+        "expect_denied mc version suspend",
+        "expect_denied mc anonymous set public",
+        "expect_denied mc encrypt clear",
+    ]:
+        require(guardrail in minio_verify, f"MinIO verification is missing security assertion: {guardrail}")
 
     production_like_workflow = read(ROOT / ".github" / "workflows" / "production-like-integration.yml")
     for guardrail in [
@@ -402,6 +477,8 @@ def validate_runtime_artifacts() -> None:
         "Prove security-definer tenant bootstrap boundary",
         "odf.provision_tenant_project",
         "production-like-smoke.sh",
+        "ODF_MINIO_ROOT_USER",
+        "ODF_MINIO_KMS_SECRET_KEY",
         '"packages/contracts/**"',
         '"packages/platform-core/**"',
     ]:
@@ -429,6 +506,11 @@ def validate_runtime_artifacts() -> None:
         "ci-industrial-run-1",
         "cross-replica PostgreSQL ingest was not idempotent",
         "run.raw_object_id IS NOT NULL",
+        "raw_landing_objects",
+        "governed_object_versions",
+        "ci-shared-governed-object",
+        "verify.sh admin",
+        "ODF_MINIO_VERIFY_OBJECT_KEY",
         "audit.tenant_id = run.tenant_id",
         "has_table_privilege('odf_ci_api'",
     ]:
@@ -450,12 +532,25 @@ def validate_runtime_artifacts() -> None:
     api_dockerfile = read(ROOT / "Dockerfile.api")
     web_dockerfile = read(ROOT / "Dockerfile.web")
     outbox_dockerfile = read(ROOT / "Dockerfile.outbox")
+    api_server = read(ROOT / "apps" / "api" / "src" / "server.ts")
     require("USER node" in api_dockerfile, "API runtime image must not run as root")
     require("COPY packages/postgres-runtime ./packages/postgres-runtime" in api_dockerfile, "API build must include the PostgreSQL runtime workspace")
     require("/workspace/packages/postgres-runtime/dist ./packages/postgres-runtime/dist" in api_dockerfile, "API image must include the PostgreSQL runtime build")
     require("ODF_METRICS_TOKEN_FILE=/run/secrets/odf_metrics_token" in api_dockerfile, "API container must load its metrics token from the mounted secret")
     require("nginx-unprivileged" in web_dockerfile, "web runtime image must use an unprivileged server")
     require("USER node" in outbox_dockerfile, "outbox runtime image must not run as root")
+    for table, privileges in {
+        "raw_landing_objects": ["SELECT", "INSERT"],
+        "raw_landing_events": ["SELECT", "INSERT"],
+        "governed_objects": ["SELECT", "INSERT", "UPDATE"],
+        "governed_object_versions": ["SELECT", "INSERT"],
+        "governed_object_events": ["SELECT", "INSERT"],
+    }.items():
+        for privilege in privileges:
+            require(
+                f"has_table_privilege(current_user, 'odf.{table}', '{privilege}')" in api_server,
+                f"shared object readiness must check {table} {privilege} independently",
+            )
 
 
 def validate_build_context() -> None:

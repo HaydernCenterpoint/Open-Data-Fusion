@@ -57,6 +57,11 @@ jobs:
       ODF_CI_API_PASSWORD: ci-only-api-password
       ODF_CI_OUTBOX_PASSWORD: ci-only-outbox-password
       ODF_CI_TENANT_PROVISION_PASSWORD: ci-only-tenant-provision-password
+      ODF_MINIO_ROOT_USER: ci-minio-root
+      ODF_MINIO_ROOT_PASSWORD: ci-only-minio-root-password
+      ODF_MINIO_API_ACCESS_KEY: ci-odf-api
+      ODF_MINIO_API_SECRET_KEY: ci-only-minio-api-secret
+      ODF_MINIO_KMS_SECRET_KEY: odf-ci-object-store:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       ODF_API_POSTGRES_URL: postgresql://odf_ci_api:ci-only-api-password@odf-postgres:5432/odf
       ODF_OUTBOX_POSTGRES_URL: postgresql://odf_ci_outbox:ci-only-outbox-password@odf-postgres:5432/odf
     steps:
@@ -311,7 +316,7 @@ jobs:
         if: failure()
         run: |
           docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like ps || true
-          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like logs --no-color --tail=200 api api-replica outbox-worker keycloak odf-postgres odf-redis || true
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like logs --no-color --tail=200 api api-replica outbox-worker keycloak odf-minio minio-bootstrap odf-postgres odf-redis || true
 
       - name: Remove production-like integration resources
         if: always()

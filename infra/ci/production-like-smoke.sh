@@ -237,6 +237,114 @@ if [ "$industrial_evidence" != "1" ]; then
   exit 1
 fi
 
+# The raw record was archived through API A, while listing and replay happen
+# through API B. This proves both PostgreSQL metadata and the immutable S3
+# bytes are genuinely shared instead of replicated local filesystem state.
+raw_landing_id="$(node -e '
+const fs = require("node:fs");
+const id = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).rawObjectId;
+if (typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id)) throw new Error("ingest response lacks PostgreSQL raw landing ID");
+process.stdout.write(id);
+' "${tmp_dir}/industrial-first.json")"
+curl --fail --silent --show-error \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  "${replica_base}/api/v1/platform/ingestion/raw?limit=100" >"${tmp_dir}/raw-list.json"
+node -e '
+const fs = require("node:fs");
+const listed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const expectedId = process.argv[2];
+const item = listed.items?.find((candidate) => candidate.id === expectedId);
+if (!item || item.state !== "accepted" || item.runId !== "ci-industrial-run-1"
+    || item.rawObjectUri !== `raw://${process.argv[3]}/${process.argv[4]}/${expectedId}`) {
+  throw new Error("replica could not read shared PostgreSQL raw landing metadata");
+}
+' "${tmp_dir}/raw-list.json" "$raw_landing_id" "$tenant_id" "$project_id"
+raw_replay_status="$(curl --silent --show-error --output "${tmp_dir}/raw-replay.json" --write-out '%{http_code}' \
+  -X POST "${replica_base}/api/v1/platform/ingestion/raw/${raw_landing_id}/replay" \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  -H "x-correlation-id: 12121212-1212-4121-8121-121212121212")"
+if [ "$raw_replay_status" != "201" ]; then
+  echo "Expected raw replay through API replica to return 201, received ${raw_replay_status}" >&2
+  exit 1
+fi
+node -e '
+const fs = require("node:fs");
+const replay = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (replay.status !== "completed" || replay.replayedFromRawObjectId !== process.argv[2]
+    || replay.rawObject?.lastReplayRunId?.indexOf("replay-") !== 0) {
+  throw new Error("replica replay did not consume shared immutable raw evidence");
+}
+' "${tmp_dir}/raw-replay.json" "$raw_landing_id"
+
+# Upload one governed object through API A, then full and range-read it through
+# API B. The two containers have separate /var/lib/odf volumes, so this also
+# proves the object metadata no longer falls back to local SQLite/filesystem.
+governed_object_id="ci-shared-governed-object"
+printf '%s' 'shared governed object bytes 2026-07-12' >"${tmp_dir}/governed.bin"
+curl --fail --silent --show-error \
+  -X POST "${api_base}/api/v1/platform/objects/${governed_object_id}/versions" \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  -H 'x-correlation-id: 13131313-1313-4131-8131-131313131313' \
+  -H 'content-type: text/plain' \
+  -H 'x-odf-file-name: ci-governed.txt' \
+  -H 'x-odf-title: CI shared governed object' \
+  --data-binary "@${tmp_dir}/governed.bin" >"${tmp_dir}/governed-created.json"
+node -e '
+const fs = require("node:fs");
+const created = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+if (created.object?.id !== process.argv[2] || created.object?.currentVersion !== 1
+    || created.version?.version !== 1 || !/^[0-9a-f]{64}$/.test(created.version?.sha256 ?? "")) {
+  throw new Error("shared governed object upload returned invalid metadata");
+}
+' "${tmp_dir}/governed-created.json" "$governed_object_id"
+curl --fail --silent --show-error \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" \
+  "${replica_base}/api/v1/platform/objects/${governed_object_id}/content" >"${tmp_dir}/governed-replica.bin"
+curl --fail --silent --show-error \
+  -H "$auth_header" -H "$tenant_header" -H "$project_header" -H 'range: bytes=7-20' \
+  "${replica_base}/api/v1/platform/objects/${governed_object_id}/content" >"${tmp_dir}/governed-range.bin"
+node -e '
+const fs = require("node:fs");
+const original = fs.readFileSync(process.argv[1]);
+const replica = fs.readFileSync(process.argv[2]);
+const range = fs.readFileSync(process.argv[3]);
+if (!original.equals(replica) || !range.equals(original.subarray(7, 21))) {
+  throw new Error("governed object bytes were not readable through the separate API replica");
+}
+' "${tmp_dir}/governed.bin" "${tmp_dir}/governed-replica.bin" "${tmp_dir}/governed-range.bin"
+
+object_storage_evidence="$(postgres_value "SELECT (EXISTS (SELECT 1 FROM odf.raw_landing_objects WHERE tenant_id = '${tenant_id}'::uuid AND project_id = '${project_id}'::uuid AND landing_id = '${raw_landing_id}'::uuid AND storage_profile = 'primary' AND object_version_id <> 'unversioned') AND EXISTS (SELECT 1 FROM odf.governed_object_versions WHERE tenant_id = '${tenant_id}'::uuid AND project_id = '${project_id}'::uuid AND object_id = '${governed_object_id}' AND version = 1 AND storage_profile = 'primary' AND object_version_id <> 'unversioned'))::text;")"
+if [ "$object_storage_evidence" != "true" ]; then
+  echo "shared object metadata does not retain immutable S3 version evidence" >&2
+  exit 1
+fi
+
+# The API retrieves the governed object through S3 HeadObject before it can
+# stream it, so its successful range read above proves AES256 object metadata.
+# The privileged bootstrap utility separately proves the bucket itself remains
+# versioned, encrypted by default, and private. Its application-mode probe
+# proves the API identity has neither bucket administration nor object escape/
+# deletion capability.
+governed_object_key="$(postgres_value "SELECT object_key FROM odf.governed_object_versions WHERE tenant_id = '${tenant_id}'::uuid AND project_id = '${project_id}'::uuid AND object_id = '${governed_object_id}' AND version = 1;")"
+case "$governed_object_key" in
+  odf/v1/governed/*) ;;
+  *)
+    echo "governed object did not use the restricted S3 prefix" >&2
+    exit 1
+    ;;
+esac
+compose run --rm --no-deps --entrypoint /bin/sh minio-bootstrap /verify.sh admin
+compose run --rm --no-deps -e "ODF_MINIO_VERIFY_OBJECT_KEY=${governed_object_key}" \
+  --entrypoint /bin/sh minio-bootstrap /verify.sh application
+
+unauthorized_object_scope_status="$(curl --silent --show-error --output "${tmp_dir}/unauthorized-object-scope.json" --write-out '%{http_code}' \
+  -H "$auth_header" -H "$tenant_header" -H "x-odf-project-id: ${unauthorized_project_id}" \
+  "${api_base}/api/v1/platform/objects/${governed_object_id}")"
+if [ "$unauthorized_object_scope_status" != "403" ]; then
+  echo "Expected governed object access in an unauthorized project to return 403, received ${unauthorized_object_scope_status}" >&2
+  exit 1
+fi
+
 unauthorized_industrial_scope_status="$(curl --silent --show-error --output "${tmp_dir}/unauthorized-industrial-scope.json" --write-out '%{http_code}' \
   -H "$auth_header" -H "$tenant_header" -H "x-odf-project-id: ${unauthorized_project_id}" \
   "${api_base}/api/v1/assets")"

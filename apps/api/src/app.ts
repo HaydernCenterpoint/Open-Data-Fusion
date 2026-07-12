@@ -25,7 +25,8 @@ import { WorkspaceEventHub } from './collaboration.js';
 import { ConflictError, DataIntegrityError, ForbiddenError, FusionDatabase, NotFoundError } from './database.js';
 import { createApiObservability } from './observability.js';
 import { registerGovernedObjectRoutes } from './object-routes.js';
-import { GovernedObjectStore } from './object-store.js';
+import { ObjectStorageUnavailableError, type ImmutableBlobStore } from './object-storage.js';
+import { GovernedObjectStore, type GovernedObjectPersistence } from './object-store.js';
 import {
   industrialIngestRunId,
   type IndustrialPersistence,
@@ -38,9 +39,12 @@ import {
 import { registerPlatformRoutes } from './platform-routes.js';
 import { cursorListQuerySchema, platformContextSchema, platformIdSchema, type PlatformContext } from './platform-schemas.js';
 import { PlatformCatalog } from './platform.js';
+import { PostgresGovernedObjectStore } from './postgres-governed-object-store.js';
+import { PostgresRawLandingStore } from './postgres-raw-landing.js';
 import { PostgresWorkspacePersistence, type WorkspaceRequestScope } from './postgres-workspace-persistence.js';
-import { RawLandingStore } from './raw-landing.js';
+import { RawLandingStore, type RawLandingPersistence } from './raw-landing.js';
 import { SqliteIndustrialPersistence } from './sqlite-industrial-persistence.js';
+import type { PostgresRuntime } from '@open-data-fusion/postgres-runtime';
 import {
   assetListQuerySchema,
   auditListQuerySchema,
@@ -240,6 +244,12 @@ export interface CreateAppOptions {
   writebackExecutor?: IndustrialWritebackExecutor;
   objectStorePath?: string;
   objectStoreMaxBytes?: number;
+  /** Ephemeral staging path used only while streaming an S3 upload. */
+  objectStorageTemporaryPath?: string;
+  /** Shared immutable byte store required by PostgreSQL multi-replica mode. */
+  sharedBlobStore?: ImmutableBlobStore;
+  /** Runtime used for PostgreSQL raw/governed object metadata. */
+  postgresRuntime?: PostgresRuntime;
   /** PostgreSQL persistence for all Canvas/workspace reads and writes. */
   workspacePersistence?: PostgresWorkspacePersistence;
   /** Exactly one industrial data backend selected for this process. */
@@ -265,33 +275,55 @@ export function createApp(
   const advancedPlatformCatalog = new AdvancedPlatformCatalog(database.database, {
     ...(options.writebackPolicy ? { writebackPolicy: options.writebackPolicy } : {}),
   });
-  const governedObjectStore = options.objectStorePath
-    ? new GovernedObjectStore(database.database, platformCatalog, {
-        rootPath: options.objectStorePath,
-        ...(options.objectStoreMaxBytes !== undefined ? { maxObjectBytes: options.objectStoreMaxBytes } : {}),
-      })
-    : null;
-  const rawLanding = options.rawLandingDirectory
-    ? new RawLandingStore(database.database, options.rawLandingDirectory)
-    : null;
+  let governedObjectStore: GovernedObjectPersistence | null;
+  let rawLanding: RawLandingPersistence | null;
+  // The production server always supplies postgresRuntime. Narrow test
+  // doubles that only exercise an IndustrialPersistence error path retain
+  // their embedded stores, but a real PostgreSQL runtime can never fall back
+  // to per-replica SQLite metadata.
+  const usesSharedPostgresObjectMetadata = industrialPersistence.mode === 'postgres'
+    && (options.postgresRuntime !== undefined || options.sharedBlobStore !== undefined);
+  if (usesSharedPostgresObjectMetadata) {
+    if (!options.sharedBlobStore || !options.postgresRuntime || !options.objectStorageTemporaryPath) {
+      throw new Error('PostgreSQL persistence requires shared object storage, its PostgreSQL runtime, and an ephemeral object staging path');
+    }
+    governedObjectStore = new PostgresGovernedObjectStore(options.postgresRuntime, options.sharedBlobStore, {
+      temporaryPath: options.objectStorageTemporaryPath,
+      ...(options.objectStoreMaxBytes !== undefined ? { maxObjectBytes: options.objectStoreMaxBytes } : {}),
+    });
+    rawLanding = new PostgresRawLandingStore(options.postgresRuntime, options.sharedBlobStore);
+  } else {
+    if (industrialPersistence.mode === 'postgres' && process.env.NODE_ENV === 'production') {
+      throw new Error('Production PostgreSQL persistence requires a shared PostgreSQL object metadata runtime');
+    }
+    governedObjectStore = options.objectStorePath
+      ? new GovernedObjectStore(database.database, platformCatalog, {
+          rootPath: options.objectStorePath,
+          ...(options.objectStoreMaxBytes !== undefined ? { maxObjectBytes: options.objectStoreMaxBytes } : {}),
+        })
+      : null;
+    rawLanding = options.rawLandingDirectory
+      ? new RawLandingStore(database.database, options.rawLandingDirectory)
+      : null;
+  }
   const observability = createApiObservability(options.metricsToken);
   const app = express();
   app.disable('x-powered-by');
   app.use(correlationMiddleware(workspacePersistence !== undefined || industrialPersistence.mode === 'postgres'));
   app.use(observability.middleware);
-  registerGovernedObjectRoutes(app, platformCatalog, governedObjectStore, identityProvider);
-  app.use(express.json({ limit: '10mb', strict: true }));
 
   const healthHandler: RequestHandler = async (_request, response) => {
     const workspaceHealth = workspacePersistence ? await workspacePersistence.health() : null;
     const industrialHealth = await industrialPersistence.health();
     const sharedEventDelivery = eventHub.eventDeliveryHealth();
+    const objectStorage = options.sharedBlobStore ? await options.sharedBlobStore.health() : null;
     response.json({
       ...database.health(),
       authMode: identityProvider.mode,
       ...(workspaceHealth ? { workspacePersistence: workspaceHealth } : {}),
       industrialPersistence: industrialHealth,
       sharedEventDelivery,
+      ...(objectStorage ? { objectStorage } : {}),
     });
   };
   app.get('/health', healthHandler);
@@ -301,9 +333,11 @@ export function createApp(
     const workspaceHealth = workspacePersistence ? await workspacePersistence.health() : null;
     const industrialHealth = await industrialPersistence.health();
     const sharedEventDelivery = eventHub.eventDeliveryHealth();
+    const objectStorage = options.sharedBlobStore ? await options.sharedBlobStore.health() : null;
     const ready = health.status === 'ok'
       && (workspaceHealth === null || workspaceHealth.status === 'ok')
       && industrialHealth.status === 'ok'
+      && (objectStorage === null || objectStorage.status === 'ok')
       && (options.sharedEventsRequired !== true || sharedEventDelivery.status === 'ok');
     response.status(ready ? 200 : 503).json({
       ...health,
@@ -311,6 +345,7 @@ export function createApp(
       ...(workspaceHealth ? { workspacePersistence: workspaceHealth } : {}),
       industrialPersistence: industrialHealth,
       sharedEventDelivery,
+      ...(objectStorage ? { objectStorage } : {}),
     });
   });
   app.get('/metrics', observability.metricsHandler);
@@ -334,6 +369,14 @@ export function createApp(
     await industrialPersistence.authorize(scope, allowedRoles);
     return scope;
   };
+
+  // Register binary upload/download routes before JSON parsing so a governed
+  // `application/json` file remains an opaque stream rather than an API body.
+  registerGovernedObjectRoutes(app, governedObjectStore, async (request, permission, roles) => {
+    const scope = await industrialScope(request, permission, roles);
+    return { identity: { userId: scope.userId }, context: scope };
+  });
+  app.use(express.json({ limit: '10mb', strict: true }));
 
   const requireAcceptedRelationPermission = async (request: Request, bundle: import('./schemas.js').IngestBundle): Promise<void> => {
     if (bundle.relations.some((relation) => relation.status === 'accepted')) {
@@ -396,7 +439,7 @@ export function createApp(
       ...actorBundle,
       source: { ...actorBundle.source, runId: industrialIngestRunId(actorBundle) },
     };
-    let rawRecord: Awaited<ReturnType<RawLandingStore['archive']>> | null = null;
+    let rawRecord: Awaited<ReturnType<RawLandingPersistence['archive']>> | null = null;
     let context: PlatformContext | null = null;
     if (rawLanding) {
       context = scope;
@@ -414,14 +457,14 @@ export function createApp(
           contentType: 'application/json',
         } : undefined,
       );
-      if (rawLanding && rawRecord && context) rawLanding.complete(context, rawRecord.id, 'accepted');
+      if (rawLanding && rawRecord && context) await rawLanding.complete(context, rawRecord.id, 'accepted');
       response.status(result.status === 'already_processed' ? 200 : 201).json({
         ...result,
         ...(rawRecord ? { rawObjectId: rawRecord.id, rawSha256: rawRecord.sha256 } : {}),
       });
     } catch (error) {
       if (rawLanding && rawRecord && context) {
-        rawLanding.complete(context, rawRecord.id, 'failed', error instanceof Error ? error.message : 'Unknown ingestion failure');
+        await rawLanding.complete(context, rawRecord.id, 'failed', error instanceof Error ? error.message : 'Unknown ingestion failure');
       }
       throw error;
     }
@@ -467,7 +510,7 @@ export function createApp(
       return;
     }
     const query = parse(cursorListQuerySchema, request.query);
-    response.json(rawLanding.list(context, query.limit, query.cursor));
+    response.json(await rawLanding.list(context, query.limit, query.cursor));
   });
 
   app.post('/api/v1/platform/ingestion/raw/:rawId/replay', async (request, response) => {
@@ -484,7 +527,7 @@ export function createApp(
       ...sourceBundle,
       source: { ...sourceBundle.source, runId: replayRunId, actor: context.userId },
     };
-    const sourceRawObject = rawLanding.get(context, rawId);
+    const sourceRawObject = await rawLanding.get(context, rawId);
     const result = await industrialPersistence.ingest(
       context,
       bundle,
@@ -496,7 +539,7 @@ export function createApp(
         contentType: 'application/json',
       },
     );
-    const rawObject = rawLanding.markReplayed(context, rawId, replayRunId);
+    const rawObject = await rawLanding.markReplayed(context, rawId, replayRunId);
     response.status(201).json({ ...result, replayedFromRawObjectId: rawId, rawObject });
   });
 
@@ -856,6 +899,10 @@ export function createApp(
     }
     if (error instanceof DataIntegrityError) {
       response.status(422).json({ error: { code: 'data_integrity_error', message: error.message, correlationId: response.locals.correlationId } });
+      return;
+    }
+    if (error instanceof ObjectStorageUnavailableError) {
+      response.status(503).json({ error: { code: 'object_storage_unavailable', message: error.message, correlationId: response.locals.correlationId } });
       return;
     }
     if (error instanceof RuntimeDatabaseUnavailableError) {
