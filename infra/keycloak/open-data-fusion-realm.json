@@ -11,6 +11,20 @@
   "accessTokenLifespan": 300,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "client": {
+      "open-data-fusion-api": [
+        { "name": "data:read", "description": "Read governed industrial data" },
+        { "name": "data:ingest", "description": "Submit connector ingestion payloads" },
+        { "name": "relations:review", "description": "Review contextualization candidates" },
+        { "name": "audit:read", "description": "Read governed audit history" },
+        { "name": "platform:admin", "description": "Create and administer platform tenant boundaries" },
+        { "name": "writeback:request", "description": "Request a governed industrial write-back" },
+        { "name": "writeback:approve", "description": "Approve or reject a write-back requested by another identity" },
+        { "name": "writeback:execute", "description": "Execute a fully approved and policy-safe write-back" }
+      ]
+    }
+  },
   "clients": [
     {
       "clientId": "open-data-fusion-api",
@@ -22,17 +36,7 @@
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": false,
-      "roles": [
-        { "name": "data:read", "description": "Read governed industrial data" },
-        { "name": "data:ingest", "description": "Submit connector ingestion payloads" },
-        { "name": "relations:review", "description": "Review contextualization candidates" },
-        { "name": "audit:read", "description": "Read governed audit history" },
-        { "name": "platform:admin", "description": "Create and administer platform tenant boundaries" },
-        { "name": "writeback:request", "description": "Request a governed industrial write-back" },
-        { "name": "writeback:approve", "description": "Approve or reject a write-back requested by another identity" },
-        { "name": "writeback:execute", "description": "Execute a fully approved and policy-safe write-back" }
-      ]
+      "serviceAccountsEnabled": false
     },
     {
       "clientId": "open-data-fusion-connector",

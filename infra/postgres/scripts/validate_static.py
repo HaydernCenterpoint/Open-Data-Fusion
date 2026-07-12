@@ -9,6 +9,7 @@ requiring Docker, PostgreSQL, or a network connection.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -354,6 +355,28 @@ def validate_runtime_artifacts() -> None:
         require(required_secret in identity, f"Keycloak identity profile must require {required_secret.split(':', 1)[0]}")
     require("/health/ready" in identity, "Keycloak identity profile must expose a readiness healthcheck")
 
+    realm = json.loads(read(ROOT / "infra" / "keycloak" / "open-data-fusion-realm.json"))
+    clients = realm.get("clients", [])
+    require(
+        all("roles" not in client for client in clients),
+        "Keycloak client roles must be declared in RealmRepresentation.roles.client, not ClientRepresentation.roles",
+    )
+    api_roles = realm.get("roles", {}).get("client", {}).get("open-data-fusion-api", [])
+    required_api_roles = {
+        "data:read",
+        "data:ingest",
+        "relations:review",
+        "audit:read",
+        "platform:admin",
+        "writeback:request",
+        "writeback:approve",
+        "writeback:execute",
+    }
+    require(
+        {role.get("name") for role in api_roles} == required_api_roles,
+        "Keycloak realm must define the complete Open Data Fusion API client-role set",
+    )
+
     production_like = read(ROOT / "docker-compose.production-like.yml")
     for service in ["keycloak:", "api:", "api-replica:", "outbox-worker:"]:
         require(service in production_like, f"production-like Compose profile missing {service}")
@@ -383,6 +406,15 @@ def validate_runtime_artifacts() -> None:
         '"packages/platform-core/**"',
     ]:
         require(guardrail in production_like_workflow, f"production-like integration workflow missing guardrail: {guardrail}")
+
+    infrastructure_workflow = read(ROOT / ".github" / "workflows" / "infra-validate.yml")
+    for guardrail in [
+        "Create least-privilege runtime probe principal",
+        "odf_validation_api",
+        "GRANT odf_app TO odf_validation_api",
+        "postgresql://odf_validation_api:",
+    ]:
+        require(guardrail in infrastructure_workflow, f"infrastructure runtime probe missing guardrail: {guardrail}")
 
     production_like_smoke = read(ROOT / "infra" / "ci" / "production-like-smoke.sh")
     for guardrail in [
@@ -474,7 +506,7 @@ def main() -> int:
         migrations = validate_manifest()
         validate_migrations(migrations)
         validate_runtime_artifacts()
-    except (AssertionError, OSError, UnicodeError) as error:
+    except (AssertionError, OSError, UnicodeError, ValueError) as error:
         print(f"Infrastructure static validation failed: {error}", file=sys.stderr)
         return 1
 

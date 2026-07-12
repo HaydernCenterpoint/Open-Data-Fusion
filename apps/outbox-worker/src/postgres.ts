@@ -57,7 +57,6 @@ export class PostgresOutboxRepository implements OutboxRepository {
         ORDER BY event.available_at, event.occurred_at, event.event_id
         LIMIT $1
         FOR UPDATE SKIP LOCKED
-      )
       ), claimed AS (
         UPDATE odf.outbox_events AS event
         SET lease_owner = $2,
