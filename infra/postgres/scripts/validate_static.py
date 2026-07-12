@@ -433,6 +433,10 @@ def validate_runtime_artifacts() -> None:
         "has_table_privilege('odf_ci_api'",
     ]:
         require(guardrail in production_like_smoke, f"production-like smoke script missing assertion: {guardrail}")
+    require(
+        "wrong_project_id" not in production_like_smoke,
+        "production-like smoke script must use its declared unauthorized project fixture",
+    )
 
     otel = read(ROOT / "infra" / "observability" / "otel-collector-config.yaml")
     prometheus = read(ROOT / "infra" / "observability" / "prometheus.yml")

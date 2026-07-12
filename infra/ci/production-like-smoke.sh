@@ -319,7 +319,7 @@ if [ "$stale_status" != "409" ]; then
 fi
 
 wrong_scope_status="$(curl --silent --show-error --output "${tmp_dir}/wrong-scope.json" --write-out '%{http_code}' \
-  -H "$auth_header" -H "$tenant_header" -H "x-odf-project-id: ${wrong_project_id}" \
+  -H "$auth_header" -H "$tenant_header" -H "x-odf-project-id: ${unauthorized_project_id}" \
   "${api_base}/api/v1/workspaces/${workspace_id}")"
 case "$wrong_scope_status" in
   403|404) ;;
