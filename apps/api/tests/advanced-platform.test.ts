@@ -443,6 +443,7 @@ describe('advanced project platform API', () => {
     const developmentApp = createApp(database, undefined, { writebackPolicy: policy });
     const developmentExtraction = await request(developmentApp)
       .post('/api/v1/platform/diagrams/tag-extractions')
+      .set('x-odf-user', 'harper.dennis')
       .set('x-odf-tenant-id', 'demo')
       .set('x-odf-project-id', 'north-plant')
       .send({ id: 'development-extraction', documentExternalId: 'PID-DEV', text: 'Pump P-101' });

@@ -149,7 +149,19 @@ export class PostgresRuntime implements TransactionRunner {
         text: [
           "SELECT",
           "  to_regclass('odf.schema_migrations') IS NOT NULL AS schema_present,",
-          "  to_regclass('odf.raw_ingest_objects') IS NOT NULL AS tenant_data_plane_present,",
+          "  (",
+          "    to_regclass('odf.raw_ingest_objects') IS NOT NULL",
+          "    AND to_regprocedure('odf.current_project_id()') IS NOT NULL",
+          "    AND EXISTS (",
+          "      SELECT 1 FROM pg_attribute",
+          "      WHERE attrelid = 'odf.audit_log'::regclass AND attname = 'tenant_id' AND NOT attisdropped",
+          "    )",
+          "    AND EXISTS (",
+          "      SELECT 1 FROM pg_attribute",
+          "      WHERE attrelid = 'odf.audit_log'::regclass AND attname = 'project_id' AND NOT attisdropped",
+          "    )",
+          "    AND has_table_privilege(current_user, 'odf.document_asset_links', 'DELETE')",
+          "  ) AS tenant_data_plane_present,",
           "  to_regclass('odf.workspace_scopes') IS NOT NULL AS workspace_scope_present,",
           "  to_regclass('odf.project_members') IS NOT NULL AS project_membership_present,",
           "  (",
@@ -163,6 +175,8 @@ export class PostgresRuntime implements TransactionRunner {
           "    AND has_table_privilege(current_user, 'odf.workspace_members', 'DELETE')",
           "    AND has_table_privilege(current_user, 'odf.workspace_scopes', 'SELECT')",
           "    AND has_table_privilege(current_user, 'odf.project_members', 'SELECT')",
+          "    AND to_regprocedure('odf.create_project_workspace(uuid,text,text,uuid)') IS NOT NULL",
+          "    AND has_function_privilege(current_user, 'odf.create_project_workspace(uuid,text,text,uuid)', 'EXECUTE')",
           "  ) AS workspace_grants_present,",
           "  (",
           "    NOT EXISTS (",
@@ -175,6 +189,8 @@ export class PostgresRuntime implements TransactionRunner {
           "    AND NOT pg_has_role(current_user, 'odf_outbox_publisher', 'member')",
           "    AND NOT pg_has_role(current_user, 'odf_cutover', 'member')",
           "    AND NOT pg_has_role(current_user, 'odf_tenant_provisioner', 'member')",
+          "    AND NOT pg_has_role(current_user, 'odf_project_discovery_owner', 'member')",
+          "    AND NOT pg_has_role(current_user, 'odf_workspace_bootstrap_owner', 'member')",
           "    AND NOT has_table_privilege(current_user, 'odf.workspace_scopes', 'INSERT, UPDATE, DELETE')",
           "    AND NOT has_table_privilege(current_user, 'odf.outbox_events', 'UPDATE, DELETE, TRUNCATE')",
           "  ) AS api_principal_attested",
@@ -224,6 +240,9 @@ export class PostgresRuntime implements TransactionRunner {
   ): Promise<T> {
     const userId = nonEmpty(context.userId, "userId");
     const tenantId = context.tenantId === null ? "" : nonEmpty(context.tenantId, "tenantId");
+    const projectId = context.projectId === null || context.projectId === undefined
+      ? ""
+      : nonEmpty(context.projectId, "projectId");
     const platformAdmin = context.platformAdmin === true ? "true" : "false";
     let client: RuntimeClient | null = null;
     let began = false;
@@ -234,7 +253,7 @@ export class PostgresRuntime implements TransactionRunner {
       client = acquiredClient;
       await acquiredClient.query({ text: "BEGIN" });
       began = true;
-      await this.configureTransaction(acquiredClient, tenantId, userId, platformAdmin);
+      await this.configureTransaction(acquiredClient, tenantId, projectId, userId, platformAdmin);
 
       const transaction: ScopedTransaction = {
         kind: "database-transaction",
@@ -264,6 +283,7 @@ export class PostgresRuntime implements TransactionRunner {
   private async configureTransaction(
     client: RuntimeClient,
     tenantId: string,
+    projectId: string,
     userId: string,
     platformAdmin: string,
   ): Promise<void> {
@@ -284,6 +304,10 @@ export class PostgresRuntime implements TransactionRunner {
     await client.query({
       text: "SELECT set_config('odf.tenant_id', $1, true)",
       values: [tenantId],
+    });
+    await client.query({
+      text: "SELECT set_config('odf.project_id', $1, true)",
+      values: [projectId],
     });
     await client.query({
       text: "SELECT set_config('odf.user_id', $1, true)",

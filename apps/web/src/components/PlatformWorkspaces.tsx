@@ -46,6 +46,7 @@ import type {
   PlatformQualityResult,
   PlatformSource,
   PlatformTenant,
+  RelationListResponse,
 } from "../types";
 import { formatDate, LoadState, SectionHeading } from "./SectionWorkspaces";
 
@@ -455,12 +456,13 @@ export function PlatformContextWorkspace({ context, onOpenAsset }: { context: Pl
     setReviewIssue(null);
     void Promise.all([
       context ? capture(listPlatformCandidates(context, { limit: PLATFORM_PAGE_SIZE }, controller.signal)) : Promise.resolve<Captured<CursorPage<PlatformContextCandidate>> | null>(null),
-      capture(listRelations({ limit: 200 }, controller.signal)),
+      context ? capture(listRelations(context, { limit: 200 }, controller.signal)) : Promise.resolve<Captured<RelationListResponse> | null>(null),
     ]).then(([candidateResult, legacyResult]) => {
       if (controller.signal.aborted) return;
       if (candidateResult) setCandidates(stateFromResult(candidateResult, "Context candidates could not be loaded"));
-      if (legacyResult.ok) setLegacyRelations(legacyResult.value.items);
-      else { setLegacyRelations([]); setLegacyIssue(platformIssue(legacyResult.error, "Legacy relations could not be loaded")); }
+      if (legacyResult?.ok) setLegacyRelations(legacyResult.value.items);
+      else if (legacyResult) { setLegacyRelations([]); setLegacyIssue(platformIssue(legacyResult.error, "Legacy relations could not be loaded")); }
+      else setLegacyRelations([]);
     });
     return () => controller.abort();
   }, [context?.tenantId, context?.projectId, reloadToken]);

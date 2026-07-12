@@ -1,6 +1,6 @@
-# Production image for the API build context. Workspace/Canvas endpoints can
-# select the PostgreSQL runtime at startup; other legacy surfaces remain on
-# their local adapters until their own cutover work is complete.
+# Production image for the API build context. Industrial core and Canvas can
+# select SQLite or PostgreSQL at startup; advanced surfaces that have not yet
+# moved to PostgreSQL retain their local adapters.
 FROM node:24-alpine AS build
 
 WORKDIR /workspace

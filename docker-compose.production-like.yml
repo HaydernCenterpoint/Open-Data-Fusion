@@ -57,6 +57,7 @@ services:
       ODF_OIDC_JWKS_URI: http://keycloak:8080/realms/open-data-fusion/protocol/openid-connect/certs
       ODF_OIDC_USER_CLAIM: preferred_username
       ODF_WORKSPACE_PERSISTENCE: postgres
+      ODF_DATA_PERSISTENCE: postgres
       # Empty is deliberate during dependency/migration bootstrap. The API
       # process rejects it at startup, so the profile remains fail-closed.
       ODF_API_POSTGRES_URL: "${ODF_API_POSTGRES_URL:-}"
@@ -87,6 +88,7 @@ services:
       ODF_OIDC_JWKS_URI: http://keycloak:8080/realms/open-data-fusion/protocol/openid-connect/certs
       ODF_OIDC_USER_CLAIM: preferred_username
       ODF_WORKSPACE_PERSISTENCE: postgres
+      ODF_DATA_PERSISTENCE: postgres
       ODF_API_POSTGRES_URL: "${ODF_API_POSTGRES_URL:-}"
       ODF_SEED: "false"
       ODF_DATABASE_PATH: /var/lib/odf/open-data-fusion.db

@@ -44,7 +44,9 @@ const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 const URL_WORKSPACE_USER = typeof window === "undefined"
   ? ""
   : new URLSearchParams(window.location.search).get("user")?.trim() ?? "";
-export const WORKSPACE_USER = URL_WORKSPACE_USER || import.meta.env.VITE_WORKSPACE_USER || "harper.dennis";
+export const WORKSPACE_USER = URL_WORKSPACE_USER
+  || import.meta.env.VITE_WORKSPACE_USER
+  || (import.meta.env.MODE === "test" ? "harper.dennis" : "local-user");
 
 export class ApiRequestError extends Error {
   constructor(
@@ -110,15 +112,17 @@ export async function getHealth(signal?: AbortSignal): Promise<boolean> {
   }
 }
 
-export function ingestBundle(bundle: IngestBundle): Promise<IngestResult> {
+export function ingestBundle(context: PlatformContext, bundle: IngestBundle): Promise<IngestResult> {
   return request<IngestResult>("/api/ingest", {
     method: "POST",
+    headers: platformHeaders(context),
     body: JSON.stringify(bundle),
   });
 }
 
 export async function getExplorerSnapshot(
-  externalId = "P-101",
+  context: PlatformContext,
+  externalId: string,
   signal?: AbortSignal,
 ): Promise<ExplorerSnapshot> {
   const encodedId = encodeURIComponent(externalId);
@@ -130,13 +134,14 @@ export async function getExplorerSnapshot(
     limit: "5000",
   });
   const [detail, telemetry] = await Promise.all([
-    request<AssetDetailResponse>(`/api/v1/assets/${encodedId}`, { signal }),
-    request<TelemetryResponse>(`/api/v1/assets/${encodedId}/telemetry?${telemetryQuery.toString()}`, { signal }),
+    request<AssetDetailResponse>(`/api/v1/assets/${encodedId}`, { signal, headers: platformHeaders(context) }),
+    request<TelemetryResponse>(`/api/v1/assets/${encodedId}/telemetry?${telemetryQuery.toString()}`, { signal, headers: platformHeaders(context) }),
   ]);
   return { detail, telemetry };
 }
 
 export function listAssets(
+  context: PlatformContext,
   query: { q?: string; type?: string; limit?: number; offset?: number } = {},
   signal?: AbortSignal,
 ): Promise<AssetListResponse> {
@@ -146,10 +151,11 @@ export function listAssets(
   if (query.limit !== undefined) parameters.set("limit", String(query.limit));
   if (query.offset !== undefined) parameters.set("offset", String(query.offset));
   const suffix = parameters.size > 0 ? `?${parameters.toString()}` : "";
-  return request<AssetListResponse>(`/api/v1/assets${suffix}`, { signal });
+  return request<AssetListResponse>(`/api/v1/assets${suffix}`, { signal, headers: platformHeaders(context) });
 }
 
 export function listRelations(
+  context: PlatformContext,
   query: { status?: "proposed" | "accepted" | "rejected" | "superseded"; limit?: number } = {},
   signal?: AbortSignal,
 ): Promise<RelationListResponse> {
@@ -157,10 +163,11 @@ export function listRelations(
   if (query.status) parameters.set("status", query.status);
   if (query.limit !== undefined) parameters.set("limit", String(query.limit));
   const suffix = parameters.size > 0 ? `?${parameters.toString()}` : "";
-  return request<RelationListResponse>(`/api/v1/relations${suffix}`, { signal });
+  return request<RelationListResponse>(`/api/v1/relations${suffix}`, { signal, headers: platformHeaders(context) });
 }
 
 export function listAudit(
+  context: PlatformContext,
   query: { action?: string; entityType?: string; entityId?: string; limit?: number; offset?: number } = {},
   signal?: AbortSignal,
 ): Promise<AuditListResponse> {
@@ -171,7 +178,7 @@ export function listAudit(
   if (query.limit !== undefined) parameters.set("limit", String(query.limit));
   if (query.offset !== undefined) parameters.set("offset", String(query.offset));
   const suffix = parameters.size > 0 ? `?${parameters.toString()}` : "";
-  return request<AuditListResponse>(`/api/v1/audit${suffix}`, { signal });
+  return request<AuditListResponse>(`/api/v1/audit${suffix}`, { signal, headers: platformHeaders(context) });
 }
 
 function cursorSuffix(query: { limit?: number; cursor?: string }): string {

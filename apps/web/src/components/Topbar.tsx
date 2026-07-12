@@ -41,6 +41,11 @@ export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platfo
       setSearchState(platformStatus);
       return () => controller.abort();
     }
+    if (!platformContext) {
+      setMatches([]);
+      setSearchState("idle");
+      return () => controller.abort();
+    }
     void (async () => {
       if (platformContext) {
         try {
@@ -59,18 +64,18 @@ export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platfo
         }
       }
       try {
-        const response = await listAssets({ q: deferredQuery, limit: 20, offset: 0 }, controller.signal);
+        const response = await listAssets(platformContext, { q: deferredQuery, limit: 20, offset: 0 }, controller.signal);
         if (controller.signal.aborted) return;
         setMatches(response.items.map((asset) => ({
-          tenantId: platformContext?.tenantId ?? "",
-          projectId: platformContext?.projectId ?? "",
+          tenantId: platformContext.tenantId,
+          projectId: platformContext.projectId,
           entityType: "asset",
           entityId: asset.externalId,
           title: asset.name,
           summary: `${asset.externalId} · ${asset.type} · ${asset.sourceSystem}`,
           updatedAt: asset.updatedAt,
         })));
-        setSearchState(platformContext || platformStatus !== "ready" ? "degraded" : "ready");
+        setSearchState("degraded");
       } catch {
         if (controller.signal.aborted) return;
         setMatches([]);

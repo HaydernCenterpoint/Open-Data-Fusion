@@ -65,6 +65,7 @@ export class PostgresIngestionRepository implements IngestionRepository {
 
     const context: TransactionContext = {
       tenantId: input.tenantId,
+      projectId: input.projectId,
       userId: input.actor,
     };
     return this.runner.withTransaction(context, async (transaction) => {
@@ -290,10 +291,17 @@ export class PostgresIngestionRepository implements IngestionRepository {
     await transaction.query({
       text: [
         "INSERT INTO odf.audit_log",
-        "  (actor, action, entity_type, entity_id, details, correlation_id)",
-        "VALUES ($1, 'ingestion.raw_landed', 'ingestionRun', $2, $3::jsonb, $4::uuid)",
+        "  (tenant_id, project_id, actor, action, entity_type, entity_id, details, correlation_id)",
+        "VALUES ($1::uuid, $2::uuid, $3, 'ingestion.raw_landed', 'ingestionRun', $4, $5::jsonb, $6::uuid)",
       ].join("\n"),
-      values: [input.actor, run.ingestionRunId, json(details), input.correlationId],
+      values: [
+        input.tenantId,
+        input.projectId,
+        input.actor,
+        run.ingestionRunId,
+        json({ ...details, tenantId: input.tenantId, projectId: input.projectId }),
+        input.correlationId,
+      ],
     });
     await transaction.query({
       text: [

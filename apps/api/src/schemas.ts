@@ -11,8 +11,8 @@ const metadata = z.record(z.unknown()).default({});
 
 const timestamp = z.union([z.number().finite(), z.string().trim().min(1)]).transform((value, context) => {
   const parsed = typeof value === 'number' ? value : Date.parse(value);
-  if (!Number.isFinite(parsed)) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Expected an ISO-8601 date or epoch milliseconds' });
+  if (!Number.isSafeInteger(parsed) || Math.abs(parsed) > 8_640_000_000_000_000) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Expected an ISO-8601 date or integer epoch milliseconds in the JavaScript Date range' });
     return z.NEVER;
   }
   return parsed;
@@ -243,6 +243,8 @@ const relationSchema = z.object({
   targetExternalId: externalId,
   relationType: z.string().trim().min(1).max(100),
   status: z.enum(['proposed', 'accepted']).default('proposed'),
+  // Null/omitted input means "no score supplied" and is persisted as the
+  // cross-backend default 0; relation responses therefore always expose 0..1.
   confidence: z.number().min(0).max(1).nullable().optional(),
   evidence: z.record(z.unknown()).default({}),
   ruleVersion: z.string().trim().max(100).nullable().optional(),
@@ -271,12 +273,99 @@ export const ingestBundleSchema = z
     if (recordCount === 0) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: 'The bundle must contain at least one record' });
     }
+
+    const entityTypes = new Map<string, { type: z.infer<typeof entityTypeSchema>; path: Array<string | number> }>();
+    const definitions = new Set<string>();
+    const register = (
+      type: z.infer<typeof entityTypeSchema>,
+      id: string | null | undefined,
+      path: Array<string | number>,
+      definition = false,
+    ): void => {
+      if (!id) return;
+      const prior = entityTypes.get(id);
+      if (prior && prior.type !== type) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `External ID '${id}' is already used as ${prior.type}; one model space uses a shared entity namespace`,
+        });
+      } else if (!prior) {
+        entityTypes.set(id, { type, path });
+      }
+      if (definition) {
+        const key = `${type}\u0000${id}`;
+        if (definitions.has(key)) {
+          context.addIssue({ code: z.ZodIssueCode.custom, path, message: `Duplicate ${type} definition '${id}'` });
+        }
+        definitions.add(key);
+      }
+    };
+
+    bundle.assets.forEach((asset, index) => {
+      register('asset', asset.externalId, ['assets', index, 'externalId'], true);
+      register('asset', asset.parentExternalId, ['assets', index, 'parentExternalId']);
+    });
+    bundle.timeSeries.forEach((series, index) => {
+      register('timeSeries', series.externalId, ['timeSeries', index, 'externalId'], true);
+      register('asset', series.assetExternalId, ['timeSeries', index, 'assetExternalId']);
+    });
+    const pointKeys = new Set<string>();
+    bundle.dataPoints.forEach((point, index) => {
+      register('timeSeries', point.timeSeriesExternalId, ['dataPoints', index, 'timeSeriesExternalId']);
+      const key = `${point.timeSeriesExternalId}\u0000${String(point.timestamp)}`;
+      if (pointKeys.has(key)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['dataPoints', index, 'timestamp'],
+          message: `Duplicate observation for '${point.timeSeriesExternalId}' at the same timestamp`,
+        });
+      }
+      pointKeys.add(key);
+    });
+    bundle.documents.forEach((document, index) => {
+      register('document', document.externalId, ['documents', index, 'externalId'], true);
+      register('asset', document.assetExternalId, ['documents', index, 'assetExternalId']);
+    });
+    const relationKeys = new Set<string>();
+    bundle.relations.forEach((relation, index) => {
+      register(relation.sourceType, relation.sourceExternalId, ['relations', index, 'sourceExternalId']);
+      register(relation.targetType, relation.targetExternalId, ['relations', index, 'targetExternalId']);
+      if (relation.sourceType === relation.targetType && relation.sourceExternalId === relation.targetExternalId) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relations', index],
+          message: 'Relation source and target must be different entities',
+        });
+      }
+      const key = JSON.stringify([
+        relation.sourceType,
+        relation.sourceExternalId,
+        relation.targetType,
+        relation.targetExternalId,
+        relation.relationType,
+      ]);
+      if (relationKeys.has(key)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relations', index],
+          message: 'Duplicate semantic relation in one bundle',
+        });
+      }
+      relationKeys.add(key);
+    });
   });
 
 export const relationReviewSchema = z.object({
   decision: z.enum(['accepted', 'rejected']),
   reviewer: z.string().trim().min(1).max(255).optional().default('authenticated-user'),
   comment: z.string().trim().max(2_000).nullable().optional(),
+});
+
+export const workspaceCreateSchema = z.object({
+  id: workspaceIdSchema,
+  name: z.string().trim().min(1).max(256)
+    .refine((value) => !/\p{Cc}/u.test(value), 'Workspace name must not contain control characters'),
 });
 
 export type AssetListQuery = z.infer<typeof assetListQuerySchema>;
@@ -287,6 +376,7 @@ export type AuditListQuery = z.infer<typeof auditListQuerySchema>;
 export type IngestBundle = z.infer<typeof ingestBundleSchema>;
 export type RelationReview = z.infer<typeof relationReviewSchema>;
 export type WorkspaceSnapshot = z.infer<typeof workspaceSnapshotSchema>;
+export type WorkspaceCreate = z.infer<typeof workspaceCreateSchema>;
 export type WorkspaceUpdate = z.infer<typeof workspaceUpdateSchema>;
 export type WorkspaceRollback = z.infer<typeof workspaceRollbackSchema>;
 export type WorkspaceRevisionQuery = z.infer<typeof workspaceRevisionQuerySchema>;

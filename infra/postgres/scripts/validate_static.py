@@ -185,6 +185,81 @@ def validate_migrations(migration_paths: list[Path]) -> None:
         "tenant provisioner must have only schema_migrations SELECT and no direct tenant data grants",
     )
 
+    hardening = read(MIGRATIONS / "008_industrial_runtime_hardening.sql")
+    for guardrail in [
+        "CREATE OR REPLACE FUNCTION odf.current_project_id()",
+        "ADD COLUMN IF NOT EXISTS tenant_id uuid",
+        "ADD COLUMN IF NOT EXISTS project_id uuid",
+        "audit_log_project_scope_fk",
+        "CREATE TRIGGER audit_log_populate_scope",
+        "ALTER TABLE odf.audit_log FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY audit_log_app_scope",
+        "CREATE POLICY audit_log_readonly_scope",
+        "CREATE POLICY audit_log_cutover_insert",
+        "CREATE POLICY audit_log_provision_owner_insert",
+        "GRANT DELETE ON odf.document_asset_links TO odf_app",
+        "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+        "graph_instances_external_id_trgm_idx",
+        "assets_name_trgm_idx",
+    ]:
+        require(guardrail in hardening, f"missing industrial runtime hardening guardrail: {guardrail}")
+
+    discovery = read(MIGRATIONS / "009_membership_scoped_project_discovery.sql")
+    for guardrail in [
+        "CREATE ROLE odf_project_discovery_owner",
+        "ALTER ROLE odf_project_discovery_owner WITH",
+        "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT NOBYPASSRLS",
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA odf FROM odf_project_discovery_owner",
+        "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA odf FROM odf_project_discovery_owner",
+        "GRANT SELECT ON",
+        "CREATE POLICY project_discovery_owner_read",
+        "TO odf_project_discovery_owner USING (true)",
+        "CREATE OR REPLACE FUNCTION odf.discover_accessible_tenants(",
+        "CREATE OR REPLACE FUNCTION odf.discover_accessible_projects(",
+        "current_setting('odf.user_id', true)",
+        "current_setting('odf.tenant_id', true)",
+        "SECURITY DEFINER",
+        "SET row_security = on",
+        "OWNER TO odf_project_discovery_owner",
+        "GRANT EXECUTE ON FUNCTION odf.discover_accessible_tenants(uuid, integer) TO odf_app",
+        "GRANT EXECUTE ON FUNCTION odf.discover_accessible_projects(uuid, integer) TO odf_app",
+    ]:
+        require(guardrail in discovery, f"missing PostgreSQL project discovery guardrail: {guardrail}")
+    require("p_user_id" not in discovery, "SECURITY DEFINER discovery functions must not accept a caller-selected user id")
+    require("p_tenant_id" not in discovery, "SECURITY DEFINER project discovery must use the transaction tenant setting")
+    require("odf.platform_admin" not in discovery, "PostgreSQL discovery must not add an unguarded platform-admin bypass")
+
+    workspace_bootstrap = read(MIGRATIONS / "010_project_workspace_bootstrap.sql")
+    for guardrail in [
+        "CREATE ROLE odf_workspace_bootstrap_owner",
+        "ALTER ROLE odf_workspace_bootstrap_owner WITH",
+        "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT NOBYPASSRLS",
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA odf FROM odf_workspace_bootstrap_owner",
+        "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA odf FROM odf_workspace_bootstrap_owner",
+        "CREATE POLICY workspace_bootstrap_owner_read",
+        "CREATE POLICY workspace_bootstrap_owner_insert",
+        "CREATE OR REPLACE FUNCTION odf.create_project_workspace(",
+        "current_setting('odf.tenant_id', true)",
+        "current_setting('odf.project_id', true)",
+        "current_setting('odf.user_id', true)",
+        "active project owner permission is required",
+        "SECURITY DEFINER",
+        "SET search_path = pg_catalog, odf, pg_temp",
+        "SET row_security = on",
+        "OWNER TO odf_workspace_bootstrap_owner",
+        "GRANT EXECUTE ON FUNCTION odf.create_project_workspace(uuid, text, text, uuid) TO odf_app",
+        "'workspace.created'",
+        "INSERT INTO odf.workspace_scopes",
+        "INSERT INTO odf.workspace_revisions",
+        "INSERT INTO odf.audit_log",
+        "INSERT INTO odf.outbox_events",
+    ]:
+        require(guardrail in workspace_bootstrap, f"missing project workspace bootstrap guardrail: {guardrail}")
+    require(
+        "GRANT INSERT ON odf.workspaces TO odf_app" not in workspace_bootstrap,
+        "workspace bootstrap must not grant direct workspace INSERT to the application role",
+    )
+
 
 def validate_tenant_foreign_keys(sql: str) -> None:
     """Catch scope-breaking composite FKs before a migration reaches PostgreSQL.
@@ -259,6 +334,7 @@ def validate_runtime_artifacts() -> None:
     for service in ["odf-postgres:", "odf-redis:", "outbox-worker:", "otel-collector:", "prometheus:", "grafana:"]:
         require(service in compose, f"docker-compose.yml missing {service}")
     require("application-preview" in compose, "application preview profile is missing")
+    require("ODF_DATA_PERSISTENCE: sqlite" in compose, "application preview must select the SQLite data backend")
     require("ODF_WORKSPACE_PERSISTENCE: sqlite" in compose, "the application preview must explicitly select SQLite")
     require("profiles: [\"workers\"]" in compose, "outbox worker must remain an explicitly enabled profile")
     require("service_completed_successfully" in compose, "outbox worker must wait for the migration gate")
@@ -284,6 +360,7 @@ def validate_runtime_artifacts() -> None:
     for guardrail in [
         "profiles: [\"production-like\"]",
         "ODF_WORKSPACE_PERSISTENCE: postgres",
+        "ODF_DATA_PERSISTENCE: postgres",
         "ODF_API_POSTGRES_URL:",
         "ODF_SEED: \"false\"",
         "ODF_OUTBOX_POSTGRES_URL:",
@@ -313,6 +390,14 @@ def validate_runtime_artifacts() -> None:
         "XRANGE odf:workspace-events",
         "eventId",
         "event: workspace.updated",
+        "/api/v1/platform/tenants?limit=100",
+        "/projects?limit=100",
+        "authenticated PostgreSQL tenant discovery",
+        "/api/v1/ingest/bundle",
+        "ci-industrial-run-1",
+        "cross-replica PostgreSQL ingest was not idempotent",
+        "run.raw_object_id IS NOT NULL",
+        "audit.tenant_id = run.tenant_id",
         "has_table_privilege('odf_ci_api'",
     ]:
         require(guardrail in production_like_smoke, f"production-like smoke script missing assertion: {guardrail}")

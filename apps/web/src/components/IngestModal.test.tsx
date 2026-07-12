@@ -12,7 +12,7 @@ function ModalHarness() {
   return (
     <>
       <button type="button" onClick={() => setOpen(true)}>Open ingest</button>
-      <IngestModal open={open} onClose={() => setOpen(false)} onComplete={vi.fn()} />
+      <IngestModal context={{ tenantId: "tenant-1", projectId: "project-1" }} open={open} onClose={() => setOpen(false)} onComplete={vi.fn()} />
     </>
   );
 }
@@ -24,12 +24,12 @@ describe("IngestModal", () => {
     trigger.focus();
     fireEvent.click(trigger);
 
-    const dialog = screen.getByRole("dialog", { name: "Ingest sample bundle" });
-    const firstField = screen.getByRole("combobox", { name: "Source system" });
+    const dialog = screen.getByRole("dialog", { name: "Ingest measurement bundle" });
+    const firstField = screen.getByRole("textbox", { name: "Source system" });
     const closeButton = screen.getByRole("button", { name: "Close ingest dialog" });
     const submitButton = screen.getByRole("button", { name: "Start ingest" });
 
-    expect(dialog).toHaveAccessibleDescription("Send a reproducible P-101 demonstration bundle to Open Data Fusion.");
+    expect(dialog).toHaveAccessibleDescription("Create or update a real asset and time series in the selected project.");
     await waitFor(() => expect(firstField).toHaveFocus());
 
     closeButton.focus();
@@ -43,7 +43,7 @@ describe("IngestModal", () => {
     expect(firstField).toHaveFocus();
 
     fireEvent.keyDown(firstField, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Ingest sample bundle" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Ingest measurement bundle" })).not.toBeInTheDocument();
     await waitFor(() => expect(trigger).toHaveFocus());
   });
 });

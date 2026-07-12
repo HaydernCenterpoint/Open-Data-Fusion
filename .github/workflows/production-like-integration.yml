@@ -1,4 +1,4 @@
-name: Production-like PostgreSQL Canvas integration
+name: Production-like PostgreSQL Canvas integration and industrial data smoke
 
 on:
   push:
@@ -267,41 +267,35 @@ jobs:
           VALUES ('11111111-1111-4111-8111-111111111111', 'ci-tenant', 'CI tenant');
           INSERT INTO odf.projects (project_id, tenant_id, slug, name)
           VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', 'ci-project', 'CI project');
+          INSERT INTO odf.projects (project_id, tenant_id, slug, name)
+          VALUES ('33333333-3333-4333-8333-333333333333', '11111111-1111-4111-8111-111111111111', 'ci-unauthorized-project', 'CI unauthorized project');
+          INSERT INTO odf.tenants (tenant_id, slug, name)
+          VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab', 'ci-unauthorized-tenant', 'CI unauthorized tenant');
+          INSERT INTO odf.projects (project_id, tenant_id, slug, name)
+          VALUES ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab', 'ci-hidden-project', 'CI hidden project');
           INSERT INTO odf.tenant_members (tenant_id, user_id, role, created_by)
           VALUES ('11111111-1111-4111-8111-111111111111', 'service-account-open-data-fusion-connector', 'owner', 'ci-bootstrap');
           INSERT INTO odf.project_members (tenant_id, project_id, user_id, role, created_by)
           VALUES ('11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', 'service-account-open-data-fusion-connector', 'owner', 'ci-bootstrap');
-          INSERT INTO odf.workspaces (id, name, snapshot, version, created_by, updated_by)
+          INSERT INTO odf.model_spaces (space_id, tenant_id, project_id, external_id, name)
           VALUES (
-            'ci-production-like-workspace',
-            'CI production-like workspace',
-            '{"viewport":{"x":0,"y":0,"zoom":1},"nodes":[],"edges":[]}'::jsonb,
-            1,
-            'service-account-open-data-fusion-connector',
-            'service-account-open-data-fusion-connector'
-          );
-          INSERT INTO odf.workspace_scopes (workspace_id, tenant_id, project_id, assigned_by)
-          VALUES (
-            'ci-production-like-workspace',
+            '66666666-6666-4666-8666-666666666666',
             '11111111-1111-4111-8111-111111111111',
             '22222222-2222-4222-8222-222222222222',
-            'ci-bootstrap'
+            'default',
+            'Default CI model space'
           );
-          INSERT INTO odf.workspace_members (workspace_id, user_id, display_name, role)
-          VALUES (
-            'ci-production-like-workspace',
-            'service-account-open-data-fusion-connector',
-            'CI connector service account',
-            'owner'
-          );
-          INSERT INTO odf.workspace_revisions (workspace_id, version, snapshot, change_summary, actor, correlation_id)
-          VALUES (
-            'ci-production-like-workspace',
-            1,
-            '{"viewport":{"x":0,"y":0,"zoom":1},"nodes":[],"edges":[]}'::jsonb,
-            'Initial CI fixture',
-            'ci-bootstrap',
-            '55555555-5555-4555-8555-555555555555'
+          INSERT INTO odf.source_connections (
+            source_connection_id, tenant_id, project_id, external_id, name, connector_kind, state, endpoint
+          ) VALUES (
+            '77777777-7777-4777-8777-777777777777',
+            '11111111-1111-4111-8111-111111111111',
+            '22222222-2222-4222-8222-222222222222',
+            'ci-opcua',
+            'CI OPC-UA source',
+            'opcua',
+            'ready',
+            'opc.tcp://ci-edge.invalid:4840'
           );
           SQL
 
@@ -310,7 +304,7 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.production-like.yml
           --profile production-like up -d --build --wait keycloak api api-replica outbox-worker
 
-      - name: Prove PostgreSQL Canvas update, outbox, Redis, and replica SSE
+      - name: Prove PostgreSQL industrial ingest plus Canvas outbox, Redis, and replica SSE
         run: bash infra/ci/production-like-smoke.sh
 
       - name: Show integration service logs after failure

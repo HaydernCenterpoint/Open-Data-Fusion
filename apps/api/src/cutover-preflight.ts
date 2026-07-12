@@ -403,6 +403,24 @@ export function createSqliteCutoverPreflightReport(
   database: DatabaseSync,
   databasePath: string,
 ): SqliteCutoverPreflightReport {
+  const hasWorkspaceScopes = database.prepare(`
+    SELECT 1 AS found FROM sqlite_master
+    WHERE type = 'table' AND name = 'workspace_scopes'
+  `).get();
+  const scopedWorkspace = hasWorkspaceScopes
+    ? database.prepare(`
+        SELECT workspace_id, tenant_id, project_id
+        FROM workspace_scopes
+        ORDER BY workspace_id
+        LIMIT 1
+      `).get() as SqliteRow | undefined
+    : undefined;
+  if (scopedWorkspace) {
+    throw new SqliteCutoverPreflightError(
+      `SQLite workspace '${String(scopedWorkspace.workspace_id)}' already has an immutable tenant/project scope; `
+      + 'the v1 cutover bundle accepts one operator-supplied target scope for every workspace and cannot safely preserve scoped workspaces',
+    );
+  }
   const workspaces = database.prepare(`
     SELECT id, name, snapshot_json, version, created_by, created_at, updated_by, updated_at
     FROM workspaces

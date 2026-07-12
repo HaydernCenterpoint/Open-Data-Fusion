@@ -21,6 +21,10 @@ describe("PostgresProjectAccessResolver", () => {
     await expect(resolver.resolve(scope)).resolves.toEqual({ role: "editor" });
     const membership = client.queries.find((query) => query.text.includes("FROM odf.project_members"));
     expect(membership?.values).toEqual([scope.tenantId, scope.projectId, scope.userId]);
+    expect(membership?.text).toContain("JOIN odf.projects AS project");
+    expect(membership?.text).toContain("JOIN odf.tenants AS tenant");
+    expect(membership?.text).toContain("tenant.status = 'active'");
+    expect(membership?.text).toContain("project.status = 'active'");
     expect(client.queries.some((query) => query.text === "SELECT set_config('odf.tenant_id', $1, true)")).toBe(true);
   });
 

@@ -15,6 +15,7 @@ import type { WorkspaceMember } from './collaboration.js';
 import { ConflictError, DataIntegrityError, ForbiddenError, NotFoundError } from './database.js';
 import {
   workspaceSnapshotSchema,
+  type WorkspaceCreate,
   type WorkspaceMemberUpsert,
   type WorkspaceOperations,
   type WorkspaceRollback,
@@ -239,6 +240,18 @@ export class PostgresWorkspacePersistence {
 
   async getWorkspace(scope: WorkspaceRequestScope, id: string): Promise<PersistedWorkspace> {
     return this.translate(async () => asWorkspace(await this.runtime.workspaces.getWorkspace(scope, id)));
+  }
+
+  async createWorkspace(
+    scope: WorkspaceRequestScope,
+    input: WorkspaceCreate,
+    correlationId: string,
+  ): Promise<PersistedWorkspace> {
+    return this.translate(async () => asWorkspace(await this.runtime.workspaces.createWorkspace(scope, {
+      workspaceId: input.id,
+      name: input.name,
+      correlationId,
+    })));
   }
 
   async getWorkspaceMember(scope: WorkspaceRequestScope, id: string): Promise<WorkspaceMember> {

@@ -22,6 +22,11 @@ export async function appendPlatformAuditAndOutbox(
   transaction: ScopedTransaction,
   event: PlatformAuditEvent,
 ): Promise<void> {
+  const scopedDetails: JsonObject = {
+    ...event.details,
+    tenantId: event.tenantId,
+    projectId: event.projectId,
+  };
   const payload: JsonObject = {
     tenantId: event.tenantId,
     projectId: event.projectId,
@@ -33,15 +38,17 @@ export async function appendPlatformAuditAndOutbox(
   await transaction.query({
     text: [
       "INSERT INTO odf.audit_log",
-      "  (actor, action, entity_type, entity_id, details, correlation_id)",
-      "VALUES ($1, $2, $3, $4, $5::jsonb, $6::uuid)",
+      "  (tenant_id, project_id, actor, action, entity_type, entity_id, details, correlation_id)",
+      "VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb, $8::uuid)",
     ].join("\n"),
     values: [
+      event.tenantId,
+      event.projectId,
       event.actor,
       event.action,
       event.entityType,
       event.entityId,
-      json(event.details),
+      json(scopedDetails),
       event.correlationId,
     ],
   });

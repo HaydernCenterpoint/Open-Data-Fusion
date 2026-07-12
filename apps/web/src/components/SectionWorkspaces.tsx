@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { listAudit, listRelations } from "../lib/api";
-import type { ApiAuditEvent, ApiRelation } from "../types";
+import type { ApiAuditEvent, ApiRelation, PlatformContext } from "../types";
 
 const CONTEXT_PAGE_SIZE = 200;
 const AUDIT_PAGE_SIZE = 50;
@@ -105,7 +105,7 @@ function RelationRow({ relation, onOpenAsset }: { relation: ApiRelation; onOpenA
   );
 }
 
-export function ContextWorkspace({ onOpenAsset }: { onOpenAsset: (externalId: string) => void }) {
+export function ContextWorkspace({ context, onOpenAsset }: { context: PlatformContext | null; onOpenAsset: (externalId: string) => void }) {
   const [filter, setFilter] = useState<RelationFilter>("all");
   const [query, setQuery] = useState("");
   const [relations, setRelations] = useState<ApiRelation[]>([]);
@@ -115,9 +115,15 @@ export function ContextWorkspace({ onOpenAsset }: { onOpenAsset: (externalId: st
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
 
   useEffect(() => {
+    if (!context) {
+      setRelations([]);
+      setTotal(0);
+      setRequestState({ loading: false, error: "Select a project to load relationships." });
+      return undefined;
+    }
     const controller = new AbortController();
     setRequestState({ loading: true, error: "" });
-    listRelations({ status: filter === "all" ? undefined : filter, limit: CONTEXT_PAGE_SIZE }, controller.signal)
+    listRelations(context, { status: filter === "all" ? undefined : filter, limit: CONTEXT_PAGE_SIZE }, controller.signal)
       .then((response) => {
         setRelations(response.items);
         setTotal(response.total);
@@ -130,7 +136,7 @@ export function ContextWorkspace({ onOpenAsset }: { onOpenAsset: (externalId: st
         setRequestState({ loading: false, error: error instanceof Error ? error.message : "Relations could not be loaded" });
       });
     return () => controller.abort();
-  }, [filter, reloadToken]);
+  }, [context?.tenantId, context?.projectId, filter, reloadToken]);
 
   const filteredRelations = useMemo(() => {
     if (!deferredQuery) return relations;
@@ -169,7 +175,7 @@ function AuditRow({ event }: { event: ApiAuditEvent }) {
   );
 }
 
-export function AuditWorkspace() {
+export function AuditWorkspace({ context }: { context: PlatformContext | null }) {
   const [query, setQuery] = useState("");
   const [events, setEvents] = useState<ApiAuditEvent[]>([]);
   const [total, setTotal] = useState(0);
@@ -179,9 +185,15 @@ export function AuditWorkspace() {
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
 
   useEffect(() => {
+    if (!context) {
+      setEvents([]);
+      setTotal(0);
+      setRequestState({ loading: false, error: "Select a project to load audit history." });
+      return undefined;
+    }
     const controller = new AbortController();
     setRequestState({ loading: true, error: "" });
-    listAudit({ limit: AUDIT_PAGE_SIZE, offset: 0 }, controller.signal)
+    listAudit(context, { limit: AUDIT_PAGE_SIZE, offset: 0 }, controller.signal)
       .then((response) => {
         setEvents(response.items);
         setTotal(response.total);
@@ -194,7 +206,7 @@ export function AuditWorkspace() {
         setRequestState({ loading: false, error: error instanceof Error ? error.message : "Audit history could not be loaded" });
       });
     return () => controller.abort();
-  }, [reloadToken]);
+  }, [context?.tenantId, context?.projectId, reloadToken]);
 
   const filteredEvents = useMemo(() => {
     if (!deferredQuery) return events;
@@ -202,11 +214,11 @@ export function AuditWorkspace() {
   }, [deferredQuery, events]);
 
   async function loadMore() {
-    if (loadingMore || events.length >= total) return;
+    if (!context || loadingMore || events.length >= total) return;
     setLoadingMore(true);
     setRequestState((current) => ({ ...current, error: "" }));
     try {
-      const response = await listAudit({ limit: AUDIT_PAGE_SIZE, offset: events.length });
+      const response = await listAudit(context, { limit: AUDIT_PAGE_SIZE, offset: events.length });
       setEvents((current) => {
         const knownIds = new Set(current.map((event) => event.id));
         return [...current, ...response.items.filter((event) => !knownIds.has(event.id))];

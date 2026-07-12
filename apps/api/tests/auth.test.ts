@@ -11,6 +11,7 @@ import { createApp } from '../src/app.js';
 import { createIdentityProviderFromEnvironment, OidcIdentityProvider } from '../src/auth.js';
 import { WorkspaceEventHub } from '../src/collaboration.js';
 import { FusionDatabase } from '../src/database.js';
+import { LegacySqliteIndustrialPersistence } from '../src/industrial-persistence.js';
 
 const issuer = 'https://identity.example.test/realms/open-data-fusion';
 const audience = 'open-data-fusion-api';
@@ -64,7 +65,19 @@ describe('OIDC workspace authentication', () => {
   beforeEach(() => {
     tempDirectory = mkdtempSync(join(tmpdir(), 'open-data-fusion-auth-'));
     database = new FusionDatabase({ path: join(tempDirectory, 'test.db') });
-    app = createApp(database, new WorkspaceEventHub(), { identityProvider });
+    app = createApp(database, new WorkspaceEventHub(), {
+      identityProvider,
+      defaultPlatformContext: { tenantId: 'demo', projectId: 'north-plant' },
+      industrialPersistence: new LegacySqliteIndustrialPersistence(database),
+    });
+    const member = database.database.prepare(`
+      INSERT OR IGNORE INTO platform_project_members(tenant_id, project_id, user_id, role, created_at)
+      VALUES ('demo', 'north-plant', ?, ?, ?)
+    `);
+    const timestamp = new Date().toISOString();
+    member.run('audit.reader', 'viewer', timestamp);
+    member.run('connector.service', 'editor', timestamp);
+    member.run('domain.expert', 'reviewer', timestamp);
   });
 
   afterEach(() => {
@@ -143,6 +156,28 @@ describe('OIDC workspace authentication', () => {
       .get('/api/v1/assets')
       .set('authorization', `Bearer ${auditToken}`);
     expect(deniedAsset.status).toBe(403);
+  });
+
+  it('requires relation review permission before ingest can accept a relation', async () => {
+    const connectorToken = await signToken('connector.service', { scope: 'data:ingest' });
+    const response = await request(app)
+      .post('/api/v1/ingest/bundle')
+      .set('authorization', `Bearer ${connectorToken}`)
+      .send({
+        source: { system: 'connector', runId: 'accepted-relation-without-review' },
+        relations: [{
+          id: 'unauthorized-accepted-relation',
+          sourceType: 'asset',
+          sourceExternalId: 'P-101',
+          targetType: 'document',
+          targetExternalId: 'DOC-P101-MANUAL',
+          relationType: 'documentedBy',
+          status: 'accepted',
+        }],
+      });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toMatchObject({ code: 'forbidden', message: "Permission 'relations:review' is required" });
   });
 
   it('derives ingestion and review audit actors from the verified token', async () => {

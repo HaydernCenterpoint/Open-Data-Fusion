@@ -83,6 +83,7 @@ describe("PostgresRuntime transaction boundary", () => {
 
     const response = await runtime.withTransaction({
       tenantId: tenantContext.tenantId,
+      projectId: tenantContext.projectId,
       userId: "user'with-quote",
       platformAdmin: false,
     }, async (transaction) => {
@@ -98,14 +99,16 @@ describe("PostgresRuntime transaction boundary", () => {
       "SELECT set_config('statement_timeout', $1, true)",
       "SELECT set_config('idle_in_transaction_session_timeout', $1, true)",
       "SELECT set_config('odf.tenant_id', $1, true)",
+      "SELECT set_config('odf.project_id', $1, true)",
       "SELECT set_config('odf.user_id', $1, true)",
       "SELECT set_config('odf.platform_admin', $1, true)",
       "SELECT $1::text AS value",
       "COMMIT",
     ]);
     expect(client.queries[4]?.values).toEqual([tenantContext.tenantId]);
-    expect(client.queries[5]?.values).toEqual(["user'with-quote"]);
-    expect(client.queries[7]?.values).toEqual(["safe value"]);
+    expect(client.queries[5]?.values).toEqual([tenantContext.projectId]);
+    expect(client.queries[6]?.values).toEqual(["user'with-quote"]);
+    expect(client.queries[8]?.values).toEqual(["safe value"]);
     expect(client.queries.some((query) => query.text.includes("user'with-quote"))).toBe(false);
     expect(client.released).toBe(true);
     expect(client.releasedWithError).toBe(false);
@@ -177,6 +180,8 @@ describe("pool and probes", () => {
     expect(pool.directQueries[1]?.text).toContain("to_regclass('odf.raw_ingest_objects')");
     expect(pool.directQueries[1]?.text).toContain("pg_has_role(current_user, 'odf_app', 'member')");
     expect(pool.directQueries[1]?.text).toContain("pg_has_role(current_user, 'odf_outbox_publisher', 'member')");
+    expect(pool.directQueries[1]?.text).toContain("pg_has_role(current_user, 'odf_project_discovery_owner', 'member')");
+    expect(pool.directQueries[1]?.text).toContain("pg_has_role(current_user, 'odf_workspace_bootstrap_owner', 'member')");
   });
 
   it("does not report ready for a principal outside the API least-privilege boundary", async () => {

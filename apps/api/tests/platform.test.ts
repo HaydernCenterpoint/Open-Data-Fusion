@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,6 +15,7 @@ import {
   type IdentityProvider,
 } from '../src/auth.js';
 import { createApp } from '../src/app.js';
+import { WorkspaceEventHub } from '../src/collaboration.js';
 import { FusionDatabase } from '../src/database.js';
 
 class TestIdentityProvider implements IdentityProvider {
@@ -45,15 +47,18 @@ function scope(test: Test, context = defaultContext): Test {
 describe('platform catalog API', () => {
   let tempDirectory: string;
   let database: FusionDatabase;
+  let eventHub: WorkspaceEventHub;
   let app: Express;
 
   beforeEach(() => {
     tempDirectory = mkdtempSync(join(tmpdir(), 'open-data-fusion-platform-'));
     database = new FusionDatabase({ path: join(tempDirectory, 'test.db') });
-    app = createApp(database, undefined, { identityProvider: new TestIdentityProvider() });
+    eventHub = new WorkspaceEventHub();
+    app = createApp(database, eventHub, { identityProvider: new TestIdentityProvider() });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await eventHub.close();
     database.close();
     rmSync(tempDirectory, { recursive: true, force: true });
   });
@@ -118,6 +123,257 @@ describe('platform catalog API', () => {
       ['data:ingest'],
     ), { tenantId: 'tenant-b', projectId: 'project-b' }).send({ id: 'private-data', name: 'Private Data' });
     expect(harperCreate.status).toBe(201);
+  });
+
+  it('bootstraps the first empty real workspace in a project and enforces its immutable scope', async () => {
+    const realContext = { tenantId: 'real-tenant', projectId: 'real-project' };
+    await authorize(
+      request(app).post('/api/v1/platform/tenants'),
+      'harper.dennis',
+      ['platform:admin'],
+    ).send({ id: 'real-tenant', name: 'Real Tenant' });
+    await authorize(
+      request(app).post('/api/v1/platform/tenants/real-tenant/projects'),
+      'harper.dennis',
+      ['platform:admin'],
+    ).send({ id: 'real-project', name: 'Real Project' });
+
+    const created = await scope(authorize(
+      request(app).post('/api/v1/workspaces'),
+      'harper.dennis',
+      ['data:ingest'],
+    ), realContext)
+      .set('x-correlation-id', 'workspace-bootstrap-correlation')
+      .send({ id: 'real-operations-canvas', name: 'Real operations canvas' });
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      id: 'real-operations-canvas',
+      name: 'Real operations canvas',
+      version: 1,
+      snapshot: { viewport: { x: 0, y: 0, zoom: 1 }, nodes: [], edges: [] },
+      createdBy: 'harper.dennis',
+    });
+
+    const audit = await scope(authorize(
+      request(app).get('/api/v1/audit').query({ action: 'workspace.created' }),
+      'harper.dennis',
+      ['audit:read'],
+    ), { tenantId: 'real-tenant', projectId: 'real-project' });
+    expect(audit.status).toBe(200);
+    expect(audit.body).toMatchObject({
+      total: 1,
+      items: [{
+        action: 'workspace.created',
+        entityType: 'workspace',
+        entityId: 'real-operations-canvas',
+        correlationId: 'workspace-bootstrap-correlation',
+      }],
+    });
+
+    const read = await scope(authorize(
+      request(app).get('/api/v1/workspaces/real-operations-canvas'),
+      'harper.dennis',
+      [],
+    ), realContext);
+    expect(read.status).toBe(200);
+
+    const operation = await scope(authorize(
+      request(app).post('/api/v1/workspaces/real-operations-canvas/operations'),
+      'harper.dennis',
+      [],
+    ), realContext).send({
+      baseVersion: 1,
+      changeSummary: 'Add the first real asset node',
+      operations: [{
+        type: 'addNode',
+        node: { id: 'P-101', type: 'asset', position: { x: 120, y: 80 }, data: { label: 'Pump P-101' } },
+      }],
+    });
+    expect(operation.status).toBe(200);
+    expect(operation.body).toMatchObject({ version: 2, snapshot: { nodes: [{ id: 'P-101' }] } });
+
+    const memberUpsert = await scope(authorize(
+      request(app).put('/api/v1/workspaces/real-operations-canvas/members/riley.chen'),
+      'harper.dennis',
+      [],
+    ), realContext).send({ displayName: 'Riley Chen', role: 'viewer' });
+    expect(memberUpsert.status).toBe(201);
+
+    const memberWithoutProjectAccess = await scope(authorize(
+      request(app).get('/api/v1/workspaces/real-operations-canvas'),
+      'riley.chen',
+      [],
+    ), realContext);
+    expect(memberWithoutProjectAccess.status).toBe(403);
+
+    database.database.prepare(`
+      INSERT INTO platform_project_members(tenant_id, project_id, user_id, role, created_at)
+      VALUES (?, ?, ?, 'viewer', ?)
+    `).run(realContext.tenantId, realContext.projectId, 'riley.chen', new Date().toISOString());
+    const memberWithProjectAccess = await scope(authorize(
+      request(app).get('/api/v1/workspaces/real-operations-canvas'),
+      'riley.chen',
+      [],
+    ), realContext);
+    expect(memberWithProjectAccess.status).toBe(200);
+
+    const promotedWorkspaceOwner = await scope(authorize(
+      request(app).put('/api/v1/workspaces/real-operations-canvas/members/riley.chen'),
+      'harper.dennis',
+      [],
+    ), realContext).send({ displayName: 'Riley Chen', role: 'owner' });
+    expect(promotedWorkspaceOwner.status).toBe(200);
+
+    const projectViewerWrite = await scope(authorize(
+      request(app).post('/api/v1/workspaces/real-operations-canvas/operations'),
+      'riley.chen',
+      [],
+    ), realContext).send({
+      baseVersion: 2,
+      changeSummary: 'Project viewer must remain read-only',
+      operations: [{ type: 'moveNode', nodeId: 'P-101', position: { x: 240, y: 160 } }],
+    });
+    expect(projectViewerWrite.status).toBe(403);
+
+    database.database.prepare(`
+      UPDATE platform_project_members SET role = 'editor'
+      WHERE tenant_id = ? AND project_id = ? AND user_id = ?
+    `).run(realContext.tenantId, realContext.projectId, 'riley.chen');
+    const projectEditorWrite = await scope(authorize(
+      request(app).post('/api/v1/workspaces/real-operations-canvas/operations'),
+      'riley.chen',
+      [],
+    ), realContext).send({
+      baseVersion: 2,
+      changeSummary: 'Project editor moves the node',
+      operations: [{ type: 'moveNode', nodeId: 'P-101', position: { x: 240, y: 160 } }],
+    });
+    expect(projectEditorWrite.status).toBe(200);
+    expect(projectEditorWrite.body).toMatchObject({ version: 3 });
+
+    const memberDelete = await scope(authorize(
+      request(app).delete('/api/v1/workspaces/real-operations-canvas/members/riley.chen'),
+      'harper.dennis',
+      [],
+    ), realContext);
+    expect(memberDelete.status).toBe(204);
+
+    const mutationAudit = await scope(authorize(
+      request(app).get('/api/v1/audit'),
+      'harper.dennis',
+      ['audit:read'],
+    ), realContext);
+    expect(mutationAudit.status).toBe(200);
+    expect(mutationAudit.body.total).toBe(6);
+    expect(mutationAudit.body.items.map((item: { action: string }) => item.action)).toEqual([
+      'workspace.member_removed',
+      'workspace.operations_applied',
+      'workspace.member_updated',
+      'workspace.member_added',
+      'workspace.operations_applied',
+      'workspace.created',
+    ]);
+
+    const removedMemberRead = await scope(authorize(
+      request(app).get('/api/v1/workspaces/real-operations-canvas'),
+      'riley.chen',
+      [],
+    ), realContext);
+    expect(removedMemberRead.status).toBe(403);
+
+    const wrongScope = await scope(authorize(
+      request(app).get('/api/v1/workspaces/real-operations-canvas'),
+      'harper.dennis',
+      [],
+    ), defaultContext);
+    expect(wrongScope.status).toBe(404);
+
+    const duplicate = await scope(authorize(
+      request(app).post('/api/v1/workspaces'),
+      'harper.dennis',
+      ['data:ingest'],
+    ), realContext)
+      .send({ id: 'real-operations-canvas', name: 'Duplicate' });
+    expect(duplicate.status).toBe(409);
+
+    database.database.prepare(`
+      DELETE FROM platform_project_members
+      WHERE tenant_id = ? AND project_id = ? AND user_id = ?
+    `).run(realContext.tenantId, realContext.projectId, 'harper.dennis');
+    const revokedProjectMember = await scope(authorize(
+      request(app).get('/api/v1/workspaces/real-operations-canvas'),
+      'harper.dennis',
+      [],
+    ), realContext);
+    expect(revokedProjectMember.status).toBe(403);
+  });
+
+  it('stops a scoped SQLite workspace event stream after project membership is revoked', async () => {
+    const context = { tenantId: 'stream-tenant', projectId: 'stream-project' };
+    await authorize(
+      request(app).post('/api/v1/platform/tenants'),
+      'harper.dennis',
+      ['platform:admin'],
+    ).send({ id: context.tenantId, name: 'Stream Tenant' });
+    await authorize(
+      request(app).post(`/api/v1/platform/tenants/${context.tenantId}/projects`),
+      'harper.dennis',
+      ['platform:admin'],
+    ).send({ id: context.projectId, name: 'Stream Project' });
+    const created = await scope(authorize(
+      request(app).post('/api/v1/workspaces'),
+      'harper.dennis',
+      ['data:ingest'],
+    ), context).send({ id: 'stream-workspace', name: 'Stream Workspace' });
+    expect(created.status).toBe(201);
+
+    const server = createServer(app);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('SSE test server did not bind a TCP port');
+      const response = await fetch(
+        `http://127.0.0.1:${String(address.port)}/api/v1/workspaces/stream-workspace/events`,
+        {
+          headers: {
+            'x-test-user': 'harper.dennis',
+            'x-odf-tenant-id': context.tenantId,
+            'x-odf-project-id': context.projectId,
+          },
+        },
+      );
+      expect(response.status).toBe(200);
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('SSE response did not include a body');
+      const firstChunk = await reader.read();
+      expect(new TextDecoder().decode(firstChunk.value)).toContain(': connected');
+
+      database.database.prepare(`
+        DELETE FROM platform_project_members
+        WHERE tenant_id = ? AND project_id = ? AND user_id = ?
+      `).run(context.tenantId, context.projectId, 'harper.dennis');
+      eventHub.publishWorkspaceUpdated({
+        workspaceId: 'stream-workspace',
+        version: 2,
+        actor: 'remote.editor',
+        changeSummary: 'Remote update after revocation',
+      });
+
+      const closed = await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('Scoped SQLite SSE did not close after revocation')), 2_000);
+          timeout.unref();
+        }),
+      ]);
+      expect(closed.done).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it('creates catalog resources, versions data models, and paginates with keyset cursors', async () => {

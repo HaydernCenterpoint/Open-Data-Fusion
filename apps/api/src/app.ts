@@ -2,6 +2,12 @@ import { randomUUID } from 'node:crypto';
 
 import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler } from 'express';
 import type { WritebackSafetyPolicy } from '@open-data-fusion/platform-core';
+import {
+  ConflictError as RuntimeConflictError,
+  DatabaseUnavailableError as RuntimeDatabaseUnavailableError,
+  ForbiddenError as RuntimeForbiddenError,
+  NotFoundError as RuntimeNotFoundError,
+} from '@open-data-fusion/postgres-runtime';
 import { z, ZodError } from 'zod';
 
 import {
@@ -20,11 +26,21 @@ import { ConflictError, DataIntegrityError, ForbiddenError, FusionDatabase, NotF
 import { createApiObservability } from './observability.js';
 import { registerGovernedObjectRoutes } from './object-routes.js';
 import { GovernedObjectStore } from './object-store.js';
+import {
+  industrialIngestRunId,
+  type IndustrialPersistence,
+  type IndustrialRequestScope,
+} from './industrial-persistence.js';
+import {
+  SqlitePlatformDiscoveryPersistence,
+  type PlatformDiscoveryPersistence,
+} from './platform-discovery.js';
 import { registerPlatformRoutes } from './platform-routes.js';
 import { cursorListQuerySchema, platformContextSchema, platformIdSchema, type PlatformContext } from './platform-schemas.js';
 import { PlatformCatalog } from './platform.js';
 import { PostgresWorkspacePersistence, type WorkspaceRequestScope } from './postgres-workspace-persistence.js';
 import { RawLandingStore } from './raw-landing.js';
+import { SqliteIndustrialPersistence } from './sqlite-industrial-persistence.js';
 import {
   assetListQuerySchema,
   auditListQuerySchema,
@@ -33,6 +49,7 @@ import {
   telemetryAggregateQuerySchema,
   telemetryLatestQuerySchema,
   telemetryQuerySchema,
+  workspaceCreateSchema,
   workspaceIdSchema,
   workspaceMemberUpsertSchema,
   workspaceRevisionQuerySchema,
@@ -61,6 +78,7 @@ async function workspaceActor(identityProvider: IdentityProvider, request: Reque
 
 async function requireWorkspaceMember(
   database: FusionDatabase,
+  platformCatalog: PlatformCatalog,
   workspacePersistence: PostgresWorkspacePersistence | undefined,
   identityProvider: IdentityProvider,
   id: string,
@@ -71,35 +89,78 @@ async function requireWorkspaceMember(
   const actor = await workspaceActor(identityProvider, request, queryUser);
   if (workspacePersistence) {
     const scope = workspaceRequestScopeWithHint(request, actor, scopeHint);
-    return { actor, scope, member: await workspacePersistence.getWorkspaceMember(scope, id) };
+    return {
+      actor,
+      context: { tenantId: scope.tenantId, projectId: scope.projectId },
+      scope,
+      member: await workspacePersistence.getWorkspaceMember(scope, id),
+    };
   }
-  return { actor, member: database.getWorkspaceMember(id, actor) };
+  const selectedContext = optionalWorkspacePlatformContext(request, scopeHint);
+  const recordedContext = database.getWorkspaceScope(id);
+  if (recordedContext) {
+    if (
+      !selectedContext
+      || selectedContext.tenantId !== recordedContext.tenantId
+      || selectedContext.projectId !== recordedContext.projectId
+    ) {
+      throw new NotFoundError(`Workspace '${id}' was not found in the selected project`);
+    }
+    platformCatalog.assertProjectAccess(selectedContext, actor);
+  }
+  return {
+    actor,
+    context: recordedContext ? selectedContext : undefined,
+    member: database.getWorkspaceMember(id, actor, recordedContext ? selectedContext : undefined),
+  };
 }
 
 async function requireWorkspaceEditor(
   database: FusionDatabase,
+  platformCatalog: PlatformCatalog,
   workspacePersistence: PostgresWorkspacePersistence | undefined,
   identityProvider: IdentityProvider,
   id: string,
   request: Request,
 ) {
-  const identity = await requireWorkspaceMember(database, workspacePersistence, identityProvider, id, request);
+  const identity = await requireWorkspaceMember(
+    database,
+    platformCatalog,
+    workspacePersistence,
+    identityProvider,
+    id,
+    request,
+  );
   if (identity.member.role !== 'owner' && identity.member.role !== 'editor') {
     throw new ForbiddenError(`User '${identity.actor}' has read-only access to workspace '${id}'`);
+  }
+  if (!workspacePersistence && identity.context) {
+    platformCatalog.assertProjectAccess(identity.context, identity.actor, ['owner', 'editor']);
   }
   return identity;
 }
 
 async function requireWorkspaceOwner(
   database: FusionDatabase,
+  platformCatalog: PlatformCatalog,
   workspacePersistence: PostgresWorkspacePersistence | undefined,
   identityProvider: IdentityProvider,
   id: string,
   request: Request,
 ) {
-  const identity = await requireWorkspaceMember(database, workspacePersistence, identityProvider, id, request);
+  const identity = await requireWorkspaceMember(
+    database,
+    platformCatalog,
+    workspacePersistence,
+    identityProvider,
+    id,
+    request,
+  );
   if (identity.member.role !== 'owner') {
     throw new ForbiddenError(`Only owners can manage members of workspace '${id}'`);
+  }
+  if (!workspacePersistence && identity.context) {
+    platformCatalog.assertProjectAccess(identity.context, identity.actor, ['owner', 'editor']);
   }
   return identity;
 }
@@ -123,6 +184,16 @@ function workspaceRequestScopeWithHint(
     projectId: parse(z.string().uuid(), request.header('x-odf-project-id') ?? hint?.projectId),
     userId,
   };
+}
+
+function optionalWorkspacePlatformContext(
+  request: Request,
+  hint?: WorkspaceScopeHint,
+): PlatformContext | undefined {
+  const tenantId = request.header('x-odf-tenant-id') ?? hint?.tenantId;
+  const projectId = request.header('x-odf-project-id') ?? hint?.projectId;
+  if (tenantId === undefined && projectId === undefined) return undefined;
+  return parse(platformContextSchema, { tenantId, projectId });
 }
 
 async function requireDataPlanePermission(
@@ -171,6 +242,12 @@ export interface CreateAppOptions {
   objectStoreMaxBytes?: number;
   /** PostgreSQL persistence for all Canvas/workspace reads and writes. */
   workspacePersistence?: PostgresWorkspacePersistence;
+  /** Exactly one industrial data backend selected for this process. */
+  industrialPersistence?: IndustrialPersistence;
+  /** Tenant/project discovery selected with the process data backend. */
+  platformDiscovery?: PlatformDiscoveryPersistence;
+  /** Explicit convenience scope for tests or a single-project embedded deployment. */
+  defaultPlatformContext?: PlatformContext;
   /** Redis delivery must remain healthy for this API instance to be ready. */
   sharedEventsRequired?: boolean;
 }
@@ -182,7 +259,9 @@ export function createApp(
 ): Express {
   const identityProvider = options.identityProvider ?? new DevelopmentIdentityProvider();
   const workspacePersistence = options.workspacePersistence;
+  const industrialPersistence = options.industrialPersistence ?? new SqliteIndustrialPersistence(database.database);
   const platformCatalog = new PlatformCatalog(database.database);
+  const platformDiscovery = options.platformDiscovery ?? new SqlitePlatformDiscoveryPersistence(platformCatalog);
   const advancedPlatformCatalog = new AdvancedPlatformCatalog(database.database, {
     ...(options.writebackPolicy ? { writebackPolicy: options.writebackPolicy } : {}),
   });
@@ -198,18 +277,20 @@ export function createApp(
   const observability = createApiObservability(options.metricsToken);
   const app = express();
   app.disable('x-powered-by');
-  app.use(correlationMiddleware(workspacePersistence !== undefined));
+  app.use(correlationMiddleware(workspacePersistence !== undefined || industrialPersistence.mode === 'postgres'));
   app.use(observability.middleware);
   registerGovernedObjectRoutes(app, platformCatalog, governedObjectStore, identityProvider);
   app.use(express.json({ limit: '10mb', strict: true }));
 
   const healthHandler: RequestHandler = async (_request, response) => {
     const workspaceHealth = workspacePersistence ? await workspacePersistence.health() : null;
+    const industrialHealth = await industrialPersistence.health();
     const sharedEventDelivery = eventHub.eventDeliveryHealth();
     response.json({
       ...database.health(),
       authMode: identityProvider.mode,
       ...(workspaceHealth ? { workspacePersistence: workspaceHealth } : {}),
+      industrialPersistence: industrialHealth,
       sharedEventDelivery,
     });
   };
@@ -218,86 +299,121 @@ export function createApp(
   app.get('/ready', async (_request, response) => {
     const health = database.health();
     const workspaceHealth = workspacePersistence ? await workspacePersistence.health() : null;
+    const industrialHealth = await industrialPersistence.health();
     const sharedEventDelivery = eventHub.eventDeliveryHealth();
     const ready = health.status === 'ok'
       && (workspaceHealth === null || workspaceHealth.status === 'ok')
+      && industrialHealth.status === 'ok'
       && (options.sharedEventsRequired !== true || sharedEventDelivery.status === 'ok');
     response.status(ready ? 200 : 503).json({
       ...health,
       readiness: ready ? 'ready' : 'not_ready',
       ...(workspaceHealth ? { workspacePersistence: workspaceHealth } : {}),
+      industrialPersistence: industrialHealth,
       sharedEventDelivery,
     });
   });
   app.get('/metrics', observability.metricsHandler);
 
   const platformContext = (request: Request): PlatformContext => parse(platformContextSchema, {
-    tenantId: request.header('x-odf-tenant-id') ?? 'demo',
-    projectId: request.header('x-odf-project-id') ?? 'north-plant',
+    tenantId: request.header('x-odf-tenant-id') ?? options.defaultPlatformContext?.tenantId,
+    projectId: request.header('x-odf-project-id') ?? options.defaultPlatformContext?.projectId,
   });
 
+  const industrialScope = async (
+    request: Request,
+    permission: DataPlanePermission,
+    allowedRoles?: readonly import('./platform.js').PlatformProjectRole[],
+  ): Promise<IndustrialRequestScope> => {
+    const identity = await requireDataPlanePermission(identityProvider, request, permission);
+    const context = platformContext(request);
+    if (industrialPersistence.mode === 'sqlite') {
+      platformCatalog.assertProjectAccess(context, identity.userId, allowedRoles);
+    }
+    const scope = { ...context, userId: identity.userId };
+    await industrialPersistence.authorize(scope, allowedRoles);
+    return scope;
+  };
+
+  const requireAcceptedRelationPermission = async (request: Request, bundle: import('./schemas.js').IngestBundle): Promise<void> => {
+    if (bundle.relations.some((relation) => relation.status === 'accepted')) {
+      await requireDataPlanePermission(identityProvider, request, 'relations:review');
+    }
+  };
+
   app.get('/api/v1/assets', async (request, response) => {
-    await requireDataPlanePermission(identityProvider, request, 'data:read');
+    const scope = await industrialScope(request, 'data:read');
     const query = parse(assetListQuerySchema, request.query);
-    response.json(database.listAssets(query));
+    response.json(await industrialPersistence.listAssets(scope, query));
   });
 
   app.get('/api/v1/assets/:externalId/telemetry', async (request, response) => {
-    await requireDataPlanePermission(identityProvider, request, 'data:read');
+    const scope = await industrialScope(request, 'data:read');
     const externalId = parse(z.string().trim().min(1).max(255), request.params.externalId);
     const query = parse(telemetryQuerySchema, request.query);
-    response.json(database.getTelemetry(externalId, query));
+    response.json(await industrialPersistence.getTelemetry(scope, externalId, query));
   });
 
   app.get('/api/v1/assets/:externalId/telemetry/latest', async (request, response) => {
-    const identity = await requireDataPlanePermission(identityProvider, request, 'data:read');
-    const context = parse(platformContextSchema, {
-      tenantId: request.header('x-odf-tenant-id'),
-      projectId: request.header('x-odf-project-id'),
-    });
-    platformCatalog.assertProjectAccess(context, identity.userId);
+    const scope = await industrialScope(request, 'data:read');
     const externalId = parse(z.string().trim().min(1).max(255), request.params.externalId);
-    platformCatalog.assertAssetVisible(context, externalId);
-    response.json(database.getLatestTelemetry(externalId, parse(telemetryLatestQuerySchema, request.query)));
+    response.json(await industrialPersistence.getLatestTelemetry(
+      scope,
+      externalId,
+      parse(telemetryLatestQuerySchema, request.query),
+    ));
   });
 
   app.get([
     '/api/v1/assets/:externalId/telemetry/aggregate',
     '/api/v1/assets/:externalId/telemetry/buckets',
   ], async (request, response) => {
-    const identity = await requireDataPlanePermission(identityProvider, request, 'data:read');
-    const context = parse(platformContextSchema, {
-      tenantId: request.header('x-odf-tenant-id'),
-      projectId: request.header('x-odf-project-id'),
-    });
-    platformCatalog.assertProjectAccess(context, identity.userId);
+    const scope = await industrialScope(request, 'data:read');
     const externalId = parse(z.string().trim().min(1).max(255), request.params.externalId);
-    platformCatalog.assertAssetVisible(context, externalId);
-    response.json(database.getAggregatedTelemetry(externalId, parse(telemetryAggregateQuerySchema, request.query)));
+    response.json(await industrialPersistence.getAggregatedTelemetry(
+      scope,
+      externalId,
+      parse(telemetryAggregateQuerySchema, request.query),
+    ));
   });
 
   app.get('/api/v1/assets/:externalId', async (request, response) => {
-    await requireDataPlanePermission(identityProvider, request, 'data:read');
+    const scope = await industrialScope(request, 'data:read');
     const externalId = parse(z.string().trim().min(1).max(255), request.params.externalId);
-    response.json(database.getAsset(externalId));
+    response.json(await industrialPersistence.getAsset(scope, externalId));
   });
 
   const ingestHandler: RequestHandler = async (request, response) => {
-    const identity = await requireDataPlanePermission(identityProvider, request, 'data:ingest');
+    const scope = await industrialScope(request, 'data:ingest', ['owner', 'editor']);
+    const identity = { userId: scope.userId };
     const bundle = parse(ingestBundleSchema, request.body);
-    const authorizedBundle = {
+    await requireAcceptedRelationPermission(request, bundle);
+    const actorBundle = {
       ...bundle,
-      source: { ...bundle.source, runId: bundle.source.runId ?? randomUUID(), actor: identity.userId },
+      source: { ...bundle.source, actor: identity.userId },
+    };
+    const authorizedBundle = {
+      ...actorBundle,
+      source: { ...actorBundle.source, runId: industrialIngestRunId(actorBundle) },
     };
     let rawRecord: Awaited<ReturnType<RawLandingStore['archive']>> | null = null;
     let context: PlatformContext | null = null;
     if (rawLanding) {
-      context = platformContext(request);
-      platformCatalog.assertProjectAccess(context, identity.userId, ['owner', 'editor']);
+      context = scope;
       rawRecord = await rawLanding.archive(context, authorizedBundle, identity.userId, response.locals.correlationId);
     }
     try {
-      const result = database.ingest(authorizedBundle, response.locals.correlationId);
+      const result = await industrialPersistence.ingest(
+        scope,
+        authorizedBundle,
+        response.locals.correlationId,
+        rawRecord ? {
+          storageUri: rawRecord.rawObjectUri,
+          sha256: rawRecord.sha256,
+          byteSize: rawRecord.byteSize,
+          contentType: 'application/json',
+        } : undefined,
+      );
       if (rawLanding && rawRecord && context) rawLanding.complete(context, rawRecord.id, 'accepted');
       response.status(result.status === 'already_processed' ? 200 : 201).json({
         ...result,
@@ -314,7 +430,7 @@ export function createApp(
   app.post('/api/v1/ingest/bundle', ingestHandler);
 
   app.get('/api/v1/relations', async (request, response) => {
-    await requireDataPlanePermission(identityProvider, request, 'data:read');
+    const scope = await industrialScope(request, 'data:read');
     const query = parse(
       z.object({
         status: z.enum(['proposed', 'accepted', 'rejected', 'superseded']).optional(),
@@ -322,32 +438,30 @@ export function createApp(
       }),
       request.query,
     );
-    response.json(database.listRelations(query.status, query.limit));
+    response.json(await industrialPersistence.listRelations(scope, query.status, query.limit));
   });
 
   app.post('/api/v1/relations/:id/review', async (request, response) => {
-    const identity = await requireDataPlanePermission(identityProvider, request, 'relations:review');
+    const scope = await industrialScope(request, 'relations:review', ['owner', 'editor', 'reviewer']);
     const id = parse(z.string().trim().min(1).max(255), request.params.id);
     const review = parse(relationReviewSchema, request.body);
-    const authorizedReview = { ...review, reviewer: identity.userId };
-    response.json(database.reviewRelation(id, authorizedReview, response.locals.correlationId));
+    const authorizedReview = { ...review, reviewer: scope.userId };
+    response.json(await industrialPersistence.reviewRelation(scope, id, authorizedReview, response.locals.correlationId));
   });
 
   app.get('/api/v1/audit', async (request, response) => {
-    await requireDataPlanePermission(identityProvider, request, 'audit:read');
+    const scope = await industrialScope(request, 'audit:read');
     const query = parse(auditListQuerySchema, request.query);
-    response.json(database.listAudit(query));
+    response.json(await industrialPersistence.listAudit(scope, query));
   });
 
-  registerPlatformRoutes(app, platformCatalog, identityProvider);
+  registerPlatformRoutes(app, platformCatalog, identityProvider, platformDiscovery);
   registerAdvancedPlatformRoutes(app, platformCatalog, advancedPlatformCatalog, identityProvider, {
     ...(options.writebackExecutor ? { writebackExecutor: options.writebackExecutor } : {}),
   });
 
   app.get('/api/v1/platform/ingestion/raw', async (request, response) => {
-    const identity = await requireDataPlanePermission(identityProvider, request, 'audit:read');
-    const context = platformContext(request);
-    platformCatalog.assertProjectAccess(context, identity.userId);
+    const context = await industrialScope(request, 'audit:read');
     if (!rawLanding) {
       response.status(503).json({ error: { code: 'raw_landing_unavailable', message: 'Raw landing storage is not configured', correlationId: response.locals.correlationId } });
       return;
@@ -357,28 +471,69 @@ export function createApp(
   });
 
   app.post('/api/v1/platform/ingestion/raw/:rawId/replay', async (request, response) => {
-    const identity = await requireDataPlanePermission(identityProvider, request, 'data:ingest');
-    const context = platformContext(request);
-    platformCatalog.assertProjectAccess(context, identity.userId, ['owner', 'editor']);
+    const context = await industrialScope(request, 'data:ingest', ['owner', 'editor']);
     if (!rawLanding) {
       response.status(503).json({ error: { code: 'raw_landing_unavailable', message: 'Raw landing storage is not configured', correlationId: response.locals.correlationId } });
       return;
     }
     const rawId = parse(platformIdSchema, request.params.rawId);
-    const sourceBundle = await rawLanding.replayBundle(context, rawId);
+    const sourceBundle = parse(ingestBundleSchema, await rawLanding.replayBundle(context, rawId));
+    await requireAcceptedRelationPermission(request, sourceBundle);
     const replayRunId = `replay-${Date.now()}-${rawId.slice(0, 48)}`;
     const bundle = {
       ...sourceBundle,
-      source: { ...sourceBundle.source, runId: replayRunId, actor: identity.userId },
+      source: { ...sourceBundle.source, runId: replayRunId, actor: context.userId },
     };
-    const result = database.ingest(bundle, response.locals.correlationId);
+    const sourceRawObject = rawLanding.get(context, rawId);
+    const result = await industrialPersistence.ingest(
+      context,
+      bundle,
+      response.locals.correlationId,
+      {
+        storageUri: sourceRawObject.rawObjectUri,
+        sha256: sourceRawObject.sha256,
+        byteSize: sourceRawObject.byteSize,
+        contentType: 'application/json',
+      },
+    );
     const rawObject = rawLanding.markReplayed(context, rawId, replayRunId);
     response.status(201).json({ ...result, replayedFromRawObjectId: rawId, rawObject });
   });
 
+  app.post('/api/v1/workspaces', async (request, response) => {
+    const identity = await requireDataPlanePermission(identityProvider, request, 'data:ingest');
+    const context = platformContext(request);
+    const input = parse(workspaceCreateSchema, request.body);
+    let workspace: unknown;
+    if (workspacePersistence) {
+      workspace = await workspacePersistence.createWorkspace(
+        workspaceRequestScope(request, identity.userId),
+        input,
+        response.locals.correlationId,
+      );
+    } else {
+      platformCatalog.assertProjectAccess(context, identity.userId, ['owner']);
+      workspace = database.createWorkspace(
+        context,
+        input,
+        identity.userId,
+        identity.displayName ?? identity.userId,
+        response.locals.correlationId,
+      );
+    }
+    response.status(201).json(workspace);
+  });
+
   app.get('/api/v1/workspaces/:id', async (request, response) => {
     const id = parse(workspaceIdSchema, request.params.id);
-    const { actor } = await requireWorkspaceMember(database, workspacePersistence, identityProvider, id, request);
+    const { actor } = await requireWorkspaceMember(
+      database,
+      platformCatalog,
+      workspacePersistence,
+      identityProvider,
+      id,
+      request,
+    );
     response.json(workspacePersistence
       ? await workspacePersistence.getWorkspace(workspaceRequestScope(request, actor), id)
       : database.getWorkspace(id));
@@ -387,7 +542,14 @@ export function createApp(
   app.put('/api/v1/workspaces/:id', async (request, response) => {
     const id = parse(workspaceIdSchema, request.params.id);
     const update = parse(workspaceUpdateSchema, request.body);
-    const { actor } = await requireWorkspaceEditor(database, workspacePersistence, identityProvider, id, request);
+    const { actor } = await requireWorkspaceEditor(
+      database,
+      platformCatalog,
+      workspacePersistence,
+      identityProvider,
+      id,
+      request,
+    );
     const authorizedUpdate = { ...update, actor };
     const workspace = workspacePersistence
       ? await workspacePersistence.updateWorkspace(
@@ -411,7 +573,14 @@ export function createApp(
 
   app.get('/api/v1/workspaces/:id/members', async (request, response) => {
     const id = parse(workspaceIdSchema, request.params.id);
-    const { actor } = await requireWorkspaceMember(database, workspacePersistence, identityProvider, id, request);
+    const { actor } = await requireWorkspaceMember(
+      database,
+      platformCatalog,
+      workspacePersistence,
+      identityProvider,
+      id,
+      request,
+    );
     response.json(workspacePersistence
       ? await workspacePersistence.listWorkspaceMembers(workspaceRequestScope(request, actor), id)
       : database.listWorkspaceMembers(id));
@@ -421,7 +590,14 @@ export function createApp(
     const id = parse(workspaceIdSchema, request.params.id);
     const targetUserId = parse(workspaceUserIdSchema, request.params.userId);
     const update = parse(workspaceMemberUpsertSchema, request.body);
-    const { actor } = await requireWorkspaceOwner(database, workspacePersistence, identityProvider, id, request);
+    const { actor, context } = await requireWorkspaceOwner(
+      database,
+      platformCatalog,
+      workspacePersistence,
+      identityProvider,
+      id,
+      request,
+    );
     const result = workspacePersistence
       ? await workspacePersistence.upsertWorkspaceMember(
         workspaceRequestScope(request, actor),
@@ -431,7 +607,7 @@ export function createApp(
         update,
         response.locals.correlationId,
       )
-      : database.upsertWorkspaceMember(id, actor, targetUserId, update, response.locals.correlationId);
+      : database.upsertWorkspaceMember(id, actor, targetUserId, update, response.locals.correlationId, context);
     if (!workspacePersistence) {
       eventHub.publishMembersUpdated({
         workspaceId: id,
@@ -447,7 +623,14 @@ export function createApp(
   app.delete('/api/v1/workspaces/:id/members/:userId', async (request, response) => {
     const id = parse(workspaceIdSchema, request.params.id);
     const targetUserId = parse(workspaceUserIdSchema, request.params.userId);
-    const { actor } = await requireWorkspaceOwner(database, workspacePersistence, identityProvider, id, request);
+    const { actor, context } = await requireWorkspaceOwner(
+      database,
+      platformCatalog,
+      workspacePersistence,
+      identityProvider,
+      id,
+      request,
+    );
     const member = workspacePersistence
       ? await workspacePersistence.removeWorkspaceMember(
         workspaceRequestScope(request, actor),
@@ -456,7 +639,7 @@ export function createApp(
         targetUserId,
         response.locals.correlationId,
       )
-      : database.removeWorkspaceMember(id, actor, targetUserId, response.locals.correlationId);
+      : database.removeWorkspaceMember(id, actor, targetUserId, response.locals.correlationId, context);
     if (!workspacePersistence) {
       eventHub.publishMembersUpdated({
         workspaceId: id,
@@ -471,7 +654,14 @@ export function createApp(
 
   app.post('/api/v1/workspaces/:id/operations', async (request, response) => {
     const id = parse(workspaceIdSchema, request.params.id);
-    const { actor } = await requireWorkspaceEditor(database, workspacePersistence, identityProvider, id, request);
+    const { actor, context } = await requireWorkspaceEditor(
+      database,
+      platformCatalog,
+      workspacePersistence,
+      identityProvider,
+      id,
+      request,
+    );
     const update = parse(workspaceOperationsSchema, request.body);
     const workspace = workspacePersistence
       ? await workspacePersistence.applyWorkspaceOperations(
@@ -481,7 +671,7 @@ export function createApp(
         update,
         response.locals.correlationId,
       )
-      : database.applyWorkspaceOperations(id, actor, update, response.locals.correlationId);
+      : database.applyWorkspaceOperations(id, actor, update, response.locals.correlationId, context);
     if (!workspacePersistence) {
       eventHub.publishWorkspaceUpdated({
         workspaceId: id,
@@ -499,11 +689,12 @@ export function createApp(
     const id = parse(workspaceIdSchema, request.params.id);
     const query = parse(z.object({
       user: workspaceUserIdSchema.optional(),
-      tenantId: z.string().uuid().optional(),
-      projectId: z.string().uuid().optional(),
+      tenantId: platformIdSchema.optional(),
+      projectId: platformIdSchema.optional(),
     }), request.query);
     const identity = await requireWorkspaceMember(
       database,
+      platformCatalog,
       workspacePersistence,
       identityProvider,
       id,
@@ -511,7 +702,7 @@ export function createApp(
       query.user,
       identityProvider.mode === 'development' ? { tenantId: query.tenantId, projectId: query.projectId } : undefined,
     );
-    const { actor, member } = identity;
+    const { actor, context, member } = identity;
     const scope = 'scope' in identity ? identity.scope : undefined;
 
     response.status(200);
@@ -549,6 +740,14 @@ export function createApp(
             response.end();
             return;
           }
+        } else if (context) {
+          try {
+            platformCatalog.assertProjectAccess(context, actor);
+            database.getWorkspaceMember(id, actor, context);
+          } catch {
+            response.end();
+            return;
+          }
         }
         response.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
       }).catch(() => {
@@ -569,7 +768,14 @@ export function createApp(
 
   app.get('/api/v1/workspaces/:id/revisions', async (request, response) => {
     const id = parse(workspaceIdSchema, request.params.id);
-    const { actor } = await requireWorkspaceMember(database, workspacePersistence, identityProvider, id, request);
+    const { actor } = await requireWorkspaceMember(
+      database,
+      platformCatalog,
+      workspacePersistence,
+      identityProvider,
+      id,
+      request,
+    );
     const query = parse(workspaceRevisionQuerySchema, request.query);
     response.json(workspacePersistence
       ? await workspacePersistence.listWorkspaceRevisions(workspaceRequestScope(request, actor), id, query)
@@ -579,7 +785,14 @@ export function createApp(
   app.post('/api/v1/workspaces/:id/rollback', async (request, response) => {
     const id = parse(workspaceIdSchema, request.params.id);
     const rollback = parse(workspaceRollbackSchema, request.body);
-    const { actor } = await requireWorkspaceEditor(database, workspacePersistence, identityProvider, id, request);
+    const { actor } = await requireWorkspaceEditor(
+      database,
+      platformCatalog,
+      workspacePersistence,
+      identityProvider,
+      id,
+      request,
+    );
     const authorizedRollback = { ...rollback, actor };
     const workspace = workspacePersistence
       ? await workspacePersistence.rollbackWorkspace(
@@ -629,20 +842,24 @@ export function createApp(
       response.status(401).json({ error: { code: 'unauthorized', message: error.message, correlationId: response.locals.correlationId } });
       return;
     }
-    if (error instanceof NotFoundError) {
+    if (error instanceof NotFoundError || error instanceof RuntimeNotFoundError) {
       response.status(404).json({ error: { code: 'not_found', message: error.message, correlationId: response.locals.correlationId } });
       return;
     }
-    if (error instanceof ForbiddenError) {
+    if (error instanceof ForbiddenError || error instanceof RuntimeForbiddenError) {
       response.status(403).json({ error: { code: 'forbidden', message: error.message, correlationId: response.locals.correlationId } });
       return;
     }
-    if (error instanceof ConflictError) {
+    if (error instanceof ConflictError || error instanceof RuntimeConflictError) {
       response.status(409).json({ error: { code: 'conflict', message: error.message, correlationId: response.locals.correlationId } });
       return;
     }
     if (error instanceof DataIntegrityError) {
       response.status(422).json({ error: { code: 'data_integrity_error', message: error.message, correlationId: response.locals.correlationId } });
+      return;
+    }
+    if (error instanceof RuntimeDatabaseUnavailableError) {
+      response.status(503).json({ error: { code: 'database_unavailable', message: error.message, correlationId: response.locals.correlationId } });
       return;
     }
     if (error instanceof SyntaxError && 'status' in error && error.status === 400) {

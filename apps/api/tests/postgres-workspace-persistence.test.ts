@@ -75,6 +75,27 @@ function persistence(handler: QueryHandler): { persistence: PostgresWorkspacePer
 }
 
 describe('PostgresWorkspacePersistence', () => {
+  it('creates the first project workspace through the governed database function', async () => {
+    const { persistence: store, client } = persistence((query) => {
+      if (query.text.includes('odf.create_project_workspace')) return result([workspaceRow(1)]);
+      return result();
+    });
+
+    const workspace = await store.createWorkspace(scope, {
+      id: 'cooling-water-system',
+      name: 'Cooling Water System',
+    }, correlationId);
+
+    expect(workspace).toMatchObject({ id: 'cooling-water-system', version: 1 });
+    const creation = client.queries.find((query) => query.text.includes('odf.create_project_workspace'));
+    expect(creation?.values).toEqual([
+      scope.projectId,
+      'cooling-water-system',
+      'Cooling Water System',
+      correlationId,
+    ]);
+  });
+
   it('writes a workspace revision, audit entry, and outbox event in the PostgreSQL scope', async () => {
     const { persistence: store, client } = persistence((query) => {
       if (query.text.startsWith('UPDATE odf.workspaces')) return result([workspaceRow()]);
@@ -94,7 +115,7 @@ describe('PostgresWorkspacePersistence', () => {
     expect(update?.values).toEqual(expect.arrayContaining([scope.tenantId, scope.projectId]));
 
     const audit = client.queries.find((query) => query.text.startsWith('INSERT INTO odf.audit_log'));
-    expect(audit?.values?.[1]).toBe('workspace.saved');
+    expect(audit?.values?.[3]).toBe('workspace.saved');
     const outbox = client.queries.find((query) => query.text.startsWith('INSERT INTO odf.outbox_events'));
     expect(outbox?.values?.[2]).toBe('workspace.updated');
   });
@@ -131,8 +152,8 @@ describe('PostgresWorkspacePersistence', () => {
 
     expect(workspace.snapshot.nodes).toHaveLength(1);
     const audit = client.queries.find((query) => query.text.startsWith('INSERT INTO odf.audit_log'));
-    expect(audit?.values?.[1]).toBe('workspace.operations_applied');
-    expect(JSON.parse(String(audit?.values?.[4]))).toMatchObject({
+    expect(audit?.values?.[3]).toBe('workspace.operations_applied');
+    expect(JSON.parse(String(audit?.values?.[6]))).toMatchObject({
       operations: [{ type: 'addNode', node: { id: 'P-101' } }],
     });
     const outbox = client.queries.find((query) => query.text.startsWith('INSERT INTO odf.outbox_events'));

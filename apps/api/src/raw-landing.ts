@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
-import { ConflictError, NotFoundError } from "./database.js";
+import { ConflictError, DataIntegrityError, NotFoundError } from "./database.js";
 import type { IngestBundle } from "./schemas.js";
 
 export interface RawLandingContext {
@@ -144,13 +144,33 @@ export class RawLandingStore {
       await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
     } catch (error) {
       if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error;
+      const existingBytes = await readFile(path);
+      const existingHash = createHash("sha256").update(existingBytes).digest("hex");
+      if (existingBytes.byteLength !== bytes.byteLength || existingHash !== sha256) {
+        throw new DataIntegrityError("Existing raw object failed integrity verification");
+      }
     }
-    this.database.prepare(`
-      INSERT INTO platform_raw_ingest_objects(
-        id, tenant_id, project_id, source_system, run_id, storage_key, sha256,
-        byte_size, state, actor, correlation_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?)
-    `).run(id, context.tenantId, context.projectId, bundle.source.system, runId, storageKey, sha256, bytes.byteLength, actor, correlationId, createdAt);
+    try {
+      this.database.prepare(`
+        INSERT INTO platform_raw_ingest_objects(
+          id, tenant_id, project_id, source_system, run_id, storage_key, sha256,
+          byte_size, state, actor, correlation_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?)
+      `).run(id, context.tenantId, context.projectId, bundle.source.system, runId, storageKey, sha256, bytes.byteLength, actor, correlationId, createdAt);
+    } catch (error) {
+      // Another request may have inserted the same run while this request was
+      // awaiting filesystem I/O. Re-read the unique key and accept only the
+      // exact immutable payload; never turn a valid idempotent race into 500.
+      const raced = this.database.prepare(`
+        SELECT * FROM platform_raw_ingest_objects
+        WHERE tenant_id = ? AND project_id = ? AND run_id = ?
+      `).get(context.tenantId, context.projectId, runId) as RawLandingRow | undefined;
+      if (!raced) throw error;
+      if (raced.sha256 !== sha256 || raced.byte_size !== bytes.byteLength) {
+        throw new ConflictError(`Ingestion run '${runId}' already has a different immutable raw payload`);
+      }
+      return recordFromRow(raced);
+    }
     return this.get(context, id);
   }
 
@@ -181,7 +201,12 @@ export class RawLandingStore {
   async replayBundle(context: RawLandingContext, id: string): Promise<IngestBundle> {
     const row = this.row(context, id);
     const path = this.resolveStorageKey(row.storage_key);
-    return JSON.parse(await readFile(path, "utf8")) as IngestBundle;
+    const bytes = await readFile(path);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (bytes.byteLength !== row.byte_size || sha256 !== row.sha256) {
+      throw new DataIntegrityError(`Raw ingest object '${id}' failed integrity verification`);
+    }
+    return JSON.parse(bytes.toString("utf8")) as IngestBundle;
   }
 
   markReplayed(context: RawLandingContext, id: string, replayRunId: string): RawLandingRecord {
@@ -193,7 +218,7 @@ export class RawLandingStore {
     return this.get(context, id);
   }
 
-  private get(context: RawLandingContext, id: string): RawLandingRecord {
+  get(context: RawLandingContext, id: string): RawLandingRecord {
     return recordFromRow(this.row(context, id));
   }
 

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,7 +19,13 @@ async function rawLandingApp() {
   const database = new FusionDatabase({ path: ":memory:", seed: true });
   cleanup.push(() => rm(directory, { recursive: true, force: true }));
   cleanup.push(() => database.close());
-  return createApp(database, undefined, { rawLandingDirectory: directory });
+  return {
+    app: createApp(database, undefined, {
+      rawLandingDirectory: directory,
+      defaultPlatformContext: { tenantId: 'demo', projectId: 'north-plant' },
+    }),
+    directory,
+  };
 }
 
 const contextHeaders = {
@@ -30,7 +36,7 @@ const contextHeaders = {
 
 describe("immutable raw landing and replay", () => {
   it("archives accepted payloads and replays them as a new audited run", async () => {
-    const app = await rawLandingApp();
+    const { app } = await rawLandingApp();
     const ingest = await request(app)
       .post("/api/v1/ingest/bundle")
       .set(contextHeaders)
@@ -59,7 +65,7 @@ describe("immutable raw landing and replay", () => {
   });
 
   it("retains invalid but well-formed payloads as failed raw evidence", async () => {
-    const app = await rawLandingApp();
+    const { app } = await rawLandingApp();
     const ingest = await request(app)
       .post("/api/v1/ingest/bundle")
       .set(contextHeaders)
@@ -74,5 +80,44 @@ describe("immutable raw landing and replay", () => {
       .set(contextHeaders);
     expect(listed.body.items[0]).toMatchObject({ runId: "raw-run-failed", state: "failed" });
     expect(listed.body.items[0].errorSummary).toContain("does not exist");
+  });
+
+  it("rejects replay when immutable raw bytes no longer match their recorded hash", async () => {
+    const { app, directory } = await rawLandingApp();
+    const ingest = await request(app)
+      .post("/api/v1/ingest/bundle")
+      .set(contextHeaders)
+      .send({
+        source: { system: "csv-pilot", runId: "raw-run-tampered" },
+        assets: [{ externalId: "RAW-TAMPERED", name: "Raw tampered", type: "Pump" }],
+      });
+    expect(ingest.status).toBe(201);
+
+    const files = await readdir(directory, { recursive: true });
+    const rawFile = files.find((file) => file.endsWith(".json"));
+    expect(rawFile).toBeDefined();
+    await writeFile(join(directory, rawFile!), '{"tampered":true}', "utf8");
+
+    const replay = await request(app)
+      .post(`/api/v1/platform/ingestion/raw/${ingest.body.rawObjectId}/replay`)
+      .set(contextHeaders);
+    expect(replay.status).toBe(422);
+    expect(replay.body.error).toMatchObject({ code: "data_integrity_error" });
+  });
+
+  it("treats concurrent identical archives as one idempotent raw object", async () => {
+    const { app } = await rawLandingApp();
+    const payload = {
+      source: { system: "csv-pilot", runId: "raw-run-concurrent" },
+      assets: [{ externalId: "RAW-CONCURRENT", name: "Raw concurrent", type: "Pump" }],
+    };
+    const [left, right] = await Promise.all([
+      request(app).post("/api/v1/ingest/bundle").set(contextHeaders).send(payload),
+      request(app).post("/api/v1/ingest/bundle").set(contextHeaders).send(payload),
+    ]);
+
+    expect([left.status, right.status].sort()).toEqual([200, 201]);
+    expect(left.body.rawObjectId).toBe(right.body.rawObjectId);
+    expect(left.body.rawSha256).toBe(right.body.rawSha256);
   });
 });

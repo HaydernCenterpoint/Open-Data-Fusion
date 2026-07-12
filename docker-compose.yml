@@ -75,8 +75,8 @@ services:
       - ./infra/postgres/scripts:/scripts:ro
     entrypoint: ["/bin/sh", "/scripts/migrate.sh"]
 
-  # Preview-only build contexts. These stay inactive until the API has its
-  # PostgreSQL repository adapter and an ingress routes /api from web to API.
+  # Preview-only build contexts. They stay inactive until the profile is
+  # selected; PostgreSQL-backed production-like validation uses the overlay.
   api:
     profiles: ["application-preview"]
     build:
@@ -86,10 +86,11 @@ services:
     environment:
       NODE_ENV: production
       ODF_AUTH_MODE: development
-      # The preview profile deliberately retains the local SQLite workspace
-      # store. Production-like PostgreSQL Canvas validation is provided by
-      # docker-compose.production-like.yml instead.
+      ODF_DEV_USER: local-user
+      # The preview profile deliberately uses the real single-instance SQLite
+      # data profile. PostgreSQL multi-replica validation uses the overlay.
       ODF_WORKSPACE_PERSISTENCE: sqlite
+      ODF_DATA_PERSISTENCE: sqlite
       ODF_DATABASE_PATH: /var/lib/odf/open-data-fusion.db
       ODF_RAW_LANDING_PATH: /var/lib/odf/raw
       ODF_OBJECT_STORE_PATH: /var/lib/odf/objects

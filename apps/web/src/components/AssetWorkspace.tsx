@@ -96,7 +96,7 @@ export function AssetWorkspace({ onIngest, snapshot, loading = false, error = ""
 
   return (
     <main className="asset-workspace">
-      <div className="page-heading-row"><h1>Asset Explorer</h1><button className="ingest-button" type="button" onClick={onIngest}><Upload size={19} /> Ingest sample</button></div>
+      <div className="page-heading-row"><h1>Asset Explorer</h1><button className="ingest-button" type="button" onClick={onIngest}><Upload size={19} /> Ingest data</button></div>
       {loading || error ? <ExplorerDataState loading={loading} error={error} onRetry={onRetry} /> : null}
       {!loading && !error && !snapshot ? <div className="explorer-data-state"><AlertCircle size={24} /><div><strong>No asset selected</strong><p>Choose an asset from the hierarchy or global search.</p></div></div> : null}
       {!loading && !error && snapshot ? (

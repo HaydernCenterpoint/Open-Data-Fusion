@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import type { DataPlanePermission, IdentityProvider } from './auth.js';
 import { ForbiddenError } from './database.js';
+import type { PlatformDiscoveryPersistence } from './platform-discovery.js';
 import {
   candidateCreateSchema,
   candidateReviewSchema,
@@ -58,15 +59,23 @@ async function requireProjectAccess(
 const writeRoles: readonly PlatformProjectRole[] = ['owner', 'editor'];
 const reviewRoles: readonly PlatformProjectRole[] = ['owner', 'editor', 'reviewer'];
 
-export function registerPlatformRoutes(app: Express, catalog: PlatformCatalog, identityProvider: IdentityProvider): void {
+export function registerPlatformRoutes(
+  app: Express,
+  catalog: PlatformCatalog,
+  identityProvider: IdentityProvider,
+  discovery: PlatformDiscoveryPersistence,
+): void {
   app.get('/api/v1/platform/tenants', async (request, response) => {
     const identity = await requirePermission(identityProvider, request, 'data:read');
     const query = parse(cursorListQuerySchema, request.query);
-    response.json(catalog.listTenants(identity.userId, identity.permissions.has('platform:admin'), query));
+    response.json(await discovery.listTenants(identity.userId, identity.permissions.has('platform:admin'), query));
   });
 
   app.post('/api/v1/platform/tenants', async (request, response) => {
     const identity = await requirePermission(identityProvider, request, 'platform:admin');
+    if (discovery.mode === 'postgres') {
+      throw new ForbiddenError('Tenant creation is an operational PostgreSQL provisioning workflow');
+    }
     const input = parse(tenantCreateSchema, request.body);
     response.status(201).json(catalog.createTenant(input, identity.userId, response.locals.correlationId));
   });
@@ -75,11 +84,14 @@ export function registerPlatformRoutes(app: Express, catalog: PlatformCatalog, i
     const identity = await requirePermission(identityProvider, request, 'data:read');
     const tenantId = parse(platformIdSchema, request.params.tenantId);
     const query = parse(cursorListQuerySchema, request.query);
-    response.json(catalog.listProjects(tenantId, identity.userId, identity.permissions.has('platform:admin'), query));
+    response.json(await discovery.listProjects(tenantId, identity.userId, identity.permissions.has('platform:admin'), query));
   });
 
   app.post('/api/v1/platform/tenants/:tenantId/projects', async (request, response) => {
     const identity = await requirePermission(identityProvider, request, 'platform:admin');
+    if (discovery.mode === 'postgres') {
+      throw new ForbiddenError('Project creation is an operational PostgreSQL provisioning workflow');
+    }
     const tenantId = parse(platformIdSchema, request.params.tenantId);
     const input = parse(projectCreateSchema, request.body);
     response.status(201).json(catalog.createProject(tenantId, input, identity.userId, response.locals.correlationId));

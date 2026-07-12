@@ -394,15 +394,15 @@ describe('time-series serving queries', () => {
       expect.objectContaining({ timestamp: '2026-01-01T00:01:00.000Z', value: 40 }),
     ]);
 
-    const legacy = await request(app)
-      .get('/api/v1/assets/AGG-1/telemetry')
-      .set('x-test-user', 'samantha.lee')
-      .set('x-test-permissions', 'data:read')
-      .query({
+    const legacy = await authorize(
+      request(app).get('/api/v1/assets/AGG-1/telemetry').query({
         timeSeriesExternalId: 'AGG-1-VALUE',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T00:01:59.999Z',
-      });
+      }),
+      'samantha.lee',
+      ['data:read'],
+    );
     expect(legacy.status).toBe(200);
     expect(legacy.body.series[0].points).toHaveLength(4);
   });

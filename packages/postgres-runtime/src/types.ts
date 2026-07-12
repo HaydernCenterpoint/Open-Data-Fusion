@@ -34,6 +34,8 @@ export interface RuntimePool extends TransactionClient {
  */
 export interface TransactionContext {
   tenantId: string | null;
+  /** Optional project scope used by project-aware RLS policies such as audit. */
+  projectId?: string | null;
   userId: string;
   platformAdmin?: boolean;
 }
@@ -115,6 +117,12 @@ export interface WorkspaceMemberRecord {
   createdAt: string;
 }
 
+export interface WorkspaceCreateInput {
+  workspaceId: string;
+  name: string;
+  correlationId: string;
+}
+
 export interface WorkspaceMutationInput {
   workspaceId: string;
   expectedVersion: number;
@@ -165,6 +173,7 @@ export interface WorkspaceRevisionPage {
 }
 
 export interface WorkspaceRepository {
+  createWorkspace(context: WorkspaceScope, input: WorkspaceCreateInput): Promise<WorkspaceRecord>;
   getWorkspace(context: WorkspaceScope, workspaceId: string): Promise<WorkspaceRecord>;
   getWorkspaceMember(context: WorkspaceScope, workspaceId: string): Promise<WorkspaceMemberRecord>;
   listWorkspaceMembers(context: WorkspaceScope, workspaceId: string): Promise<WorkspaceMemberRecord[]>;

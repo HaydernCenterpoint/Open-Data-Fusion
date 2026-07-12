@@ -126,20 +126,8 @@ const REVISION_PAGE_SIZE = 50;
 const WORKSPACE_ROLES: WorkspaceRole[] = ["owner", "editor", "reviewer", "viewer"];
 const CANVAS_CHART_GEOMETRY: CanvasNodeGeometry = { x: 770, y: 105, width: 345, height: 370 };
 
-const fallbackNodes: CanvasNodeRecord[] = [
-  { id: "canvas-pid", type: "diagram", position: { x: 55, y: 135 }, data: { title: "P&ID — Cooling Water System" } },
-  { id: "canvas-p101", type: "asset", position: { x: 500, y: 105 }, data: { externalId: "P-101", label: "Pump P-101" } },
-  { id: "canvas-pressure", type: "timeSeries", position: { x: 475, y: 290 }, data: { externalId: "P-101-PRESSURE", label: "Pressure psi" } },
-  { id: "canvas-system", type: "asset", position: { x: 470, y: 475 }, data: { externalId: "AREA-A", label: "Cooling Water System" } },
-  { id: "canvas-overview", type: "document", position: { x: 475, y: 655 }, data: { label: "CWS Overview.pdf" } },
-];
-
-const fallbackEdges: CanvasEdgeRecord[] = [
-  { id: "canvas-p101-pressure", source: "canvas-p101", target: "canvas-pressure", type: "measures", data: {} },
-  { id: "canvas-pressure-system", source: "canvas-pressure", target: "canvas-system", type: "partOf", data: {} },
-  { id: "canvas-system-overview", source: "canvas-system", target: "canvas-overview", type: "documentedBy", data: {} },
-  { id: "canvas-pid-p101", source: "canvas-pid", target: "canvas-p101", type: "diagramOf", data: {} },
-];
+const fallbackNodes: CanvasNodeRecord[] = [];
+const fallbackEdges: CanvasEdgeRecord[] = [];
 
 function dataString(node: CanvasNodeRecord, key: string): string | undefined {
   const value = node.data[key];
@@ -332,7 +320,7 @@ function PidPanel({ geometry }: { geometry: CanvasNodeGeometry }) {
           <circle cx="160" cy="82" r="18" /><text x="151" y="86">PI</text>
           <circle cx="365" cy="82" r="18" /><text x="356" y="86">PIC</text>
         </g>
-        <g className="pid-labels"><text x="180" y="191">P-101</text><text x="168" y="207">COOLING WATER PUMP</text><text x="44" y="30">FROM PLANT HEADER</text><text x="340" y="30">TO PLANT HEADER</text></g>
+        <g className="pid-labels"><text x="180" y="191">PUMP</text><text x="168" y="207">PROCESS EQUIPMENT</text><text x="44" y="30">FROM PROCESS</text><text x="340" y="30">TO PROCESS</text></g>
       </svg>
 
     </div>
@@ -381,7 +369,7 @@ export function CanvasWorkspace({ snapshot, workspace, platformContext, onWorksp
   const workspaceTenantId = platformContext?.tenantId ?? "";
   const workspaceProjectId = platformContext?.projectId ?? "";
   const [tool, setTool] = useState<CanvasTool>("select");
-  const [selection, setSelection] = useState<CanvasSelection>({ kind: "node", id: "canvas-p101" });
+  const [selection, setSelection] = useState<CanvasSelection>(null);
   const [connectSource, setConnectSource] = useState<string | null>(null);
   const [showIntro, setShowIntro] = useState(true);
   const [scale, setScale] = useState(1);
@@ -1371,7 +1359,7 @@ export function CanvasWorkspace({ snapshot, workspace, platformContext, onWorksp
     <div className="canvas-shell">
       <header className="canvas-topbar">
         <button className="canvas-brand" type="button" onClick={onOpenExplorer} aria-label="Open Data Fusion Explorer"><BrandLogo aria-hidden="true" /></button>
-        <div className="canvas-workspace-name"><span>My workspace</span><span className="canvas-slash">/</span><span>{workspace?.name ?? "Cooling Water System"}</span></div>
+        <div className="canvas-workspace-name"><span>Workspace</span><span className="canvas-slash">/</span><span>{workspace?.name ?? "No workspace selected"}</span></div>
         <button className="canvas-save-state" type="button" disabled={!workspace || !canEdit} onClick={saveRevision} title={canEdit ? "Save a new immutable revision" : "Your workspace role is read-only"}>Saved v{workspace?.version ?? "—"} <span>✓</span> <small>{workspace ? !membersLoaded ? "Checking access" : canEdit ? "Save revision" : "Read only" : "Connecting"}</small></button>
         <button className={`canvas-presence${collaborationConnected === false ? " is-disconnected" : ""}${membersOpen ? " is-open" : ""}`} type="button" aria-label={`Workspace members, ${presenceUsers.length} online`} aria-expanded={membersOpen} onClick={() => { setHistoryOpen(false); setInspectorOpen(false); setLayersOpen(false); setMembersOpen((open) => !open); }} title={`${members.length} workspace member${members.length === 1 ? "" : "s"}`}>
           <Users size={15} />
@@ -1425,7 +1413,7 @@ export function CanvasWorkspace({ snapshot, workspace, platformContext, onWorksp
             const geometry = geometryMap.get(node.id);
             return geometry ? <PidPanel key={node.id} geometry={geometry} /> : null;
           })}
-          <div className="canvas-panel canvas-chart-panel"><div className="canvas-panel-header"><span><Gauge size={17} /> Pressure psi</span><MoreDots /></div><div className="canvas-legend"><span className="legend-blue">●</span> P-101 Discharge Pressure <em>psi</em><span className="legend-green">●</span> P-101 Suction Pressure <em>psi</em></div><TelemetryChart snapshot={snapshot} /><div className="chart-window-summary">Latest loaded telemetry window</div><div className="chart-footer"><span>Historical snapshot</span><span>{snapshot?.telemetry.series[0]?.points.length ?? 0} points</span></div></div>
+          {snapshot?.telemetry.series[0] ? <div className="canvas-panel canvas-chart-panel"><div className="canvas-panel-header"><span><Gauge size={17} /> {snapshot.telemetry.series[0].name}</span><MoreDots /></div><div className="canvas-legend"><span className="legend-blue">●</span> {snapshot.telemetry.series[0].externalId} <em>{snapshot.telemetry.series[0].unit ?? "value"}</em></div><TelemetryChart snapshot={snapshot} /><div className="chart-window-summary">Latest loaded telemetry window</div><div className="chart-footer"><span>Historical snapshot</span><span>{snapshot.telemetry.series[0].points.length} points</span></div></div> : <div className="canvas-panel canvas-chart-panel"><div className="canvas-panel-header"><span><Gauge size={17} /> Telemetry</span><MoreDots /></div><div className="chart-window-summary">Select an asset with telemetry to populate this panel.</div></div>}
           <svg className="canvas-edges" viewBox="0 0 1400 1000" aria-label="Canvas connections">
             {edges.map((edge) => {
               const source = nodeMap.get(edge.source);

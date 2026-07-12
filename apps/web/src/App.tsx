@@ -25,6 +25,10 @@ import type { ApiAsset, ApiWorkspace, ExplorerSnapshot, PlatformContext, Platfor
 type ViewMode = AppViewMode;
 
 const ASSET_PAGE_SIZE = 100;
+const CONFIGURED_WORKSPACE_ID = (
+  import.meta.env.VITE_WORKSPACE_ID
+  || (import.meta.env.MODE === "test" ? "cooling-water-system" : "")
+).trim();
 
 const viewByNavigation: Record<NavigationLabel, Exclude<ViewMode, "canvas">> = {
   Explorer: "explorer",
@@ -117,6 +121,8 @@ export default function App() {
   }, []);
 
   const loadExplorerAsset = useCallback(async (externalId: string) => {
+    if (!workspaceTenantId || !workspaceProjectId) return;
+    const context = { tenantId: workspaceTenantId, projectId: workspaceProjectId };
     explorerRequestRef.current?.abort();
     const controller = new AbortController();
     explorerRequestRef.current = controller;
@@ -127,7 +133,7 @@ export default function App() {
     setExplorerLoading(true);
     setExplorerError("");
     try {
-      const nextSnapshot = await getExplorerSnapshot(externalId, controller.signal);
+      const nextSnapshot = await getExplorerSnapshot(context, externalId, controller.signal);
       if (!controller.signal.aborted) setSnapshot(nextSnapshot);
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -137,7 +143,7 @@ export default function App() {
     } finally {
       if (!controller.signal.aborted) setExplorerLoading(false);
     }
-  }, [updateRoute]);
+  }, [updateRoute, workspaceProjectId, workspaceTenantId]);
 
   const openAsset = useCallback((externalId: string, historyMode: AppRouteHistoryMode = "push") => {
     setViewMode("explorer");
@@ -171,7 +177,6 @@ export default function App() {
         return;
       }
       const project = page.items.find((item) => item.id === preferredProjectId)
-        ?? page.items.find((item) => item.id === "north-plant")
         ?? page.items[0];
       setPlatformContext({ tenantId, projectId: project.id });
       setPlatformBootstrap({ status: "ready", message: `${tenantId} / ${project.id}` });
@@ -197,7 +202,6 @@ export default function App() {
         return;
       }
       const tenant = page.items.find((item) => item.id === routeRef.current.tenantId)
-        ?? page.items.find((item) => item.id === "demo")
         ?? page.items[0];
       void loadProjectsForTenant(tenant.id, routeRef.current.projectId, "replace");
     } catch (error) {
@@ -208,7 +212,7 @@ export default function App() {
 
   useEffect(() => {
     workspaceRequestRef.current?.abort();
-    if (!workspaceTenantId || !workspaceProjectId) {
+    if (!workspaceTenantId || !workspaceProjectId || !CONFIGURED_WORKSPACE_ID) {
       setWorkspace(null);
       return undefined;
     }
@@ -217,7 +221,7 @@ export default function App() {
     workspaceRequestRef.current = controller;
     setWorkspace(null);
     void getWorkspace(
-      "cooling-water-system",
+      CONFIGURED_WORKSPACE_ID,
       { tenantId: workspaceTenantId, projectId: workspaceProjectId },
       controller.signal,
     )
@@ -233,34 +237,18 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController();
-    setAssetsLoading(true);
     void Promise.all([
       getHealth(controller.signal),
-      capture(listAssets({ limit: ASSET_PAGE_SIZE, offset: 0 }, controller.signal)),
       capture(listPlatformTenants({ limit: 100 }, controller.signal)),
-    ]).then(([online, assetResult, tenantResult]) => {
+    ]).then(([online, tenantResult]) => {
       if (controller.signal.aborted) return;
       setApiOnline(online);
-      setAssetsLoading(false);
-      if (assetResult.ok) {
-        setAssets(assetResult.value.items);
-        setAssetTotal(assetResult.value.total);
-        setAssetsError("");
-        const routedAssetId = routeRef.current.assetId;
-        const initialAssetId = routedAssetId
-          ?? assetResult.value.items.find((asset) => asset.externalId === "P-101")?.externalId
-          ?? assetResult.value.items[0]?.externalId;
-        if (initialAssetId) void loadExplorerAsset(initialAssetId);
-      } else {
-        setAssetsError(errorMessage(assetResult.error, "Assets could not be loaded"));
-      }
       if (tenantResult.ok) {
         setPlatformTenants(tenantResult.value.items);
         if (tenantResult.value.items.length === 0) {
           setPlatformBootstrap({ status: "empty", message: "No accessible tenants were returned for this identity." });
         } else {
           const tenant = tenantResult.value.items.find((item) => item.id === routeRef.current.tenantId)
-            ?? tenantResult.value.items.find((item) => item.id === "demo")
             ?? tenantResult.value.items[0];
           void loadProjectsForTenant(tenant.id, routeRef.current.projectId, "replace");
         }
@@ -275,7 +263,44 @@ export default function App() {
       projectRequestRef.current?.abort();
       workspaceRequestRef.current?.abort();
     };
-  }, [loadExplorerAsset, loadProjectsForTenant]);
+  }, [loadProjectsForTenant]);
+
+  useEffect(() => {
+    explorerRequestRef.current?.abort();
+    if (!workspaceTenantId || !workspaceProjectId) {
+      setAssets([]);
+      setAssetTotal(0);
+      setAssetsLoading(false);
+      setSnapshot(null);
+      return undefined;
+    }
+    const context = { tenantId: workspaceTenantId, projectId: workspaceProjectId };
+    const controller = new AbortController();
+    setAssetsLoading(true);
+    setAssetsError("");
+    listAssets(context, { limit: ASSET_PAGE_SIZE, offset: 0 }, controller.signal)
+      .then((response) => {
+        if (controller.signal.aborted) return;
+        setAssets(response.items);
+        setAssetTotal(response.total);
+        setAssetsLoading(false);
+        const routedAssetId = routeRef.current.assetId;
+        const initialAssetId = routedAssetId ?? response.items[0]?.externalId;
+        if (initialAssetId) void loadExplorerAsset(initialAssetId);
+        else {
+          setSelectedAssetId("");
+          setSnapshot(null);
+        }
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setAssets([]);
+        setAssetTotal(0);
+        setAssetsLoading(false);
+        setAssetsError(errorMessage(error, "Assets could not be loaded"));
+      });
+    return () => controller.abort();
+  }, [loadExplorerAsset, workspaceProjectId, workspaceTenantId]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return undefined;
@@ -321,10 +346,11 @@ export default function App() {
   }, [loadExplorerAsset, loadProjectsForTenant]);
 
   async function reloadAssets() {
+    if (!platformContext) return;
     setAssetsLoading(true);
     setAssetsError("");
     try {
-      const response = await listAssets({ limit: ASSET_PAGE_SIZE, offset: 0 });
+      const response = await listAssets(platformContext, { limit: ASSET_PAGE_SIZE, offset: 0 });
       setAssets(response.items);
       setAssetTotal(response.total);
       const preferred = response.items.find((asset) => asset.externalId === selectedAssetId) ?? response.items[0];
@@ -337,11 +363,11 @@ export default function App() {
   }
 
   async function loadMoreAssets() {
-    if (assetsLoadingMore || assets.length >= assetTotal) return;
+    if (!platformContext || assetsLoadingMore || assets.length >= assetTotal) return;
     setAssetsLoadingMore(true);
     setAssetsError("");
     try {
-      const response = await listAssets({ limit: ASSET_PAGE_SIZE, offset: assets.length });
+      const response = await listAssets(platformContext, { limit: ASSET_PAGE_SIZE, offset: assets.length });
       setAssets((current) => {
         const knownIds = new Set(current.map((asset) => asset.externalId));
         return [...current, ...response.items.filter((asset) => !knownIds.has(asset.externalId))];
@@ -424,7 +450,7 @@ export default function App() {
         </>
       ) : null}
       {viewMode === "context" ? <PlatformContextWorkspace context={platformContext} onOpenAsset={openAsset} /> : null}
-      {viewMode === "audit" ? <AuditWorkspace /> : null}
+      {viewMode === "audit" ? <AuditWorkspace context={platformContext} /> : null}
       {viewMode === "sources" ? <SourcesWorkspace context={platformContext} /> : null}
       {viewMode === "pipelines" ? <PipelinesWorkspace context={platformContext} /> : null}
       {viewMode === "models" ? <ModelsWorkspace context={platformContext} /> : null}
@@ -433,7 +459,7 @@ export default function App() {
       {viewMode === "spatial" ? <SpatialWorkspace context={platformContext} /> : null}
       {viewMode === "writeback" ? <WritebackWorkspace context={platformContext} /> : null}
       <button className="switch-canvas-button" type="button" onClick={() => showView("canvas")}>Open Canvas</button>
-      <IngestModal open={ingestOpen} onClose={() => setIngestOpen(false)} onComplete={(message) => { notify(message); if (selectedAssetId) void loadExplorerAsset(selectedAssetId); }} />
+      <IngestModal context={platformContext} open={ingestOpen} onClose={() => setIngestOpen(false)} onComplete={(message) => { notify(message); void reloadAssets(); }} />
       {toast ? <div className="toast" role="status">{toast}</div> : null}
     </div>
   );

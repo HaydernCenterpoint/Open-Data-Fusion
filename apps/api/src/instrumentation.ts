@@ -1,11 +1,21 @@
+import { basename, dirname, resolve } from "node:path";
 import { loadEnvFile } from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 
+const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+const packageDirectory = basename(dirname(moduleDirectory)) === "dist"
+  ? resolve(moduleDirectory, "..", "..")
+  : resolve(moduleDirectory, "..");
+const repositoryEnvironmentPath = resolve(packageDirectory, "..", "..", ".env");
+
 try {
-  loadEnvFile();
+  // The root .env is the single documented source for both the source and
+  // compiled entry points. Never let an apps/api/.env silently override it.
+  loadEnvFile(repositoryEnvironmentPath);
 } catch (error) {
   if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
 }

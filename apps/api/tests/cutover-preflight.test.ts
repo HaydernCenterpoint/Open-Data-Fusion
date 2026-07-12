@@ -95,6 +95,19 @@ describe('SQLite cutover preflight', () => {
     expect(existsSync(outputPath)).toBe(false);
   });
 
+  it('fails closed instead of coalescing already-scoped workspaces into one cutover target', () => {
+    const outputPath = join(tempDirectory, 'scoped-cutover-preflight.json');
+    database.database.prepare(`
+      INSERT INTO workspace_scopes(workspace_id, tenant_id, project_id, assigned_by, assigned_at)
+      VALUES ('cooling-water-system', 'tenant-a', 'project-a', 'cutover-test', '2026-07-12T00:00:00.000Z')
+    `).run();
+
+    expect(() => writeSqliteCutoverPreflightBundle({ databasePath, outputPath })).toThrow(
+      'cannot safely preserve scoped workspaces',
+    );
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
   it('rejects a missing SQLite input without creating an output path', () => {
     const outputPath = join(tempDirectory, 'missing-input', 'cutover-preflight.json');
 

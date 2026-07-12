@@ -12,6 +12,7 @@ import type {
   TelemetryLatestQuery,
   TelemetryQuery,
   WorkspaceOperations,
+  WorkspaceCreate,
   WorkspaceMemberUpsert,
   WorkspaceRevisionQuery,
   WorkspaceRollback,
@@ -19,6 +20,7 @@ import type {
   WorkspaceUpdate,
 } from './schemas.js';
 import type { WorkspaceMember, WorkspaceRole } from './collaboration.js';
+import type { PlatformContext } from './platform-schemas.js';
 
 type SqliteRow = Record<string, unknown>;
 
@@ -420,6 +422,16 @@ export class FusionDatabase {
         updated_at TEXT NOT NULL
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS workspace_scopes (
+        workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        tenant_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        assigned_by TEXT NOT NULL,
+        assigned_at TEXT NOT NULL
+      ) STRICT, WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS workspace_scopes_context_idx
+        ON workspace_scopes(tenant_id, project_id, workspace_id);
+
       CREATE TABLE IF NOT EXISTS workspace_revisions (
         workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON UPDATE CASCADE ON DELETE CASCADE,
         version INTEGER NOT NULL CHECK(version >= 1),
@@ -637,8 +649,76 @@ export class FusionDatabase {
     return asWorkspace(row);
   }
 
-  getWorkspaceMember(id: string, userId: string): WorkspaceMember {
+  createWorkspace(
+    context: PlatformContext,
+    input: WorkspaceCreate,
+    actor: string,
+    displayName: string,
+    correlationId: string,
+  ): Record<string, unknown> {
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      if (this.database.prepare('SELECT 1 FROM workspaces WHERE id = ?').get(input.id)) {
+        throw new ConflictError(`Workspace '${input.id}' already exists`);
+      }
+      const createdAt = nowIso();
+      const snapshot: WorkspaceSnapshot = {
+        viewport: { x: 0, y: 0, zoom: 1 },
+        nodes: [],
+        edges: [],
+      };
+      const snapshotJson = JSON.stringify(snapshot);
+      this.database.prepare(`
+        INSERT INTO workspaces(id, name, snapshot_json, version, created_by, created_at, updated_by, updated_at)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+      `).run(input.id, input.name, snapshotJson, actor, createdAt, actor, createdAt);
+      this.database.prepare(`
+        INSERT INTO workspace_scopes(workspace_id, tenant_id, project_id, assigned_by, assigned_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(input.id, context.tenantId, context.projectId, actor, createdAt);
+      this.database.prepare(`
+        INSERT INTO workspace_members(workspace_id, user_id, display_name, role, created_at)
+        VALUES (?, ?, ?, 'owner', ?)
+      `).run(input.id, actor, displayName, createdAt);
+      this.database.prepare(`
+        INSERT INTO workspace_revisions(workspace_id, version, snapshot_json, change_summary, actor, created_at, correlation_id)
+        VALUES (?, 1, ?, 'Initial workspace', ?, ?, ?)
+      `).run(input.id, snapshotJson, actor, createdAt, correlationId);
+      this.insertAudit(actor, 'workspace.created', 'workspace', input.id, {
+        tenantId: context.tenantId,
+        projectId: context.projectId,
+        workspaceId: input.id,
+        name: input.name,
+        version: 1,
+      }, correlationId, createdAt);
+      const created = this.database.prepare('SELECT * FROM workspaces WHERE id = ?').get(input.id) as SqliteRow;
+      this.database.exec('COMMIT');
+      return asWorkspace(created);
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  getWorkspaceScope(id: string): PlatformContext | undefined {
+    const row = this.database.prepare(`
+      SELECT tenant_id, project_id FROM workspace_scopes WHERE workspace_id = ?
+    `).get(id) as SqliteRow | undefined;
+    return row
+      ? { tenantId: String(row.tenant_id), projectId: String(row.project_id) }
+      : undefined;
+  }
+
+  getWorkspaceMember(id: string, userId: string, context?: PlatformContext): WorkspaceMember {
     this.getWorkspace(id);
+    const scope = this.getWorkspaceScope(id);
+    if (scope && (
+      !context
+      || context.tenantId !== scope.tenantId
+      || context.projectId !== scope.projectId
+    )) {
+      throw new NotFoundError(`Workspace '${id}' was not found in the selected project`);
+    }
     const row = this.database.prepare(`
       SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?
     `).get(id, userId) as SqliteRow | undefined;
@@ -662,10 +742,11 @@ export class FusionDatabase {
     targetUserId: string,
     update: WorkspaceMemberUpsert,
     correlationId: string,
+    context: PlatformContext | undefined,
   ): WorkspaceMemberUpsertResult {
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      this.requireWorkspaceOwner(id, actor);
+      this.requireWorkspaceOwner(id, actor, context);
       const existing = this.database.prepare(`
         SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?
       `).get(id, targetUserId) as SqliteRow | undefined;
@@ -704,10 +785,16 @@ export class FusionDatabase {
     }
   }
 
-  removeWorkspaceMember(id: string, actor: string, targetUserId: string, correlationId: string): WorkspaceMember {
+  removeWorkspaceMember(
+    id: string,
+    actor: string,
+    targetUserId: string,
+    correlationId: string,
+    context: PlatformContext | undefined,
+  ): WorkspaceMember {
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      this.requireWorkspaceOwner(id, actor);
+      this.requireWorkspaceOwner(id, actor, context);
       const existing = this.database.prepare(`
         SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?
       `).get(id, targetUserId) as SqliteRow | undefined;
@@ -734,8 +821,14 @@ export class FusionDatabase {
     }
   }
 
-  applyWorkspaceOperations(id: string, actor: string, update: WorkspaceOperations, correlationId: string): Record<string, unknown> {
-    const member = this.getWorkspaceMember(id, actor);
+  applyWorkspaceOperations(
+    id: string,
+    actor: string,
+    update: WorkspaceOperations,
+    correlationId: string,
+    context: PlatformContext | undefined,
+  ): Record<string, unknown> {
+    const member = this.getWorkspaceMember(id, actor, context);
     if (member.role !== 'owner' && member.role !== 'editor') {
       throw new ForbiddenError(`User '${actor}' has read-only access to workspace '${id}'`);
     }
@@ -1314,8 +1407,8 @@ export class FusionDatabase {
     `).run(entityType, entityId, sourceSystem, entityId, runId, rawHash, timestamp, timestamp);
   }
 
-  private requireWorkspaceOwner(id: string, actor: string): WorkspaceMember {
-    const member = this.getWorkspaceMember(id, actor);
+  private requireWorkspaceOwner(id: string, actor: string, context?: PlatformContext): WorkspaceMember {
+    const member = this.getWorkspaceMember(id, actor, context);
     if (member.role !== 'owner') {
       throw new ForbiddenError(`Only owners can manage members of workspace '${id}'`);
     }
@@ -1330,9 +1423,55 @@ export class FusionDatabase {
   }
 
   private insertAudit(actor: string, action: string, entityType: string, entityId: string | null, details: unknown, correlationId: string, timestamp = nowIso()): void {
+    const detailsJson = JSON.stringify(details);
     this.database.prepare(`
       INSERT INTO audit_log(timestamp, actor, action, entity_type, entity_id, details_json, correlation_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(timestamp, actor, action, entityType, entityId, JSON.stringify(details), correlationId);
+    `).run(timestamp, actor, action, entityType, entityId, detailsJson, correlationId);
+
+    // New scoped workspaces use the industrial audit API as their public
+    // project ledger. Preserve the legacy audit row for cutover compatibility,
+    // while mirroring every scoped workspace mutation into that ledger.
+    const detailRecord = details && typeof details === 'object'
+      ? details as Record<string, unknown>
+      : undefined;
+    const workspaceId = entityType === 'workspace'
+      ? entityId
+      : typeof detailRecord?.workspaceId === 'string'
+        ? detailRecord.workspaceId
+        : null;
+    if (!workspaceId) return;
+    const scope = this.database.prepare(`
+      SELECT tenant_id, project_id FROM workspace_scopes WHERE workspace_id = ?
+    `).get(workspaceId) as SqliteRow | undefined;
+    if (!scope) return;
+    const hasIndustrialAudit = this.database.prepare(`
+      SELECT 1 AS found FROM sqlite_master
+      WHERE type = 'table' AND name = 'industrial_audit'
+    `).get();
+    if (!hasIndustrialAudit) return;
+    const tenantId = String(scope.tenant_id);
+    const projectId = String(scope.project_id);
+    const next = this.database.prepare(`
+      SELECT COALESCE(MAX(id), 0) + 1 AS id FROM industrial_audit
+      WHERE tenant_id = ? AND project_id = ?
+    `).get(tenantId, projectId) as SqliteRow;
+    this.database.prepare(`
+      INSERT INTO industrial_audit(
+        tenant_id, project_id, id, timestamp, actor, action,
+        entity_type, entity_id, details_json, correlation_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      tenantId,
+      projectId,
+      Number(next.id),
+      timestamp,
+      actor,
+      action,
+      entityType,
+      entityId,
+      detailsJson,
+      correlationId,
+    );
   }
 }

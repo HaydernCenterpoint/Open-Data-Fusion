@@ -4,7 +4,10 @@ Backend vertical slice for industrial asset context, telemetry, ingestion, prove
 
 ## Run
 
-Node.js 24 or newer is required because the database uses the built-in `node:sqlite` module.
+Node.js 24 or newer is required. The embedded profile and the platform,
+governed-object, raw-landing metadata, and advanced stores use the built-in
+`node:sqlite` module even when the industrial core is configured for
+PostgreSQL.
 
 ```sh
 npm install
@@ -12,21 +15,58 @@ npm run dev
 ```
 
 The API listens on `http://localhost:4310` by default. Set `PORT`,
-`ODF_DATABASE_PATH`, `ODF_OBJECT_STORE_PATH`, or `ODF_SEED=false` to override
-runtime defaults. Production requires an explicit `ODF_OBJECT_STORE_PATH`.
+`ODF_DATABASE_PATH`, or `ODF_OBJECT_STORE_PATH` to override runtime defaults.
+Production requires an explicit `ODF_OBJECT_STORE_PATH` and an explicit
+`ODF_DATA_PERSISTENCE`. Demonstration data is disabled by default; set
+`ODF_SEED=true` only when the legacy SQLite UI/Canvas fixture is intentionally
+needed. Setting it back to false does not delete fixture rows from an existing
+database.
 Authentication profiles and OIDC variables are documented in
 [`docs/security/authentication.md`](../../docs/security/authentication.md).
 
-For the PostgreSQL Canvas boundary, set
-`ODF_WORKSPACE_PERSISTENCE=postgres`, `ODF_API_POSTGRES_URL` to a dedicated
-non-superuser login inheriting `odf_app`, and `ODF_SHARED_EVENTS_REQUIRED=true`
-with an authenticated `ODF_REDIS_URL`. The API fails fast when migrations or
-the shared event transport are unavailable. This changes only workspace/Canvas
-routes; asset, platform, ingest, and object routes retain their local adapters.
-See the [production-like runbook](../../docs/operations/postgres-canvas-production-like.md)
-for role separation and a two-instance rehearsal.
+### Persistence profiles
+
+`ODF_DATA_PERSISTENCE` selects exactly one authoritative backend per process.
+The API never dual-writes authoritative industrial-core or Canvas state to
+both databases.
+
+| Surface | `sqlite` | `postgres` |
+| --- | --- | --- |
+| Assets, time series, telemetry, relations, industrial audit, bundle ingest | SQLite, project scoped | PostgreSQL, project scoped with forced RLS |
+| Canvas/workspaces | SQLite | PostgreSQL with transactional outbox |
+| Tenant/project GET discovery | SQLite membership catalog | PostgreSQL active project membership, UUID cursor pagination, no admin bypass |
+| Tenant/project creation | `platform:admin` API | API blocked; use the audited `tenant:provision` workflow |
+| Remaining platform catalog and membership administration | SQLite | SQLite, not automatically coupled to PostgreSQL scopes |
+| Governed objects, raw-landing metadata, diagrams, matching, spatial, write-back | SQLite/local files | SQLite/local files |
+
+The SQLite profile is intended for an embedded or single-API-instance
+deployment:
+
+```text
+ODF_DATA_PERSISTENCE=sqlite
+```
+
+For PostgreSQL, set `ODF_DATA_PERSISTENCE=postgres`, point
+`ODF_API_POSTGRES_URL` at a dedicated non-superuser login inheriting only
+`odf_app`, and use `ODF_SHARED_EVENTS_REQUIRED=true` with an authenticated
+`ODF_REDIS_URL` for a multi-instance deployment. The API fails fast when the
+database migrations, role, or required shared event transport are unavailable.
+
+`ODF_WORKSPACE_PERSISTENCE` is retained for deployment compatibility. Omit it,
+or set it to the same value as `ODF_DATA_PERSISTENCE`; a mismatch is rejected
+because hybrid/dual-write mode is disabled. See the
+[production-like runbook](../../docs/operations/postgres-canvas-production-like.md)
+for role separation, real bundle ingestion, and a two-instance rehearsal.
 
 ## SQLite-to-PostgreSQL Canvas cutover
+
+This importer migrates workspace, revision, membership, and related Canvas
+audit history only. It does not migrate assets, time series, telemetry points,
+relations, platform catalog data, governed objects, or advanced-product data.
+Because `ODF_DATA_PERSISTENCE=postgres` selects both the industrial core and
+Canvas, an established SQLite deployment must separately rehearse source
+replay/backfill for its industrial records before switching. Do not dual-write
+the two backends during that transition.
 
 Generate the read-only source bundle first:
 
@@ -57,9 +97,11 @@ PostgreSQL connection opens. Add `--apply` to commit that same transaction in
 the maintenance window. It preserves valid UUID correlation IDs and maps legacy
 text IDs with `open-data-fusion.uuidv8.sha256.v1`, reporting a mapping checksum
 for evidence.
-Historical outbox events are intentionally not synthesized. After final import
-and role/migration verification, enable the PostgreSQL Canvas adapter with the
-explicit runtime variables above; do not dual-write SQLite and PostgreSQL.
+Historical outbox events are intentionally not synthesized. After final import,
+industrial-data backfill planning, and role/migration verification, enable the
+PostgreSQL profile with `ODF_DATA_PERSISTENCE=postgres`. If the legacy
+`ODF_WORKSPACE_PERSISTENCE` variable remains present, it must also be
+`postgres`.
 
 ## Controlled tenant/project provisioning
 
@@ -120,21 +162,30 @@ npm run tenant:provision -- `
 - `POST /api/v1/workspaces/:id/operations` with `baseVersion`, `changeSummary`, and semantic operations
 - `GET /api/v1/workspaces/:id/events?user=` as a Server-Sent Events stream
 
-### PostgreSQL Canvas request scope
+### Industrial request scope
 
-When `ODF_WORKSPACE_PERSISTENCE=postgres`, every Canvas/workspace route requires
-both UUID headers in addition to its normal OIDC/workspace authorization:
+Asset, telemetry, relation, audit, bundle-ingest, and raw-landing routes require
+both headers in every persistence profile:
 
 ```text
-x-odf-tenant-id: <tenant UUID>
-x-odf-project-id: <project UUID>
+x-odf-tenant-id: <tenant ID>
+x-odf-project-id: <project ID>
 ```
 
-The API resolves project membership and sets the PostgreSQL tenant context for
-each short transaction. Missing, malformed, or unauthorized scope headers fail
-closed; a valid token alone does not expose a workspace. In this mode, a
-supplied `x-correlation-id` must be a UUID (or omit it and the API will
-generate one for the response).
+The v1 bundle predates immutable SQLite `workspace_scopes` and assigns every
+imported workspace to one operator-supplied PostgreSQL target project. Preflight
+therefore fails closed if the SQLite source already contains a scoped workspace;
+export/import support must be extended to carry each workspace scope before
+such a deployment can be cut over without collapsing project boundaries.
+
+SQLite resolves those IDs and the authenticated user against the local platform
+catalog. PostgreSQL requires UUID IDs, resolves membership from PostgreSQL, and
+sets tenant/project context for each short transaction. PostgreSQL
+Canvas/workspace routes require the same UUID scope in addition to workspace
+authorization.
+Missing, malformed, or unauthorized scope fails closed; a valid token alone
+does not expose project data. In PostgreSQL mode, a supplied
+`x-correlation-id` must be a UUID (or omit it and the API generates one).
 
 ### Platform catalog APIs
 
@@ -143,8 +194,22 @@ Project-scoped platform routes require both `x-odf-tenant-id` and
 project before reading or writing any resource. New list endpoints use opaque
 keyset cursors through `?limit=&cursor=` and return `nextCursor`.
 
-- `GET|POST /api/v1/platform/tenants`
-- `GET|POST /api/v1/platform/tenants/:tenantId/projects`
+When `ODF_DATA_PERSISTENCE=postgres`, the two tenant/project GET routes use
+PostgreSQL discovery functions. They return only active UUID tenants/projects
+for which the authenticated identity has project membership, with opaque
+`{id}` keyset cursors; `platform:admin` does not bypass that filter. Tenant and
+project POST routes fail closed and direct operators to the controlled
+`tenant:provision` workflow.
+
+All remaining routes in this section are still SQLite-backed and are not
+automatically coupled to the discovered PostgreSQL scope. In particular,
+creating a SQLite source/connector does not create the active PostgreSQL
+`odf.source_connections` record required by PostgreSQL bundle ingest.
+
+- `GET /api/v1/platform/tenants` (selected-backend discovery)
+- `POST /api/v1/platform/tenants` (SQLite only; PostgreSQL fails closed)
+- `GET /api/v1/platform/tenants/:tenantId/projects` (selected-backend discovery)
+- `POST /api/v1/platform/tenants/:tenantId/projects` (SQLite only; PostgreSQL fails closed)
 - `GET|POST /api/v1/platform/datasets`
 - `GET|POST /api/v1/platform/sources`
 - `GET|POST /api/v1/platform/connectors`
@@ -179,13 +244,16 @@ keyset cursors through `?limit=&cursor=` and return `nextCursor`.
 `data:read` allows project reads, `data:ingest` plus project owner/editor
 allows catalog writes and pipeline triggers, and `relations:review` plus
 owner/editor/reviewer allows candidate review. Creating tenants or projects
-requires the global `platform:admin` permission. Connector configuration rejects
-inline credential-shaped fields; store only secret references.
+through the SQLite profile requires the global `platform:admin` permission; the
+same POST routes are blocked in PostgreSQL mode. Connector configuration
+rejects inline credential-shaped fields; store only secret references.
 
-The local seed creates tenant `demo`, project `north-plant`, and mirrors the
-four Canvas demo users into project roles. Existing seeded and newly ingested
-assets are projected into unified search for that project. Other projects do
-not inherit those assets.
+In the SQLite profile, `ODF_SEED=true` creates the optional legacy tenant,
+project, and Canvas-role fixture. The scoped industrial adapter does not import
+legacy demo asset tables; ingest industrial records through the project-scoped
+bundle endpoint. No fixture is created when the variable is unset or false.
+Project scoping prevents one project's ingested records from being inherited by
+another project.
 
 ### Advanced contextualization and industrial write-back
 
@@ -236,43 +304,102 @@ other active formats are stored as opaque bytes and are never executed or
 parsed. Search uses SQLite FTS5 when available and automatically falls back to
 the existing scoped `LIKE` index.
 
-Latest and aggregate telemetry routes require `x-odf-tenant-id`,
-`x-odf-project-id`, verified `data:read`, and project membership. Aggregation
-uses epoch-aligned buckets and returns the selected `avg|min|max|sum|count`
-value together with count, min/max/avg/sum, first/last values, and worst bucket
-quality. The original raw telemetry endpoint and response remain unchanged.
+Latest and aggregate telemetry routes use the selected industrial backend and
+require `x-odf-tenant-id`, `x-odf-project-id`, verified `data:read`, and project
+membership. Aggregation uses epoch-aligned buckets and returns the selected
+`avg|min|max|sum|count` value together with count, min/max/avg/sum, first/last
+values, and worst bucket quality. Governed object storage remains on its
+SQLite/local-file boundary in both persistence profiles.
 
-Example bundle:
+### Ingest a real source bundle
 
-```json
-{
-  "source": {
-    "system": "opcua-north-plant",
-    "runId": "opcua-2026-07-10T14:00:00Z",
-    "actor": "edge-connector"
-  },
-  "dataPoints": [
-    {
-      "timeSeriesExternalId": "P-101-PRESSURE",
-      "timestamp": "2026-07-10T14:00:00Z",
-      "value": 111.2,
-      "quality": "good"
-    }
-  ]
-}
+The following creates an asset and series together with its first measurement,
+so it works against a clean SQLite project. For PostgreSQL, replace the example
+tenant/project strings with the UUIDs created by `tenant:provision` and first
+register an active `odf.source_connections` row whose `external_id` exactly
+matches `source.system`. The provisioning CLI creates the required default
+model space but does not yet create that source connection; use the controlled
+least-privilege transaction in the
+[production-like runbook](../../docs/operations/postgres-canvas-production-like.md#bootstrap-and-bring-up-a-fresh-rehearsal).
+
+```bash
+curl -fsS -X POST http://localhost:4310/api/v1/ingest/bundle \
+  -H "authorization: Bearer <access-token>" \
+  -H "content-type: application/json" \
+  -H "x-odf-tenant-id: acme-industries" \
+  -H "x-odf-project-id: site-a" \
+  --data '{
+    "source":{"system":"site-a-opcua","runId":"site-a-opcua-20260712T100000Z"},
+    "assets":[
+      {"externalId":"COMPRESSOR-101","name":"Main air compressor","type":"compressor","metadata":{"sourceTag":"KKS-AC-101"}}
+    ],
+    "timeSeries":[
+      {"externalId":"COMPRESSOR-101-DISCHARGE-PRESSURE","assetExternalId":"COMPRESSOR-101","name":"Discharge pressure","unit":"bar"}
+    ],
+    "dataPoints":[
+      {"timeSeriesExternalId":"COMPRESSOR-101-DISCHARGE-PRESSURE","timestamp":"2026-07-12T10:00:00Z","value":7.42,"quality":"good"}
+    ]
+  }'
 ```
 
-`runId` is an idempotency key. Replaying the same run and payload returns `already_processed`; reusing it with a different payload returns HTTP 409.
+In development authentication, replace the `authorization` header with
+`x-odf-user: <project-owner-or-editor>`. The server records the verified caller
+as the actor; a client-supplied `source.actor` is not trusted.
+
+Read the persisted point back from the same project:
+
+```bash
+curl -fsS \
+  -H "authorization: Bearer <access-token>" \
+  -H "x-odf-tenant-id: acme-industries" \
+  -H "x-odf-project-id: site-a" \
+  "http://localhost:4310/api/v1/assets/COMPRESSOR-101/telemetry/latest?timeSeriesExternalId=COMPRESSOR-101-DISCHARGE-PRESSURE"
+```
+
+`runId` is an idempotency key. Replaying the same run and payload returns
+`already_processed`; reusing it with a different payload returns HTTP 409. If a
+connector omits `runId`, the API derives a stable `content-<sha256>` key from
+the normalized bundle, so an identical retry remains idempotent.
+
+### Create the first real Canvas workspace
+
+An active project owner with `data:ingest` can create an empty scoped Canvas in
+either persistence profile:
+
+```bash
+curl -fsS -X POST http://localhost:4310/api/v1/workspaces \
+  -H "authorization: Bearer <access-token>" \
+  -H "content-type: application/json" \
+  -H "x-odf-tenant-id: <tenant-id-or-uuid>" \
+  -H "x-odf-project-id: <project-id-or-uuid>" \
+  --data '{"id":"site-a-operations","name":"Site A operations"}'
+```
+
+SQLite commits the workspace, immutable scope, owner membership, revision 1,
+and audit row in one transaction. PostgreSQL migration 010 exposes an
+owner-only `SECURITY DEFINER` function; `odf_app` receives only `EXECUTE`, and
+the function writes the same records plus a transactional outbox event. A
+duplicate workspace ID returns HTTP 409. Configure the web app with
+`VITE_WORKSPACE_ID=site-a-operations` to load it.
 
 ## Workspace revisions
 
-The seeded `cooling-water-system` workspace starts at version 1. Every successful `PUT` requires the caller's `expectedVersion`, writes a new immutable revision, and increments the current version. A stale save receives HTTP 409 instead of overwriting another user's changes.
+Every successful workspace `PUT` requires the caller's `expectedVersion`,
+writes a new immutable revision, and increments the current version. A stale
+save receives HTTP 409 instead of overwriting another user's changes. In the
+SQLite profile, the optional `ODF_SEED=true` fixture includes a version-1 sample
+workspace, but no workspace is seeded during a normal start.
 
 Rollback is append-only: restoring revision 1 while the workspace is at version 4 creates version 5 containing revision 1's snapshot. Revisions 1–4 remain available for audit and future rollback.
 
 ### Collaborative editing
 
-The development profile resolves the current workspace identity from `x-odf-user` and defaults to `harper.dennis`. Seeded members demonstrate four roles: owner, editor, reviewer, and viewer. Only owner/editor may mutate the Canvas; reviewer/viewer remain read-only. Owners can add, change, or remove members; the database rejects any change that would leave a workspace without an owner.
+The development profile resolves the current workspace identity from
+`x-odf-user` or the configured `ODF_DEV_USER`. The optional fixture demonstrates
+owner, editor, reviewer, and viewer roles. Only owner/editor may mutate the
+Canvas; reviewer/viewer remain read-only. Owners can add, change, or remove
+members; the database rejects any change that would leave a workspace without
+an owner.
 
 `POST /operations` accepts atomic batches of `moveNode`, `addNode`, `updateNode`, `removeNode`, `addEdge`, `updateEdge`, and `removeEdge`. Every batch must target the current `baseVersion`, produces one immutable revision and audit event, then publishes `workspace.updated` after commit. Stale batches return HTTP 409; invalid graph references return HTTP 422.
 

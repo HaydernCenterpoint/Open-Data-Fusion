@@ -46,8 +46,8 @@ function renderTopbar(onResultSelect = vi.fn()) {
         onQueryChange={setQuery}
         onResultSelect={onResultSelect}
         apiOnline
-        platformContext={null}
-        platformStatus="degraded"
+        platformContext={{ tenantId: "tenant-1", projectId: "project-1" }}
+        platformStatus="ready"
         activeSection="Explorer"
         onSectionChange={vi.fn()}
       />

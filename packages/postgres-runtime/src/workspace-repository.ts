@@ -15,6 +15,7 @@ import type {
   JsonObject,
   ScopedTransaction,
   TransactionRunner,
+  WorkspaceCreateInput,
   WorkspaceMemberRecord,
   WorkspaceMembershipRemoveInput,
   WorkspaceMembershipUpsertInput,
@@ -37,6 +38,22 @@ function assertActor(context: WorkspaceScope, actor: string): void {
 export class PostgresWorkspaceRepository extends PolicyAwareRepository implements WorkspaceRepository {
   constructor(runner: TransactionRunner, policy: ProjectAccessResolver) {
     super(runner, policy);
+  }
+
+  async createWorkspace(context: WorkspaceScope, input: WorkspaceCreateInput): Promise<WorkspaceRecord> {
+    await this.resolveRole(context, ['owner']);
+    return this.runner.withTransaction(context, async (transaction) => {
+      const result = await transaction.query({
+        text: [
+          'SELECT id, name, snapshot, version, created_by, created_at, updated_by, updated_at',
+          'FROM odf.create_project_workspace($1::uuid, $2, $3, $4::uuid)',
+        ].join('\n'),
+        values: [context.projectId, input.workspaceId, input.name, input.correlationId],
+      });
+      const row = result.rows[0];
+      if (!row) throw new ConflictError('Workspace could not be created');
+      return workspaceFromRow(row);
+    });
   }
 
   async getWorkspace(context: WorkspaceScope, workspaceId: string): Promise<WorkspaceRecord> {
@@ -263,6 +280,8 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
       });
       await this.insertAudit(
         transaction,
+        context.tenantId,
+        context.projectId,
         input.actor,
         input.auditAction ?? "workspace.saved",
         "workspace",
@@ -335,6 +354,8 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
       const occurredAt = new Date().toISOString();
       await this.insertAudit(
         transaction,
+        context.tenantId,
+        context.projectId,
         input.actor,
         action,
         "workspaceMember",
@@ -396,6 +417,8 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
       const occurredAt = new Date().toISOString();
       await this.insertAudit(
         transaction,
+        context.tenantId,
+        context.projectId,
         input.actor,
         "workspace.member_removed",
         "workspaceMember",
@@ -497,6 +520,8 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
 
   private async insertAudit(
     transaction: ScopedTransaction,
+    tenantId: string,
+    projectId: string,
     actor: string,
     action: string,
     entityType: string,
@@ -507,10 +532,19 @@ export class PostgresWorkspaceRepository extends PolicyAwareRepository implement
     await transaction.query({
       text: [
         "INSERT INTO odf.audit_log",
-        "  (actor, action, entity_type, entity_id, details, correlation_id)",
-        "VALUES ($1, $2, $3, $4, $5::jsonb, $6::uuid)",
+        "  (tenant_id, project_id, actor, action, entity_type, entity_id, details, correlation_id)",
+        "VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb, $8::uuid)",
       ].join("\n"),
-      values: [actor, action, entityType, entityId, json(details), correlationId],
+      values: [
+        tenantId,
+        projectId,
+        actor,
+        action,
+        entityType,
+        entityId,
+        json({ ...details, tenantId, projectId }),
+        correlationId,
+      ],
     });
   }
 

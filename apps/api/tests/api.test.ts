@@ -7,8 +7,10 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../src/app.js';
+import { DevelopmentIdentityProvider } from '../src/auth.js';
 import { WorkspaceEventHub } from '../src/collaboration.js';
 import { FusionDatabase } from '../src/database.js';
+import { LegacySqliteIndustrialPersistence } from '../src/industrial-persistence.js';
 import { InMemorySharedEventDelivery } from '../src/shared-event-delivery.js';
 
 class DegradedRedisDelivery extends InMemorySharedEventDelivery {
@@ -27,7 +29,17 @@ describe('Open Data Fusion API vertical slice', () => {
   beforeEach(() => {
     tempDirectory = mkdtempSync(join(tmpdir(), 'open-data-fusion-api-'));
     database = new FusionDatabase({ path: join(tempDirectory, 'test.db') });
-    app = createApp(database);
+    app = createApp(database, undefined, {
+      identityProvider: new DevelopmentIdentityProvider('harper.dennis'),
+      defaultPlatformContext: { tenantId: 'demo', projectId: 'north-plant' },
+      industrialPersistence: new LegacySqliteIndustrialPersistence(database),
+    });
+    const member = database.database.prepare(`
+      INSERT OR IGNORE INTO platform_project_members(tenant_id, project_id, user_id, role, created_at)
+      VALUES ('demo', 'north-plant', ?, 'reviewer', ?)
+    `);
+    member.run('domain.expert@example.com', new Date().toISOString());
+    member.run('another.reviewer@example.com', new Date().toISOString());
   });
 
   afterEach(() => {

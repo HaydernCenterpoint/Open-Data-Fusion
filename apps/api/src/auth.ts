@@ -60,7 +60,7 @@ function optionalClaim(payload: JWTPayload, claim: string): string | undefined {
 export class DevelopmentIdentityProvider implements IdentityProvider {
   readonly mode = 'development' as const;
 
-  constructor(private readonly defaultUser = 'harper.dennis') {}
+  constructor(private readonly defaultUser = 'local-user') {}
 
   async authenticate(request: Request, context?: AuthenticationContext): Promise<AuthenticatedIdentity> {
     const hintedUser = context?.developmentUserHint;
@@ -175,7 +175,7 @@ export function createIdentityProviderFromEnvironment(
   const mode = (environment.ODF_AUTH_MODE ?? defaultMode).trim().toLowerCase();
 
   if (mode === 'development') {
-    return new DevelopmentIdentityProvider(environment.ODF_DEV_USER?.trim() || 'harper.dennis');
+    return new DevelopmentIdentityProvider(environment.ODF_DEV_USER?.trim() || 'local-user');
   }
   if (mode !== 'oidc') {
     throw new Error(`Unsupported ODF_AUTH_MODE '${mode}'`);

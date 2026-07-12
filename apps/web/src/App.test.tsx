@@ -677,6 +677,7 @@ describe("Open Data Fusion workspace", () => {
     render(<App />);
     const pump = await screen.findByRole("button", { name: "Pump P-101 canvas node" });
     await waitForEditor();
+    fireEvent.click(pump);
     await waitFor(() => expect(pump.querySelector(".canvas-node-resize-handle")).toBeInTheDocument());
     const handle = pump.querySelector(".canvas-node-resize-handle") as HTMLElement;
     const edge = document.querySelector('[data-edge-id="canvas-p101-pressure"]') as SVGPathElement;
@@ -737,6 +738,7 @@ describe("Open Data Fusion workspace", () => {
     render(<App />);
     const pump = await screen.findByRole("button", { name: "Pump P-101 canvas node" });
     expect(await screen.findByText(/viewer.*read only/i)).toBeInTheDocument();
+    fireEvent.click(pump);
     expect(screen.getByRole("button", { name: "Note" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "New canvas" })).toBeDisabled();
@@ -890,7 +892,8 @@ describe("Open Data Fusion workspace", () => {
   it("preserves Explorer navigation and data context", async () => {
     render(<App />);
     openExplorer();
-    expect((await screen.findAllByText("Pump P-101")).length).toBeGreaterThan(0);
+    const pump = await screen.findByText("Pump P-101");
+    fireEvent.click(pump.closest("button")!);
     expect(await screen.findByRole("heading", { name: "Pressure (24h)" })).toBeInTheDocument();
     expect(await screen.findByText("Related time series (3)")).toBeInTheDocument();
   });
@@ -909,14 +912,17 @@ describe("Open Data Fusion workspace", () => {
   it("opens the ingest workflow from Explorer", () => {
     render(<App />);
     openExplorer();
-    fireEvent.click(screen.getByRole("button", { name: "Ingest sample" }));
-    expect(screen.getByRole("dialog", { name: "Ingest sample bundle" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Ingest data" }));
+    expect(screen.getByRole("dialog", { name: "Ingest measurement bundle" })).toBeInTheDocument();
     expect(screen.getByText(/1 asset.*1 time series.*1 data point/)).toBeInTheDocument();
   });
 
   it("switches Explorer asset tabs", async () => {
     render(<App />);
     openExplorer();
+    const pump = await screen.findByText("Pump P-101");
+    fireEvent.click(pump.closest("button")!);
+    await screen.findByRole("heading", { name: "Pressure (24h)" });
     fireEvent.click(await screen.findByRole("tab", { name: "Documents" }));
     expect(screen.getByRole("heading", { name: "Documents" })).toBeInTheDocument();
     expect(screen.getAllByText("P-101 O&M Manual").length).toBeGreaterThan(0);

@@ -26,11 +26,16 @@ export class PostgresProjectAccessResolver implements ProjectAccessResolver {
     return this.runner.withTransaction({ tenantId: scope.tenantId, userId: scope.userId }, async (transaction) => {
       const result = await transaction.query<{ role: unknown }>({
         text: [
-          "SELECT role",
-          "FROM odf.project_members",
-          "WHERE tenant_id = $1::uuid",
-          "  AND project_id = $2::uuid",
-          "  AND user_id = $3",
+          "SELECT member.role",
+          "FROM odf.project_members AS member",
+          "JOIN odf.projects AS project",
+          "  ON project.tenant_id = member.tenant_id AND project.project_id = member.project_id",
+          "JOIN odf.tenants AS tenant ON tenant.tenant_id = project.tenant_id",
+          "WHERE member.tenant_id = $1::uuid",
+          "  AND member.project_id = $2::uuid",
+          "  AND member.user_id = $3",
+          "  AND tenant.status = 'active'",
+          "  AND project.status = 'active'",
           "LIMIT 1",
         ].join("\n"),
         values: [scope.tenantId, scope.projectId, scope.userId],
