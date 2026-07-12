@@ -533,6 +533,7 @@ def validate_runtime_artifacts() -> None:
     web_dockerfile = read(ROOT / "Dockerfile.web")
     outbox_dockerfile = read(ROOT / "Dockerfile.outbox")
     api_server = read(ROOT / "apps" / "api" / "src" / "server.ts")
+    postgres_raw_landing = read(ROOT / "apps" / "api" / "src" / "postgres-raw-landing.ts")
     require("USER node" in api_dockerfile, "API runtime image must not run as root")
     require("COPY packages/postgres-runtime ./packages/postgres-runtime" in api_dockerfile, "API build must include the PostgreSQL runtime workspace")
     require("/workspace/packages/postgres-runtime/dist ./packages/postgres-runtime/dist" in api_dockerfile, "API image must include the PostgreSQL runtime build")
@@ -551,6 +552,11 @@ def validate_runtime_artifacts() -> None:
                 f"has_table_privilege(current_user, 'odf.{table}', '{privilege}')" in api_server,
                 f"shared object readiness must check {table} {privilege} independently",
             )
+    require("pg_advisory_xact_lock" in postgres_raw_landing, "raw landing idempotency must serialize duplicate runs")
+    require(
+        "FOR UPDATE OF landing" not in postgres_raw_landing,
+        "immutable raw landing metadata must not require an ungranted UPDATE privilege",
+    )
 
 
 def validate_build_context() -> None:

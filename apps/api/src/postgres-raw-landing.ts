@@ -181,11 +181,14 @@ export class PostgresRawLandingStore implements RawLandingPersistence {
     const landingId = randomUUID();
 
     const archived = await this.runtime.withTransaction(scope, async (transaction) => {
+      // The immutable landing table deliberately grants no UPDATE privilege;
+      // this transaction-scoped advisory lock serializes the idempotency key
+      // without widening that least-privilege boundary via FOR UPDATE.
       await transaction.query({
         text: 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
         values: [`odf:raw-landing:${scope.tenantId}:${scope.projectId}:${runId}`],
       });
-      const raced = await this.findByRun(transaction, scope, runId, true);
+      const raced = await this.findByRun(transaction, scope, runId);
       if (raced) {
         this.assertExactRun(raced, checksum, bytes.byteLength);
         return raced;
@@ -203,7 +206,7 @@ export class PostgresRawLandingStore implements RawLandingPersistence {
           blob.objectKey, blob.objectVersionId, checksum, blob.contentType, bytes.byteLength, actor, correlationId,
         ],
       });
-      const persisted = await this.findByRun(transaction, scope, runId, true);
+      const persisted = await this.findByRun(transaction, scope, runId);
       const resolvedLandingId = persisted?.id ?? landingId;
       if (persisted) {
         this.assertExactRun(persisted, checksum, bytes.byteLength);
@@ -415,13 +418,11 @@ export class PostgresRawLandingStore implements RawLandingPersistence {
     transaction: ScopedTransaction,
     scope: { tenantId: string; projectId: string },
     runId: string,
-    lock = false,
   ): Promise<RawLandingRecord | null> {
     const result = await transaction.query<Row>({
       text: [
         RECORD_SELECT,
         'WHERE landing.tenant_id = $1::uuid AND landing.project_id = $2::uuid AND landing.run_id = $3',
-        ...(lock ? ['FOR UPDATE OF landing'] : []),
       ].join('\n'),
       values: [scope.tenantId, scope.projectId, runId],
     });
