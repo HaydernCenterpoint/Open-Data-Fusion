@@ -217,7 +217,7 @@
       "enabled": true,
       "serviceAccountClientId": "open-data-fusion-connector",
       "clientRoles": {
-        "open-data-fusion-api": ["data:read", "data:ingest"]
+        "open-data-fusion-api": ["data:read", "data:ingest", "audit:read"]
       }
     }
   ]
