@@ -18,10 +18,17 @@ require_json_field() {
   json="$1"
   field="$2"
   expected="$3"
-  if ! printf '%s' "$json" | grep -Eq "\"${field}\"[[:space:]]*:[[:space:]]*\"${expected}\""; then
-    echo "Expected ${field}=${expected} in MinIO JSON response" >&2
-    exit 1
-  fi
+  # The minimal upstream mc image intentionally has no grep/jq. `mc --json`
+  # is the source of truth; match its quoted field/value fragment in POSIX
+  # shell without adding a package manager or a second parser to this trusted
+  # bootstrap image.
+  case "$json" in
+    *"\"${field}\""*"\"${expected}\""*) ;;
+    *)
+      echo "Expected ${field}=${expected} in MinIO JSON response" >&2
+      exit 1
+      ;;
+  esac
 }
 
 expect_denied() {
