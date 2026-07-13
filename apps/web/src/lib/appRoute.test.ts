@@ -11,6 +11,14 @@ describe("app route", () => {
     });
   });
 
+  it("reads a project overview route without an asset", () => {
+    expect(readAppRoute("https://example.test/?view=overview&asset=P-101&tenant=demo&project=north-plant")).toEqual({
+      view: "overview",
+      tenantId: "demo",
+      projectId: "north-plant",
+    });
+  });
+
   it("falls back to Canvas and ignores orphaned route parameters", () => {
     expect(readAppRoute("https://example.test/?view=unknown&asset=P-101&project=north-plant")).toEqual({ view: "canvas" });
   });

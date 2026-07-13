@@ -1,5 +1,6 @@
 export const APP_VIEWS = [
   "canvas",
+  "overview",
   "explorer",
   "sources",
   "pipelines",

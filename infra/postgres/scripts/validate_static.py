@@ -297,6 +297,14 @@ def validate_migrations(migration_paths: list[Path]) -> None:
         "shared object metadata must not grant application deletes for immutable evidence",
     )
 
+    advanced_platform = read(MIGRATIONS / "013_platform_advanced_search.sql")
+    for guardrail in [
+        "threshold double precision NOT NULL CHECK (threshold >= 0 AND threshold <= 1)",
+        "confidence double precision NOT NULL CHECK (confidence >= 0 AND confidence <= 1)",
+    ]:
+        require(guardrail in advanced_platform, f"missing finite range guardrail: {guardrail}")
+    require("isfinite(" not in advanced_platform, "advanced platform migration must not call isfinite() for double precision")
+
     legacy_compatibility = read(MIGRATIONS / "014_platform_legacy_compatibility.sql")
     legacy_tables = [
         "platform_legacy_model_versions",
@@ -610,6 +618,8 @@ def validate_runtime_artifacts() -> None:
         "odf_validation_api",
         "GRANT odf_app TO odf_validation_api",
         "postgresql://odf_validation_api:",
+        "printf '%s' \"$ODF_METRICS_TOKEN\" > \"$RUNNER_TEMP/odf_metrics_token\"",
+        "-v \"$RUNNER_TEMP/odf_metrics_token:/run/secrets/odf_metrics_token:ro\"",
     ]:
         require(guardrail in infrastructure_workflow, f"infrastructure runtime probe missing guardrail: {guardrail}")
 

@@ -47,8 +47,10 @@ jobs:
         run: docker compose -f docker-compose.yml config --quiet
       - name: Validate Prometheus and OpenTelemetry configuration
         run: |
+          printf '%s' "$ODF_METRICS_TOKEN" > "$RUNNER_TEMP/odf_metrics_token"
           docker run --rm --entrypoint promtool \
             -v "$PWD/infra/observability:/etc/prometheus:ro" \
+            -v "$RUNNER_TEMP/odf_metrics_token:/run/secrets/odf_metrics_token:ro" \
             prom/prometheus:v3.3.0 check config /etc/prometheus/prometheus.yml
           docker run --rm \
             -v "$PWD/infra/observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro" \

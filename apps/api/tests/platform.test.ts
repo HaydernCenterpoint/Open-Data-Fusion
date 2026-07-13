@@ -333,6 +333,7 @@ describe('platform catalog API', () => {
       server.listen(0, '127.0.0.1', resolve);
     });
 
+    let cancelStream: (() => Promise<void>) | undefined;
     try {
       const address = server.address();
       if (!address || typeof address === 'string') throw new Error('SSE test server did not bind a TCP port');
@@ -349,8 +350,29 @@ describe('platform catalog API', () => {
       expect(response.status).toBe(200);
       const reader = response.body?.getReader();
       if (!reader) throw new Error('SSE response did not include a body');
-      const firstChunk = await reader.read();
-      expect(new TextDecoder().decode(firstChunk.value)).toContain(': connected');
+      cancelStream = () => reader.cancel().catch(() => undefined);
+      const decoder = new TextDecoder();
+      const readSseChunk = async (errorMessage: string) => {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([
+            reader.read(),
+            new Promise<never>((_resolve, reject) => {
+              timeout = setTimeout(() => reject(new Error(errorMessage)), 2_000);
+              timeout.unref();
+            }),
+          ]);
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+      };
+      let initialFrames = '';
+      while (!initialFrames.includes('event: presence.updated')) {
+        const initialChunk = await readSseChunk('Scoped SQLite SSE did not publish initial presence');
+        if (initialChunk.done) throw new Error('Scoped SQLite SSE closed before initial presence');
+        initialFrames += decoder.decode(initialChunk.value);
+      }
+      expect(initialFrames).toContain(': connected');
 
       database.database.prepare(`
         DELETE FROM platform_project_members
@@ -363,15 +385,10 @@ describe('platform catalog API', () => {
         changeSummary: 'Remote update after revocation',
       });
 
-      const closed = await Promise.race([
-        reader.read(),
-        new Promise<never>((_resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error('Scoped SQLite SSE did not close after revocation')), 2_000);
-          timeout.unref();
-        }),
-      ]);
+      const closed = await readSseChunk('Scoped SQLite SSE did not close after revocation');
       expect(closed.done).toBe(true);
     } finally {
+      await cancelStream?.();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

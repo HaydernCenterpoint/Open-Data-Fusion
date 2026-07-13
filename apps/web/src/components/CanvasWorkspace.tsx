@@ -13,6 +13,7 @@ import {
   Maximize2,
   MoreHorizontal,
   MousePointer2,
+  PanelLeftOpen,
   PanelRightOpen,
   Plus,
   Redo2,
@@ -29,6 +30,9 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuthSession } from "./AuthBoundary";
 import { BrandLogo } from "./BrandLogo";
+import type { PlatformBootstrapState } from "./PlatformWorkspaces";
+import { ProjectSwitcher } from "./ProjectSwitcher";
+import { navigationGroups, type NavigationLabel } from "./Sidebar";
 import {
   WORKSPACE_USER,
   applyWorkspaceOperations,
@@ -48,6 +52,8 @@ import type {
   CanvasNodeRecord,
   ExplorerSnapshot,
   PlatformContext,
+  PlatformProject,
+  PlatformTenant,
   WorkspaceMember,
   WorkspaceMemberUpsert,
   WorkspaceOperation,
@@ -63,8 +69,16 @@ interface CanvasWorkspaceProps {
   snapshot: ExplorerSnapshot | null;
   workspace: ApiWorkspace | null;
   platformContext: PlatformContext | null;
+  tenants: PlatformTenant[];
+  projects: PlatformProject[];
+  selectedTenantId: string;
+  platformState: PlatformBootstrapState;
+  onTenantChange: (tenantId: string) => void;
+  onProjectChange: (projectId: string) => void;
+  onRetryProjectDiscovery: () => void;
   onWorkspaceUpdated: (workspace: ApiWorkspace) => void;
   onOpenExplorer: () => void;
+  onNavigate: (label: NavigationLabel) => void;
   onNotify: (message: string) => void;
 }
 
@@ -329,6 +343,88 @@ function PidPanel({ geometry }: { geometry: CanvasNodeGeometry }) {
 
 function MoreDots() { return <span className="more-dots" aria-hidden="true">•••</span>; }
 
+function CanvasNavigationMenu({ onNavigate }: { onNavigate: (label: NavigationLabel) => void }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+
+  function menuItems() {
+    return Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+  }
+
+  function focusFirstItem() {
+    window.setTimeout(() => menuItems()[0]?.focus(), 0);
+  }
+
+  function closeMenu(restoreFocus = false) {
+    setOpen(false);
+    if (restoreFocus) window.setTimeout(() => triggerRef.current?.focus(), 0);
+  }
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnPointer = (event: PointerEvent) => {
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target)) closeMenu();
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeMenu(true);
+    };
+    window.addEventListener("pointerdown", closeOnPointer);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnPointer);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  function onMenuKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    const items = menuItems();
+    if (items.length === 0) return;
+    const activeIndex = Math.max(0, items.findIndex((item) => item === document.activeElement));
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowDown") nextIndex = (activeIndex + 1) % items.length;
+    if (event.key === "ArrowUp") nextIndex = (activeIndex - 1 + items.length) % items.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = items.length - 1;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu(true);
+      return;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    items[nextIndex]?.focus();
+  }
+
+  return (
+    <div className="canvas-navigation-menu" ref={menuRef}>
+      <button className="canvas-navigation-trigger" ref={triggerRef} type="button" aria-label="Open workspace navigation" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => { const next = !value; if (next) focusFirstItem(); return next; })}>
+        <PanelLeftOpen size={17} />
+        <span className="canvas-navigation-label">Navigate</span>
+        <ChevronDown size={14} />
+      </button>
+      {open ? (
+        <div className="canvas-navigation-popover" role="menu" aria-label="Workspace navigation" onKeyDown={onMenuKeyDown}>
+          {navigationGroups.map((group) => (
+            <div className="canvas-navigation-group" key={group.label} role="group" aria-label={group.label}>
+              <span className="canvas-navigation-group-label">{group.label}</span>
+              {group.items.map(({ label, icon: Icon }) => (
+                <button key={label} type="button" role="menuitem" onClick={() => { closeMenu(); onNavigate(label); }}>
+                  <Icon size={16} aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MobileCanvasMenu({ hasSelection, onOpenHistory, onOpenInspector, onToggleMembers }: { hasSelection: boolean; onOpenHistory: () => void; onOpenInspector: () => void; onToggleMembers: () => void }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -363,7 +459,7 @@ function MobileCanvasMenu({ hasSelection, onOpenHistory, onOpenInspector, onTogg
   );
 }
 
-export function CanvasWorkspace({ snapshot, workspace, platformContext, onWorkspaceUpdated, onOpenExplorer, onNotify }: CanvasWorkspaceProps) {
+export function CanvasWorkspace({ snapshot, workspace, platformContext, tenants, projects, selectedTenantId, platformState, onTenantChange, onProjectChange, onRetryProjectDiscovery, onWorkspaceUpdated, onOpenExplorer, onNavigate, onNotify }: CanvasWorkspaceProps) {
   const authSession = useAuthSession();
   const activeUserId = authSession.identity?.userId ?? WORKSPACE_USER;
   const workspaceTenantId = platformContext?.tenantId ?? "";
@@ -1359,6 +1455,8 @@ export function CanvasWorkspace({ snapshot, workspace, platformContext, onWorksp
     <div className="canvas-shell">
       <header className="canvas-topbar">
         <button className="canvas-brand" type="button" onClick={onOpenExplorer} aria-label="Open Data Fusion Explorer"><BrandLogo aria-hidden="true" /></button>
+        <CanvasNavigationMenu onNavigate={onNavigate} />
+        <ProjectSwitcher variant="canvas" context={platformContext} tenants={tenants} projects={projects} selectedTenantId={selectedTenantId} state={platformState} onTenantChange={onTenantChange} onProjectChange={onProjectChange} onRetry={onRetryProjectDiscovery} />
         <div className="canvas-workspace-name"><span>Workspace</span><span className="canvas-slash">/</span><span>{workspace?.name ?? "No workspace selected"}</span></div>
         <button className="canvas-save-state" type="button" disabled={!workspace || !canEdit} onClick={saveRevision} title={canEdit ? "Save a new immutable revision" : "Your workspace role is read-only"}>Saved v{workspace?.version ?? "—"} <span>✓</span> <small>{workspace ? !membersLoaded ? "Checking access" : canEdit ? "Save revision" : "Read only" : "Connecting"}</small></button>
         <button className={`canvas-presence${collaborationConnected === false ? " is-disconnected" : ""}${membersOpen ? " is-open" : ""}`} type="button" aria-label={`Workspace members, ${presenceUsers.length} online`} aria-expanded={membersOpen} onClick={() => { setHistoryOpen(false); setInspectorOpen(false); setLayersOpen(false); setMembersOpen((open) => !open); }} title={`${members.length} workspace member${members.length === 1 ? "" : "s"}`}>

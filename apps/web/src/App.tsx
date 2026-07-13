@@ -5,6 +5,7 @@ import { AssetWorkspace } from "./components/AssetWorkspace";
 import { DiagramsWorkspace, MatchingWorkspace, SpatialWorkspace, WritebackWorkspace } from "./components/AdvancedPlatformWorkspaces";
 import { CanvasWorkspace } from "./components/CanvasWorkspace";
 import { IngestModal } from "./components/IngestModal";
+import { ProjectOverviewWorkspace } from "./components/ProjectOverviewWorkspace";
 import { RelatedRail } from "./components/RelatedRail";
 import {
   ModelsWorkspace,
@@ -20,7 +21,7 @@ import { Sidebar, type NavigationLabel } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { getExplorerSnapshot, getHealth, getWorkspace, listAssets, listPlatformProjects, listPlatformTenants } from "./lib/api";
 import { commitAppRoute, readAppRoute, type AppRoute, type AppRouteHistoryMode, type AppViewMode } from "./lib/appRoute";
-import type { ApiAsset, ApiWorkspace, ExplorerSnapshot, PlatformContext, PlatformProject, PlatformSearchResult, PlatformTenant } from "./types";
+import type { ApiAsset, ApiWorkspace, CursorPage, ExplorerSnapshot, PlatformContext, PlatformProject, PlatformSearchResult, PlatformTenant } from "./types";
 
 type ViewMode = AppViewMode;
 
@@ -31,6 +32,7 @@ const CONFIGURED_WORKSPACE_ID = (
 ).trim();
 
 const viewByNavigation: Record<NavigationLabel, Exclude<ViewMode, "canvas">> = {
+  Overview: "overview",
   Explorer: "explorer",
   Sources: "sources",
   Pipelines: "pipelines",
@@ -44,6 +46,7 @@ const viewByNavigation: Record<NavigationLabel, Exclude<ViewMode, "canvas">> = {
 };
 
 const navigationByView: Record<Exclude<ViewMode, "canvas">, NavigationLabel> = {
+  overview: "Overview",
   explorer: "Explorer",
   sources: "Sources",
   pipelines: "Pipelines",
@@ -68,6 +71,26 @@ async function capture<T>(promise: Promise<T>): Promise<Captured<T>> {
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+type CursorPageRequest<T> = (
+  query: { limit?: number; cursor?: string },
+  signal?: AbortSignal,
+) => Promise<CursorPage<T>>;
+
+async function collectCursorPages<T>(requestPage: CursorPageRequest<T>, signal?: AbortSignal): Promise<T[]> {
+  const items: T[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  while (true) {
+    const page = await requestPage({ limit: 100, ...(cursor ? { cursor } : {}) }, signal);
+    items.push(...page.items);
+    if (!page.nextCursor) return items;
+    if (seenCursors.has(page.nextCursor)) throw new Error("The platform returned a repeated discovery cursor");
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
 }
 
 export default function App() {
@@ -120,6 +143,22 @@ export default function App() {
     setWorkspace((current) => !current || nextWorkspace.version >= current.version ? nextWorkspace : current);
   }, []);
 
+  const invalidateScopedData = useCallback(() => {
+    explorerRequestRef.current?.abort();
+    workspaceRequestRef.current?.abort();
+    setWorkspace(null);
+    setAssets([]);
+    setAssetTotal(0);
+    setAssetsLoading(false);
+    setAssetsLoadingMore(false);
+    setAssetsError("");
+    setSelectedAssetId("");
+    setSnapshot(null);
+    setExplorerLoading(false);
+    setExplorerError("");
+    setRelatedRailOpen(false);
+  }, []);
+
   const loadExplorerAsset = useCallback(async (externalId: string) => {
     if (!workspaceTenantId || !workspaceProjectId) return;
     const context = { tenantId: workspaceTenantId, projectId: workspaceProjectId };
@@ -159,25 +198,31 @@ export default function App() {
     historyMode: AppRouteHistoryMode | null = "replace",
   ) => {
     projectRequestRef.current?.abort();
-    workspaceRequestRef.current?.abort();
     const controller = new AbortController();
     projectRequestRef.current = controller;
+    invalidateScopedData();
     setSelectedTenantId(tenantId);
     setPlatformContext(null);
-    setWorkspace(null);
     setPlatformProjects([]);
     setPlatformBootstrap({ status: "loading", message: `Loading projects for ${tenantId}…` });
     try {
-      const page = await listPlatformProjects(tenantId, { limit: 100 }, controller.signal);
+      const projects = await collectCursorPages((query, signal) => listPlatformProjects(tenantId, query, signal), controller.signal);
       if (controller.signal.aborted) return;
-      setPlatformProjects(page.items);
-      if (page.items.length === 0) {
-        setPlatformBootstrap({ status: "empty", message: "No accessible projects were returned for this tenant." });
-        if (historyMode) updateRoute({ tenantId, projectId: undefined }, historyMode);
+      setPlatformProjects(projects);
+      const requestedProjectId = preferredProjectId?.trim();
+      const project = requestedProjectId
+        ? projects.find((item) => item.id === requestedProjectId)
+        : projects[0];
+      if (!project) {
+        setPlatformBootstrap({
+          status: "empty",
+          message: requestedProjectId
+            ? `Project '${requestedProjectId}' is not accessible for this tenant.`
+            : "No accessible projects were returned for this tenant.",
+        });
+        if (historyMode && !requestedProjectId) updateRoute({ tenantId, projectId: undefined }, historyMode);
         return;
       }
-      const project = page.items.find((item) => item.id === preferredProjectId)
-        ?? page.items[0];
       setPlatformContext({ tenantId, projectId: project.id });
       setPlatformBootstrap({ status: "ready", message: `${tenantId} / ${project.id}` });
       if (historyMode) updateRoute({ tenantId, projectId: project.id }, historyMode);
@@ -186,29 +231,30 @@ export default function App() {
       const issue = platformIssue(error, "Projects could not be loaded");
       setPlatformBootstrap({ status: issue.kind, message: issue.message });
     }
-  }, [updateRoute]);
+  }, [invalidateScopedData, updateRoute]);
 
   const retryPlatformBootstrap = useCallback(async () => {
     setPlatformBootstrap({ status: "loading", message: "Discovering accessible projects…" });
     try {
-      const page = await listPlatformTenants({ limit: 100 });
-      setPlatformTenants(page.items);
-      if (page.items.length === 0) {
+      const tenants = await collectCursorPages((query, signal) => listPlatformTenants(query, signal));
+      setPlatformTenants(tenants);
+      if (tenants.length === 0) {
+        invalidateScopedData();
         setSelectedTenantId("");
         setPlatformProjects([]);
         setPlatformContext(null);
-        setWorkspace(null);
         setPlatformBootstrap({ status: "empty", message: "No accessible tenants were returned for this identity." });
         return;
       }
-      const tenant = page.items.find((item) => item.id === routeRef.current.tenantId)
-        ?? page.items[0];
-      void loadProjectsForTenant(tenant.id, routeRef.current.projectId, "replace");
+      const requestedTenantId = selectedTenantId || routeRef.current.tenantId;
+      const tenant = tenants.find((item) => item.id === requestedTenantId)
+        ?? tenants[0];
+      void loadProjectsForTenant(tenant.id, tenant.id === routeRef.current.tenantId ? routeRef.current.projectId : undefined, "replace");
     } catch (error) {
       const issue = platformIssue(error, "Tenants could not be loaded");
       setPlatformBootstrap({ status: issue.kind, message: issue.message });
     }
-  }, [loadProjectsForTenant]);
+  }, [invalidateScopedData, loadProjectsForTenant, selectedTenantId]);
 
   useEffect(() => {
     workspaceRequestRef.current?.abort();
@@ -239,17 +285,17 @@ export default function App() {
     const controller = new AbortController();
     void Promise.all([
       getHealth(controller.signal),
-      capture(listPlatformTenants({ limit: 100 }, controller.signal)),
+      capture(collectCursorPages((query, signal) => listPlatformTenants(query, signal), controller.signal)),
     ]).then(([online, tenantResult]) => {
       if (controller.signal.aborted) return;
       setApiOnline(online);
       if (tenantResult.ok) {
-        setPlatformTenants(tenantResult.value.items);
-        if (tenantResult.value.items.length === 0) {
+        setPlatformTenants(tenantResult.value);
+        if (tenantResult.value.length === 0) {
           setPlatformBootstrap({ status: "empty", message: "No accessible tenants were returned for this identity." });
         } else {
-          const tenant = tenantResult.value.items.find((item) => item.id === routeRef.current.tenantId)
-            ?? tenantResult.value.items[0];
+          const tenant = tenantResult.value.find((item) => item.id === routeRef.current.tenantId)
+            ?? tenantResult.value[0];
           void loadProjectsForTenant(tenant.id, routeRef.current.projectId, "replace");
         }
       } else {
@@ -395,10 +441,14 @@ export default function App() {
     showView(viewByNavigation[label]);
   }
 
+  function selectPlatformTenant(tenantId: string) {
+    if (!tenantId || tenantId === selectedTenantId) return;
+    void loadProjectsForTenant(tenantId, undefined, "push");
+  }
+
   function selectPlatformProject(projectId: string) {
-    if (!selectedTenantId) return;
-    workspaceRequestRef.current?.abort();
-    setWorkspace(null);
+    if (!selectedTenantId || projectId === platformContext?.projectId) return;
+    invalidateScopedData();
     setPlatformContext({ tenantId: selectedTenantId, projectId });
     setPlatformBootstrap({ status: "ready", message: `${selectedTenantId} / ${projectId}` });
     updateRoute({ tenantId: selectedTenantId, projectId });
@@ -424,7 +474,22 @@ export default function App() {
   if (viewMode === "canvas") {
     return (
       <>
-        <CanvasWorkspace snapshot={snapshot} workspace={workspace} platformContext={platformContext} onWorkspaceUpdated={acceptWorkspace} onOpenExplorer={() => showView("explorer")} onNotify={notify} />
+        <CanvasWorkspace
+          snapshot={snapshot}
+          workspace={workspace}
+          platformContext={platformContext}
+          tenants={platformTenants}
+          projects={platformProjects}
+          selectedTenantId={selectedTenantId}
+          platformState={platformBootstrap}
+          onTenantChange={selectPlatformTenant}
+          onProjectChange={selectPlatformProject}
+          onRetryProjectDiscovery={() => void retryPlatformBootstrap()}
+          onWorkspaceUpdated={acceptWorkspace}
+          onOpenExplorer={() => showView("explorer")}
+          onNavigate={navigate}
+          onNotify={notify}
+        />
         {toast ? <div className="toast" role="status">{toast}</div> : null}
       </>
     );
@@ -436,8 +501,23 @@ export default function App() {
   return (
     <div className={`app-shell${treeVisible && viewMode === "explorer" ? "" : " tree-collapsed"}${sectionView ? " section-shell" : ""}${navigationCollapsed ? " navigation-collapsed" : ""}`}>
       <Sidebar active={activeNavigation} collapsed={navigationCollapsed} collapseLocked={compactNavigation} onNavigate={navigate} onToggleCollapsed={() => setNavigationCollapsed((collapsed) => !collapsed)} />
-      <Topbar query={query} onQueryChange={setQuery} onResultSelect={selectSearchResult} apiOnline={apiOnline} platformContext={platformContext} platformStatus={platformBootstrap.status} activeSection={activeNavigation} onSectionChange={navigate} />
-      {sectionView ? <PlatformContextBar tenants={platformTenants} projects={platformProjects} selectedTenantId={selectedTenantId} context={platformContext} state={platformBootstrap} onTenantChange={(tenantId) => { updateRoute({ tenantId, projectId: undefined }); void loadProjectsForTenant(tenantId, undefined, "replace"); }} onProjectChange={selectPlatformProject} onRetry={() => void retryPlatformBootstrap()} /> : null}
+      <Topbar
+        query={query}
+        onQueryChange={setQuery}
+        onResultSelect={selectSearchResult}
+        apiOnline={apiOnline}
+        platformContext={platformContext}
+        tenants={platformTenants}
+        projects={platformProjects}
+        selectedTenantId={selectedTenantId}
+        platformState={platformBootstrap}
+        activeSection={activeNavigation}
+        onTenantChange={selectPlatformTenant}
+        onProjectChange={selectPlatformProject}
+        onRetry={() => void retryPlatformBootstrap()}
+        onSectionChange={navigate}
+      />
+      {sectionView ? <PlatformContextBar tenants={platformTenants} projects={platformProjects} selectedTenantId={selectedTenantId} context={platformContext} state={platformBootstrap} onTenantChange={selectPlatformTenant} onProjectChange={selectPlatformProject} onRetry={() => void retryPlatformBootstrap()} /> : null}
       {viewMode === "explorer" ? (
         <>
           {treeVisible ? (
@@ -449,6 +529,7 @@ export default function App() {
           <RelatedRail snapshot={explorerLoading ? null : snapshot} onAction={notify} open={relatedRailOpen} onClose={() => setRelatedRailOpen(false)} />
         </>
       ) : null}
+      {viewMode === "overview" ? <ProjectOverviewWorkspace key={platformContext ? `${platformContext.tenantId}:${platformContext.projectId}` : "no-project"} context={platformContext} onNavigate={navigate} /> : null}
       {viewMode === "context" ? <PlatformContextWorkspace context={platformContext} onOpenAsset={openAsset} /> : null}
       {viewMode === "audit" ? <AuditWorkspace context={platformContext} /> : null}
       {viewMode === "sources" ? <SourcesWorkspace context={platformContext} /> : null}

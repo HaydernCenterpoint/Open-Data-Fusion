@@ -1,7 +1,9 @@
 import { Search, X } from "lucide-react";
 import { useDeferredValue, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiRequestError, listAssets, searchPlatform } from "../lib/api";
-import type { PlatformContext, PlatformSearchResult } from "../types";
+import type { PlatformContext, PlatformProject, PlatformSearchResult, PlatformTenant } from "../types";
+import type { PlatformBootstrapState } from "./PlatformWorkspaces";
+import { ProjectSwitcher } from "./ProjectSwitcher";
 import { navigationLabels, type NavigationLabel } from "./Sidebar";
 
 interface TopbarProps {
@@ -10,14 +12,20 @@ interface TopbarProps {
   onResultSelect: (result: PlatformSearchResult) => void;
   apiOnline: boolean | null;
   platformContext: PlatformContext | null;
-  platformStatus: "loading" | "ready" | "empty" | "unauthorized" | "forbidden" | "degraded";
+  tenants: PlatformTenant[];
+  projects: PlatformProject[];
+  selectedTenantId: string;
+  platformState: PlatformBootstrapState;
   activeSection: NavigationLabel;
+  onTenantChange: (tenantId: string) => void;
+  onProjectChange: (projectId: string) => void;
+  onRetry: () => void;
   onSectionChange: (section: NavigationLabel) => void;
 }
 
 type SearchState = "idle" | "loading" | "ready" | "degraded" | "unauthorized" | "forbidden" | "error";
 
-export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platformContext, platformStatus, activeSection, onSectionChange }: TopbarProps) {
+export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platformContext, tenants, projects, selectedTenantId, platformState, activeSection, onTenantChange, onProjectChange, onRetry, onSectionChange }: TopbarProps) {
   const deferredQuery = useDeferredValue(query.trim());
   const [matches, setMatches] = useState<PlatformSearchResult[]>([]);
   const [searchState, setSearchState] = useState<SearchState>("idle");
@@ -28,6 +36,17 @@ export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platfo
   const listboxId = useId();
 
   useEffect(() => {
+    const focusGlobalSearch = (event: KeyboardEvent) => {
+      if ((!event.ctrlKey && !event.metaKey) || event.altKey || event.key.toLowerCase() !== "k") return;
+      event.preventDefault();
+      inputRef.current?.focus();
+      if (query.trim()) setResultsOpen(true);
+    };
+    window.addEventListener("keydown", focusGlobalSearch);
+    return () => window.removeEventListener("keydown", focusGlobalSearch);
+  }, [query]);
+
+  useEffect(() => {
     if (!deferredQuery) {
       setMatches([]);
       setSearchState("idle");
@@ -35,10 +54,10 @@ export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platfo
     }
     const controller = new AbortController();
     setSearchState("loading");
-    if (!platformContext && platformStatus === "loading") return () => controller.abort();
-    if (!platformContext && (platformStatus === "unauthorized" || platformStatus === "forbidden")) {
+    if (!platformContext && platformState.status === "loading") return () => controller.abort();
+    if (!platformContext && (platformState.status === "unauthorized" || platformState.status === "forbidden")) {
       setMatches([]);
-      setSearchState(platformStatus);
+      setSearchState(platformState.status);
       return () => controller.abort();
     }
     if (!platformContext) {
@@ -83,7 +102,7 @@ export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platfo
       }
     })();
     return () => controller.abort();
-  }, [deferredQuery, platformContext?.tenantId, platformContext?.projectId, platformStatus]);
+  }, [deferredQuery, platformContext?.tenantId, platformContext?.projectId, platformState.status]);
 
   useEffect(() => {
     setActiveIndex(-1);
@@ -189,6 +208,7 @@ export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platfo
             setResultsOpen(Boolean(nextQuery.trim()));
           }}
         />
+        {!query ? <kbd className="search-shortcut" aria-hidden="true">Ctrl K</kbd> : null}
         {query && (
           <button
             type="button"
@@ -235,6 +255,7 @@ export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platfo
         )}
       </div>
       <div className="topbar-actions">
+        <ProjectSwitcher context={platformContext} tenants={tenants} projects={projects} selectedTenantId={selectedTenantId} state={platformState} onTenantChange={onTenantChange} onProjectChange={onProjectChange} onRetry={onRetry} />
         <label className="mobile-section-nav"><span className="sr-only">Workspace section</span><select aria-label="Workspace section" value={activeSection} onChange={(event) => onSectionChange(event.target.value as NavigationLabel)}>{navigationLabels.map((section) => <option key={section} value={section}>{section}</option>)}</select></label>
         <div className="environment" role="status" aria-label={`Environment: Local, API ${apiOnline ? "online" : apiOnline === false ? "offline" : "checking"}`}>
           <span className={`status-dot ${apiOnline ? "online" : apiOnline === false ? "offline" : "checking"}`} />

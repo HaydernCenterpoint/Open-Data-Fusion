@@ -151,6 +151,7 @@ const acceptedRelation = {
 
 const platformTenant = { id: "demo", name: "Demo Industrial Tenant", createdBy: "system", createdAt: "2025-05-14T00:00:00.000Z" };
 const platformProject = { tenantId: "demo", id: "north-plant", name: "North Plant", description: "Seeded industrial project", createdBy: "system", createdAt: "2025-05-14T00:00:00.000Z" };
+const platformProjectSouth = { tenantId: "demo", id: "south-plant", name: "South Plant", description: "Secondary industrial project", createdBy: "system", createdAt: "2025-05-14T00:00:00.000Z" };
 const platformSource = { tenantId: "demo", projectId: "north-plant", id: "opcua-north", name: "North OPC-UA", type: "opcua", description: "Read-only plant source", createdBy: "riley.chen", createdAt: "2025-05-14T00:00:00.000Z" };
 const platformSourceTwo = { ...platformSource, id: "jdbc-maintenance", name: "Maintenance JDBC", type: "jdbc" };
 const platformConnector = { tenantId: "demo", projectId: "north-plant", id: "opcua-reader", name: "OPC-UA Reader", sourceId: "opcua-north", type: "opcua", configuration: { endpoint: "opc.tcp://edge.local:4840", secretRef: "vault://odf/opcua" }, enabled: true, createdBy: "riley.chen", createdAt: "2025-05-14T00:00:00.000Z" };
@@ -328,7 +329,7 @@ describe("Open Data Fusion workspace", () => {
         if (blockProjectRequests) {
           await new Promise<void>((resolve) => { releaseProjectRequest = resolve; });
         }
-        return success({ items: [platformProject], nextCursor: null });
+        return success({ items: [platformProject, platformProjectSouth], nextCursor: null });
       }
       if (parsedUrl.pathname === "/api/v1/platform/sources") {
         return parsedUrl.searchParams.has("cursor")
@@ -497,6 +498,79 @@ describe("Open Data Fusion workspace", () => {
     expect(within(toolbar).getByRole("button", { name: "Layers" })).toBeInTheDocument();
     expect(within(toolbar).queryByRole("button", { name: "Open Data Fusion Explorer" })).not.toBeInTheDocument();
     expect(toolbar.querySelectorAll(".canvas-tool-group")).toHaveLength(3);
+  });
+
+  it("navigates directly from Canvas to configured workspaces while retaining project scope", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Pump P-101 canvas node" });
+
+    const scopeName = "Change project: North Plant in Demo Industrial Tenant";
+    expect(await screen.findByRole("button", { name: scopeName })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open workspace navigation" }));
+    const navigation = screen.getByRole("menu", { name: "Workspace navigation" });
+    const dataEngineering = within(navigation).getByRole("group", { name: "Data engineering" });
+    expect(within(dataEngineering).getByRole("menuitem", { name: "Sources" })).toBeInTheDocument();
+    expect(within(dataEngineering).getByRole("menuitem", { name: "Pipelines" })).toBeInTheDocument();
+    fireEvent.click(within(dataEngineering).getByRole("menuitem", { name: "Sources" }));
+
+    expect(await screen.findByRole("heading", { name: "Sources", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: scopeName })).toBeInTheDocument();
+    const route = new URLSearchParams(window.location.search);
+    expect(route.get("view")).toBe("sources");
+    expect(route.get("tenant")).toBe("demo");
+    expect(route.get("project")).toBe("north-plant");
+    expect(screen.getByRole("button", { name: "Open Canvas" })).toBeInTheDocument();
+  });
+
+  it("switches project scope from the Canvas header", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Pump P-101 canvas node" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Change project: North Plant in Demo Industrial Tenant" }));
+    const switcher = screen.getByRole("dialog", { name: "Project switcher" });
+    fireEvent.change(within(switcher).getByRole("combobox", { name: "Project" }), { target: { value: "south-plant" } });
+
+    expect(screen.queryByRole("button", { name: "Pump P-101 canvas node" })).not.toBeInTheDocument();
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("project")).toBe("south-plant"));
+    expect(screen.getByRole("button", { name: "Change project: South Plant in Demo Industrial Tenant" })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => {
+      if (new URL(String(url), "http://test.local").pathname !== "/api/v1/assets") return false;
+      const headers = new Headers(init?.headers);
+      return headers.get("x-odf-tenant-id") === "demo" && headers.get("x-odf-project-id") === "south-plant";
+    })).toBe(true));
+  });
+
+  it("loads a fully paginated read-only project overview from scoped APIs", async () => {
+    window.history.replaceState({}, "", "/?view=overview&tenant=demo&project=north-plant");
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Overview", level: 1 });
+    const assetsCard = await screen.findByRole("region", { name: "Assets overview" });
+    const sourcesCard = await screen.findByRole("region", { name: "Sources overview" });
+    expect(await within(assetsCard).findByText("3")).toBeInTheDocument();
+    expect(await within(sourcesCard).findByText("2")).toBeInTheDocument();
+    expect(await within(screen.getByRole("region", { name: "Review queue overview" })).findByText("1")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("region", { name: "Pipeline run evidence overview" })).toHaveTextContent("1"));
+    await waitFor(() => expect(screen.getByRole("region", { name: "Recent audit events overview" })).toHaveTextContent("workspace.operations_applied"));
+
+    for (const path of [
+      "/api/v1/platform/sources",
+      "/api/v1/platform/pipelines",
+      "/api/v1/platform/pipeline-runs",
+      "/api/v1/platform/contextualization/candidates",
+      "/api/v1/platform/writeback/requests",
+      "/api/v1/audit",
+    ]) {
+      const request = fetchMock.mock.calls.find(([url]) => new URL(String(url), "http://test.local").pathname === path);
+      expect(request).toBeDefined();
+      const headers = new Headers(request?.[1]?.headers);
+      expect(headers.get("x-odf-tenant-id")).toBe("demo");
+      expect(headers.get("x-odf-project-id")).toBe("north-plant");
+    }
+
+    fireEvent.click(within(sourcesCard).getByRole("button", { name: "Open Sources" }));
+    expect(await screen.findByRole("heading", { name: "Sources", level: 1 })).toBeInTheDocument();
   });
 
   it("opens real layer navigation and the responsive selection inspector", async () => {
