@@ -445,6 +445,13 @@ describe('platform catalog API', () => {
     });
     expect(inlineSecret.status).toBe(400);
 
+    const unsafePipeline = await scope(authorize(
+      request(app).post('/api/v1/platform/pipelines'),
+      'riley.chen',
+      ['data:ingest'],
+    )).send({ id: 'unsafe-pipeline', name: 'Unsafe pipeline', definition: { auth: { credential: 'plaintext' } } });
+    expect(unsafePipeline.status).toBe(400);
+
     const versionOne = await scope(authorize(
       request(app).post('/api/v1/platform/data-models/equipment/versions'),
       'riley.chen',

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { ApiAsset, ApiWorkspace, AssetDetailResponse, PlatformSpatialLink, PlatformWritebackRequest, WorkspaceMember, WorkspaceOperation, WorkspaceRevision } from "./types";
+import type { ApiAsset, ApiWorkspace, AssetDetailResponse, PlatformConnector, PlatformDataModel, PlatformDataset, PlatformPipeline, PlatformSource, PlatformSpatialLink, PlatformWritebackRequest, WorkspaceMember, WorkspaceOperation, WorkspaceRevision } from "./types";
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -158,7 +158,38 @@ const platformConnector = { tenantId: "demo", projectId: "north-plant", id: "opc
 const platformDataset = { tenantId: "demo", projectId: "north-plant", id: "operations", name: "Operations", description: "Curated operations data", createdBy: "riley.chen", createdAt: "2025-05-14T00:00:00.000Z" };
 const platformPipeline = { tenantId: "demo", projectId: "north-plant", id: "normalize-telemetry", name: "Normalize telemetry", sourceId: "opcua-north", datasetId: "operations", definition: { transform: "identity" }, version: 1, enabled: true, createdBy: "riley.chen", createdAt: "2025-05-14T00:00:00.000Z" };
 const platformRun = { tenantId: "demo", projectId: "north-plant", id: "run-normalize", pipelineId: "normalize-telemetry", idempotencyKey: "hour-001", status: "completed" as const, inputHash: "hash", result: { quality: { total: 1, passed: 1, failed: 0 } }, triggeredBy: "riley.chen", startedAt: "2025-05-14T12:00:00.000Z", completedAt: "2025-05-14T12:00:01.000Z", replayed: false };
+const rawEvidence = {
+  id: "raw-north-001",
+  tenantId: "demo",
+  projectId: "north-plant",
+  sourceSystem: "North OPC-UA",
+  runId: "north-001",
+  rawObjectUri: "raw://demo/north-plant/raw-north-001",
+  sha256: "d".repeat(64),
+  byteSize: 512,
+  state: "accepted" as const,
+  actor: "riley.chen",
+  correlationId: "raw-north-001",
+  errorSummary: null,
+  createdAt: "2025-05-14T12:00:00.000Z",
+  completedAt: "2025-05-14T12:00:01.000Z",
+  lastReplayedAt: null as string | null,
+  lastReplayRunId: null as string | null,
+};
 const platformQualityResult = { id: 1, tenantId: "demo", projectId: "north-plant", ruleId: "temperature-minimum", runId: "run-normalize", passed: true, observed: { temperature: 65 }, evaluatedAt: "2025-05-14T12:00:01.000Z" };
+type MockQualityRule = {
+  tenantId: string;
+  projectId: string;
+  id: string;
+  name: string;
+  targetType: string;
+  check: { operator: "required" | "equals" | "gte" | "lte"; field: string; value?: unknown };
+  severity: "info" | "warning" | "error";
+  enabled: boolean;
+  createdBy: string;
+  createdAt: string;
+};
+const platformQualityRule: MockQualityRule = { tenantId: "demo", projectId: "north-plant", id: "temperature-minimum", name: "Temperature minimum", targetType: "pipeline", check: { operator: "gte", field: "temperature", value: 65 }, severity: "error", enabled: true, createdBy: "riley.chen", createdAt: "2025-05-14T00:00:00.000Z" };
 const platformModel = { tenantId: "demo", projectId: "north-plant", id: "equipment", version: 1, name: "Equipment", schema: { properties: { tag: { type: "string" } } }, status: "published" as const, createdBy: "riley.chen", createdAt: "2025-05-14T00:00:00.000Z" };
 const platformCandidate = { tenantId: "demo", projectId: "north-plant", id: "candidate-1", source: { type: "asset", id: "P-101" }, target: { type: "document", id: "DOC-P101-MANUAL" }, relationType: "hasDocument", confidence: 0.94, evidence: { matchedTag: "P-101" }, status: "proposed" as const, reviewedBy: null, reviewComment: null, reviewedAt: null, createdBy: "riley.chen", createdAt: "2025-05-14T00:00:00.000Z" };
 const diagramExtraction = { tenantId: "demo", projectId: "north-plant", id: "pid-001-extraction", documentExternalId: "PID-001", textSha256: "a".repeat(64), tags: [{ tag: "P-101", kind: "equipment" as const, page: 2, bounds: null, confidence: 0.9 }, { tag: "PT-1001", kind: "instrument" as const, page: 2, bounds: null, confidence: 0.94 }], createdBy: "riley.chen", createdAt: "2025-05-14T12:00:00.000Z" };
@@ -217,6 +248,13 @@ describe("Open Data Fusion workspace", () => {
   let memberMutationFailure: { status: number; message: string } | null;
   let platformFailure: { path: string; status: number; message: string } | null;
   let triggeredRunKeys: Set<string>;
+  let serverDatasets: PlatformDataset[];
+  let serverSources: PlatformSource[];
+  let serverConnectors: PlatformConnector[];
+  let serverModels: PlatformDataModel[];
+  let serverPipelines: PlatformPipeline[];
+  let serverQualityRules: MockQualityRule[];
+  let serverRawEvidence: Array<typeof rawEvidence>;
   let serverSpatialLink: PlatformSpatialLink;
   let serverWritebacks: PlatformWritebackRequest[];
   let writebackApprovalCount: number;
@@ -236,6 +274,13 @@ describe("Open Data Fusion workspace", () => {
     memberMutationFailure = null;
     platformFailure = null;
     triggeredRunKeys = new Set();
+    serverDatasets = [structuredClone(platformDataset)];
+    serverSources = [structuredClone(platformSource), structuredClone(platformSourceTwo)];
+    serverConnectors = [structuredClone(platformConnector)];
+    serverModels = [structuredClone(platformModel)];
+    serverPipelines = [structuredClone(platformPipeline)];
+    serverQualityRules = [structuredClone(platformQualityRule)];
+    serverRawEvidence = [structuredClone(rawEvidence)];
     serverSpatialLink = structuredClone(spatialLinkFixture);
     serverWritebacks = [structuredClone(highRiskWriteback), structuredClone(criticalWriteback)];
     writebackApprovalCount = 0;
@@ -331,15 +376,136 @@ describe("Open Data Fusion workspace", () => {
         }
         return success({ items: [platformProject, platformProjectSouth], nextCursor: null });
       }
-      if (parsedUrl.pathname === "/api/v1/platform/sources") {
-        return parsedUrl.searchParams.has("cursor")
-          ? success({ items: [platformSourceTwo], nextCursor: null })
-          : success({ items: [platformSource], nextCursor: "sources-next" });
+      const rawReplayMatch = parsedUrl.pathname.match(/^\/api\/v1\/platform\/ingestion\/raw\/([^/]+)\/replay$/);
+      if (rawReplayMatch && init?.method === "POST") {
+        const rawId = decodeURIComponent(rawReplayMatch[1]);
+        const current = serverRawEvidence.find((record) => record.id === rawId)!;
+        const replayRunId = `replay-${rawId}`;
+        const rawObject = { ...current, lastReplayedAt: "2025-05-14T12:15:00.000Z", lastReplayRunId: replayRunId };
+        serverRawEvidence = serverRawEvidence.map((record) => record.id === rawId ? rawObject : record);
+        return success({ id: replayRunId, runId: replayRunId, status: "completed", message: `Replayed ${rawId}`, replayedFromRawObjectId: rawId, rawObject }, 201);
       }
-      if (parsedUrl.pathname === "/api/v1/platform/connectors") return success({ items: [platformConnector], nextCursor: null });
-      if (parsedUrl.pathname === "/api/v1/platform/datasets") return success({ items: [platformDataset], nextCursor: null });
-      if (parsedUrl.pathname === "/api/v1/platform/data-models") return success({ items: [platformModel], nextCursor: null });
-      if (parsedUrl.pathname === "/api/v1/platform/pipelines") return success({ items: [platformPipeline], nextCursor: null });
+      if (parsedUrl.pathname === "/api/v1/platform/ingestion/raw") return success({ items: serverRawEvidence, nextCursor: null });
+      if (parsedUrl.pathname === "/api/v1/platform/sources") {
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { id: string; name: string; type: string; description?: string | null };
+          const created: PlatformSource = {
+            tenantId: "demo",
+            projectId: "north-plant",
+            id: body.id,
+            name: body.name,
+            type: body.type,
+            description: body.description ?? null,
+            createdBy: "harper.dennis",
+            createdAt: "2025-05-14T12:10:00.000Z",
+          };
+          serverSources = [...serverSources, created];
+          return success(created, 201);
+        }
+        const secondPageSource = serverSources.find((source) => source.id === platformSourceTwo.id);
+        const firstPageSources = serverSources.filter((source) => source.id !== platformSourceTwo.id);
+        return parsedUrl.searchParams.has("cursor")
+          ? success({ items: secondPageSource ? [secondPageSource] : [], nextCursor: null })
+          : success({ items: firstPageSources, nextCursor: secondPageSource ? "sources-next" : null });
+      }
+      if (parsedUrl.pathname === "/api/v1/platform/connectors") {
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { id: string; name: string; sourceId: string; type: string; configuration?: Record<string, unknown>; enabled?: boolean };
+          const created: PlatformConnector = {
+            tenantId: "demo",
+            projectId: "north-plant",
+            id: body.id,
+            name: body.name,
+            sourceId: body.sourceId,
+            type: body.type,
+            configuration: body.configuration ?? {},
+            enabled: body.enabled ?? true,
+            createdBy: "harper.dennis",
+            createdAt: "2025-05-14T12:10:00.000Z",
+          };
+          serverConnectors = [...serverConnectors, created];
+          return success(created, 201);
+        }
+        return success({ items: serverConnectors, nextCursor: null });
+      }
+      if (parsedUrl.pathname === "/api/v1/platform/datasets") {
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { id: string; name: string; description?: string | null };
+          const created: PlatformDataset = {
+            tenantId: "demo",
+            projectId: "north-plant",
+            id: body.id,
+            name: body.name,
+            description: body.description ?? null,
+            createdBy: "harper.dennis",
+            createdAt: "2025-05-14T12:10:00.000Z",
+          };
+          serverDatasets = [...serverDatasets, created];
+          return success(created, 201);
+        }
+        return success({ items: serverDatasets, nextCursor: null });
+      }
+      const dataModelVersionMatch = parsedUrl.pathname.match(/^\/api\/v1\/platform\/data-models\/([^/]+)\/versions$/);
+      if (dataModelVersionMatch && init?.method === "POST") {
+        const modelId = decodeURIComponent(dataModelVersionMatch[1]);
+        const body = JSON.parse(String(init.body)) as Pick<PlatformDataModel, "name" | "schema" | "status">;
+        const nextVersion = Math.max(0, ...serverModels.filter((model) => model.id === modelId).map((model) => model.version)) + 1;
+        const created: PlatformDataModel = {
+          tenantId: "demo",
+          projectId: "north-plant",
+          id: modelId,
+          version: nextVersion,
+          name: body.name,
+          schema: body.schema,
+          status: body.status,
+          createdBy: "harper.dennis",
+          createdAt: "2025-05-14T12:10:00.000Z",
+        };
+        serverModels = [...serverModels, created];
+        return success(created, 201);
+      }
+      if (parsedUrl.pathname === "/api/v1/platform/data-models") return success({ items: serverModels, nextCursor: null });
+      if (parsedUrl.pathname === "/api/v1/platform/pipelines") {
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { id: string; name: string; sourceId?: string | null; datasetId?: string | null; definition?: Record<string, unknown>; enabled?: boolean };
+          const created: PlatformPipeline = {
+            tenantId: "demo",
+            projectId: "north-plant",
+            id: body.id,
+            name: body.name,
+            sourceId: body.sourceId ?? null,
+            datasetId: body.datasetId ?? null,
+            definition: body.definition ?? {},
+            version: 1,
+            enabled: body.enabled ?? true,
+            createdBy: "harper.dennis",
+            createdAt: "2025-05-14T12:10:00.000Z",
+          };
+          serverPipelines = [...serverPipelines, created];
+          return success(created, 201);
+        }
+        return success({ items: serverPipelines, nextCursor: null });
+      }
+      if (parsedUrl.pathname === "/api/v1/platform/quality-rules") {
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { id: string; name: string; targetType?: string; check: MockQualityRule["check"]; severity?: MockQualityRule["severity"]; enabled?: boolean };
+          const created: MockQualityRule = {
+            tenantId: "demo",
+            projectId: "north-plant",
+            id: body.id,
+            name: body.name,
+            targetType: body.targetType ?? "pipeline",
+            check: body.check,
+            severity: body.severity ?? "error",
+            enabled: body.enabled ?? true,
+            createdBy: "harper.dennis",
+            createdAt: "2025-05-14T12:10:00.000Z",
+          };
+          serverQualityRules = [...serverQualityRules, created];
+          return success(created, 201);
+        }
+        return success({ items: serverQualityRules, nextCursor: null });
+      }
       if (parsedUrl.pathname === "/api/v1/platform/pipeline-runs") return success({ items: [platformRun], nextCursor: null });
       if (parsedUrl.pathname === "/api/v1/platform/quality-results") return success({ items: [platformQualityResult], nextCursor: null });
       if (parsedUrl.pathname === "/api/v1/platform/contextualization/candidates") return success({ items: [platformCandidate], nextCursor: null });
@@ -1068,7 +1234,9 @@ describe("Open Data Fusion workspace", () => {
     openExplorer();
     fireEvent.click(screen.getByRole("button", { name: "Sources" }));
     expect(screen.getByRole("heading", { name: "Sources" })).toBeInTheDocument();
-    expect(await screen.findByText("North OPC-UA")).toBeInTheDocument();
+    const sourcesSection = (await screen.findByRole("heading", { name: "Sources", level: 2 })).closest("section");
+    expect(sourcesSection).not.toBeNull();
+    expect(await within(sourcesSection as HTMLElement).findByText("North OPC-UA")).toBeInTheDocument();
     expect(screen.getByText("OPC-UA Reader")).toBeInTheDocument();
     expect(screen.getByText("Operations")).toBeInTheDocument();
 
@@ -1083,6 +1251,98 @@ describe("Open Data Fusion workspace", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/v1/platform/sources?") && String(url).includes("cursor=sources-next"))).toBe(true);
   });
 
+  it("retries a failed source page without discarding loaded entries", async () => {
+    render(<App />);
+    openExplorer();
+    fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+
+    const sourcesSection = (await screen.findByRole("heading", { name: "Sources", level: 2 })).closest("section");
+    expect(sourcesSection).not.toBeNull();
+    const section = sourcesSection as HTMLElement;
+    expect(await within(section).findByText("North OPC-UA")).toBeInTheDocument();
+
+    platformFailure = { path: "/api/v1/platform/sources", status: 503, message: "Source page temporarily unavailable" };
+    fireEvent.click(within(section).getByRole("button", { name: "Load more" }));
+    const pageError = await within(section).findByRole("alert");
+    expect(pageError).toHaveTextContent("Source page temporarily unavailable");
+
+    platformFailure = null;
+    fireEvent.click(within(pageError).getByRole("button", { name: "Retry" }));
+    expect(await within(section).findByText("Maintenance JDBC")).toBeInTheDocument();
+  });
+
+  it("registers source data and replays raw ingestion evidence", async () => {
+    render(<App />);
+    openExplorer();
+    fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+
+    expect(await screen.findByRole("heading", { name: "Register source data", level: 2 })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Dataset ID"), { target: { value: "maintenance" } });
+    fireEvent.change(screen.getByLabelText("Dataset name"), { target: { value: "Maintenance" } });
+    expect(screen.getByLabelText("Dataset description")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Create dataset" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/datasets" && init?.method === "POST",
+    )).toBe(true));
+    const datasetRequest = fetchMock.mock.calls.find(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/datasets" && init?.method === "POST",
+    );
+    expect(JSON.parse(String(datasetRequest?.[1]?.body))).toEqual({ id: "maintenance", name: "Maintenance" });
+    expect(await screen.findByText("Maintenance")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Source ID"), { target: { value: "jdbc-erp" } });
+    fireEvent.change(screen.getByLabelText("Source name"), { target: { value: "Maintenance JDBC" } });
+    fireEvent.change(screen.getByLabelText("Source type"), { target: { value: "jdbc" } });
+    expect(screen.getByLabelText("Source description")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Create source" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/sources" && init?.method === "POST",
+    )).toBe(true));
+    const sourceRequest = fetchMock.mock.calls.find(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/sources" && init?.method === "POST",
+    );
+    expect(JSON.parse(String(sourceRequest?.[1]?.body))).toEqual({ id: "jdbc-erp", name: "Maintenance JDBC", type: "jdbc" });
+    expect(await screen.findByText("Maintenance JDBC")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Connector ID"), { target: { value: "jdbc-erp-reader" } });
+    fireEvent.change(screen.getByLabelText("Connector name"), { target: { value: "ERP reader" } });
+    fireEvent.change(screen.getByLabelText("Connector source"), { target: { value: "jdbc-erp" } });
+    fireEvent.change(screen.getByLabelText("Connector type"), { target: { value: "jdbc" } });
+    fireEvent.change(screen.getByLabelText("Connector configuration"), { target: { value: '{ "query": "select 1", "secretRef": "vault://odf/erp" }' } });
+    expect(screen.getByRole("checkbox", { name: "Connector enabled" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Create connector" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/connectors" && init?.method === "POST",
+    )).toBe(true));
+    const connectorRequest = fetchMock.mock.calls.find(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/connectors" && init?.method === "POST",
+    );
+    expect(JSON.parse(String(connectorRequest?.[1]?.body))).toEqual({
+      id: "jdbc-erp-reader",
+      name: "ERP reader",
+      sourceId: "jdbc-erp",
+      type: "jdbc",
+      configuration: { query: "select 1", secretRef: "vault://odf/erp" },
+      enabled: true,
+    });
+    expect(await screen.findByText("ERP reader")).toBeInTheDocument();
+
+    expect(await screen.findByRole("heading", { name: "Ingestion evidence", level: 2 })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Replay raw evidence raw-north-001" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm replay raw-north-001" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/ingestion/raw/raw-north-001/replay" && init?.method === "POST",
+    )).toBe(true));
+    const evidenceSection = screen.getByRole("heading", { name: "Ingestion evidence", level: 2 }).closest("section");
+    expect(evidenceSection).not.toBeNull();
+    expect(await within(evidenceSection as HTMLElement).findByText(/replay-raw-north-001/)).toBeInTheDocument();
+  });
+
   it("runs a pipeline idempotently and exposes run and quality evidence", async () => {
     render(<App />);
     openExplorer();
@@ -1092,10 +1352,10 @@ describe("Open Data Fusion workspace", () => {
 
     fireEvent.change(screen.getByRole("textbox", { name: "Idempotency key for Normalize telemetry" }), { target: { value: "manual-test" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Run input for Normalize telemetry" }), { target: { value: '{"temperature":65}' } });
-    fireEvent.click(screen.getByRole("button", { name: "Run pipeline" }));
+    fireEvent.click(screen.getByRole("button", { name: "Trigger legacy run" }));
     expect(await screen.findByText("New run run-manual-test is completed")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Run pipeline" }));
+    fireEvent.click(screen.getByRole("button", { name: "Trigger legacy run" }));
     expect(await screen.findByText("Existing run run-manual-test replayed (completed)")).toBeInTheDocument();
 
     const runRequests = fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/api/v1/platform/pipelines/normalize-telemetry/runs") && init?.method === "POST");
@@ -1116,6 +1376,96 @@ describe("Open Data Fusion workspace", () => {
     expect(screen.getByText("published")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Immutable schema"));
     expect(screen.getByText(/"tag"/)).toBeInTheDocument();
+  });
+
+  it("authors immutable model versions, pipelines, and quality rules", async () => {
+    render(<App />);
+    openExplorer();
+    fireEvent.click(screen.getByRole("button", { name: "Models" }));
+
+    expect(await screen.findByRole("heading", { name: "Create immutable model version", level: 2 })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Model ID"), { target: { value: "equipment" } });
+    fireEvent.change(screen.getByLabelText("Model name"), { target: { value: "Equipment v2" } });
+    fireEvent.change(screen.getByLabelText("Model schema"), { target: { value: '{"properties":{"serial":{"type":"string"}}}' } });
+    fireEvent.change(screen.getByLabelText("Model status"), { target: { value: "published" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create immutable version" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/data-models/equipment/versions" && init?.method === "POST",
+    )).toBe(true));
+    const modelRequest = fetchMock.mock.calls.find(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/data-models/equipment/versions" && init?.method === "POST",
+    );
+    expect(JSON.parse(String(modelRequest?.[1]?.body))).toEqual({
+      name: "Equipment v2",
+      schema: { properties: { serial: { type: "string" } } },
+      status: "published",
+    });
+    expect(await screen.findByText("Equipment v2")).toBeInTheDocument();
+    expect(screen.getByText(/equipment.*version 2/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Pipelines" }));
+    expect(await screen.findByRole("heading", { name: "Configure processing", level: 2 })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Pipeline ID"), { target: { value: "normalize-flow" } });
+    fireEvent.change(screen.getByLabelText("Pipeline name"), { target: { value: "Normalize flow" } });
+    fireEvent.change(screen.getByLabelText("Pipeline source ID"), { target: { value: "opcua-north" } });
+    fireEvent.change(screen.getByLabelText("Pipeline dataset ID"), { target: { value: "operations" } });
+    fireEvent.change(screen.getByLabelText("Pipeline definition"), { target: { value: '{"headers":{"Authorization":"Bearer not-allowed"}}' } });
+    fireEvent.click(screen.getByRole("button", { name: "Create pipeline" }));
+    expect(await screen.findByText("Use configuration references instead of inline credentials in pipeline definitions.")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/pipelines" && init?.method === "POST",
+    )).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("Pipeline definition"), { target: { value: '{"transform":"validate"}' } });
+    expect(screen.getByRole("checkbox", { name: "Pipeline enabled" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Create pipeline" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/pipelines" && init?.method === "POST",
+    )).toBe(true));
+    const pipelineRequest = fetchMock.mock.calls.find(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/pipelines" && init?.method === "POST",
+    );
+    expect(JSON.parse(String(pipelineRequest?.[1]?.body))).toEqual({
+      id: "normalize-flow",
+      name: "Normalize flow",
+      sourceId: "opcua-north",
+      datasetId: "operations",
+      definition: { transform: "validate" },
+      enabled: true,
+    });
+    expect(await screen.findByText("Normalize flow")).toBeInTheDocument();
+    expect(screen.getByText(/normalize-flow/)).toBeInTheDocument();
+
+    expect(await screen.findByRole("heading", { name: "Quality rules", level: 2 })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Quality rule ID"), { target: { value: "flow-minimum" } });
+    fireEvent.change(screen.getByLabelText("Quality rule name"), { target: { value: "Flow minimum" } });
+    fireEvent.change(screen.getByLabelText("Quality target type"), { target: { value: "pipeline" } });
+    fireEvent.change(screen.getByLabelText("Quality check operator"), { target: { value: "gte" } });
+    fireEvent.change(screen.getByLabelText("Quality check field"), { target: { value: "flow" } });
+    fireEvent.change(screen.getByLabelText("Quality check value"), { target: { value: "20" } });
+    fireEvent.change(screen.getByLabelText("Quality severity"), { target: { value: "warning" } });
+    expect(screen.getByRole("checkbox", { name: "Quality rule enabled" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Create quality rule" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/quality-rules" && init?.method === "POST",
+    )).toBe(true));
+    const qualityRuleRequest = fetchMock.mock.calls.find(([url, init]) =>
+      new URL(String(url), "http://test.local").pathname === "/api/v1/platform/quality-rules" && init?.method === "POST",
+    );
+    expect(JSON.parse(String(qualityRuleRequest?.[1]?.body))).toEqual({
+      id: "flow-minimum",
+      name: "Flow minimum",
+      targetType: "pipeline",
+      check: { operator: "gte", field: "flow", value: 20 },
+      severity: "warning",
+      enabled: true,
+    });
+    expect(await screen.findByText("Flow minimum")).toBeInTheDocument();
+    expect(screen.getByText(/flow-minimum/)).toBeInTheDocument();
   });
 
   it("reviews a platform context candidate with the selected tenant and project", async () => {
@@ -1290,7 +1640,9 @@ describe("Open Data Fusion workspace", () => {
     render(<App />);
     openExplorer();
     fireEvent.click(screen.getByRole("button", { name: "Sources" }));
-    await screen.findByText("North OPC-UA");
+    const sourcesSection = (await screen.findByRole("heading", { name: "Sources", level: 2 })).closest("section");
+    expect(sourcesSection).not.toBeNull();
+    await within(sourcesSection as HTMLElement).findByText("North OPC-UA");
     fireEvent.click(screen.getByRole("button", { name: "Explorer" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Search project data" }), { target: { value: "P-102" } });
 
