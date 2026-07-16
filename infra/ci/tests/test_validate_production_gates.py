@@ -70,5 +70,20 @@ class WorkerOtlpWiringTests(unittest.TestCase):
                     self.assertIn(expected, block.group("body"))
 
 
+class ComposeVolumeSyntaxTests(unittest.TestCase):
+    def test_edge_config_bind_mount_uses_long_syntax(self) -> None:
+        compose = (VALIDATOR_PATH.parents[2] / "docker-compose.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            """    volumes:
+      - type: bind
+        source: \"${ODF_EDGE_CONFIG_PATH:-./apps/edge-agent/config.example.json}\"
+        target: /etc/open-data-fusion/edge-agent.json
+        read_only: true
+""",
+            compose,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

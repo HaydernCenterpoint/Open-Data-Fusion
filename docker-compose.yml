@@ -226,7 +226,10 @@ services:
       ODF_EDGE_OPCUA_USERNAME: "${ODF_EDGE_OPCUA_USERNAME:-}"
       ODF_EDGE_OPCUA_PASSWORD: "${ODF_EDGE_OPCUA_PASSWORD:-}"
     volumes:
-      - "${ODF_EDGE_CONFIG_PATH:-./apps/edge-agent/config.example.json}:/etc/open-data-fusion/edge-agent.json:ro"
+      - type: bind
+        source: "${ODF_EDGE_CONFIG_PATH:-./apps/edge-agent/config.example.json}"
+        target: /etc/open-data-fusion/edge-agent.json
+        read_only: true
       - odf-edge-data:/workspace/data/edge
     depends_on:
       api:
