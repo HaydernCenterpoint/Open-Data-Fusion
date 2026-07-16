@@ -1,6 +1,6 @@
 # Browser CSV Import Design
 
-**Date:** 2026-07-16  
+**Date:** 2026-07-16
 **Status:** Approved direction; awaiting review of this written specification
 
 ## Decision
