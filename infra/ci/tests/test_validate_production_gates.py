@@ -95,6 +95,17 @@ class OutboxBrokerRehearsalTests(unittest.TestCase):
             "wait_for_postgres_value compares PostgreSQL boolean output to 't', not its text cast 'true'",
         )
 
+    def test_recovery_cli_mode_checks_accept_compact_json(self) -> None:
+        rehearsal = (VALIDATOR_PATH.parents[2] / "infra/ci/outbox-broker-rehearsal.sh").read_text(encoding="utf-8")
+
+        for mode in ("read_only", "dry_run", "applied"):
+            with self.subTest(mode=mode):
+                self.assertIn(
+                    f"grep -Eq '\"mode\"[[:space:]]*:[[:space:]]*\"{mode}\"'",
+                    rehearsal,
+                    "recovery CLI responses may be pretty-printed or compact JSON",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

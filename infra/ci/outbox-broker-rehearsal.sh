@@ -937,7 +937,7 @@ if [[ "$(redis_config_value maxmemory-policy)" != "noeviction" ]]; then
 fi
 
 recovery_list="$(run_recovery_cli list --limit 1)" || fail "the outbox recovery CLI could not read through ODF_OUTBOX_POSTGRES_URL"
-if ! printf '%s' "$recovery_list" | grep -Fq '"mode": "read_only"'; then
+if ! printf '%s' "$recovery_list" | grep -Eq '"mode"[[:space:]]*:[[:space:]]*"read_only"'; then
   fail "the outbox recovery CLI did not return its read-only response"
 fi
 
@@ -1093,7 +1093,7 @@ restore_redis_maxmemory || fail "could not restore Redis maxmemory before recove
 dead_letter_reason="local production-like broker capacity restored; synthetic event validated ${fixture_id}"
 dry_run_output="$(run_recovery_cli requeue --event-id "$first_event_id" --reason "$dead_letter_reason")" \
   || fail "the recovery CLI dry-run failed"
-if ! printf '%s' "$dry_run_output" | grep -Fq '"mode": "dry_run"'; then
+if ! printf '%s' "$dry_run_output" | grep -Eq '"mode"[[:space:]]*:[[:space:]]*"dry_run"'; then
   fail "the recovery CLI dry-run did not report dry_run mode"
 fi
 if [[ "$(postgres_value "$dead_letter_state_query")" != "t" ]]; then
@@ -1102,7 +1102,7 @@ fi
 
 apply_output="$(run_recovery_cli requeue --event-id "$first_event_id" --reason "$dead_letter_reason" --apply)" \
   || fail "the recovery CLI apply step failed"
-if ! printf '%s' "$apply_output" | grep -Fq '"mode": "applied"'; then
+if ! printf '%s' "$apply_output" | grep -Eq '"mode"[[:space:]]*:[[:space:]]*"applied"'; then
   fail "the recovery CLI apply step did not report applied mode"
 fi
 
