@@ -981,6 +981,89 @@ textarea:focus-visible {
   border-top-color: #e9eff4;
 }
 
+.ingest-mode-tabs {
+  background: #fbfdff;
+  border-bottom-color: #e4ecf3;
+}
+
+.ingest-mode-tabs button {
+  color: #61768a;
+}
+
+.ingest-mode-tabs button[aria-selected="true"] {
+  color: var(--accent);
+}
+
+.csv-file-controls input,
+.csv-file-controls select,
+.csv-draft-row input,
+.csv-draft-row select {
+  border-color: #d2deea;
+  border-radius: 8px;
+  box-shadow: inset 0 1px 1px rgb(16 38 62 / 2%);
+}
+
+.csv-file-controls input:focus,
+.csv-file-controls select:focus,
+.csv-draft-row input:focus,
+.csv-draft-row select:focus {
+  border-color: #8db7fb;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.csv-file-controls input[type="file"]::file-selector-button,
+.csv-add-button,
+.csv-remove-button {
+  border-radius: 7px;
+}
+
+.csv-preview-scroll,
+.csv-mapping-group,
+.csv-draft-row,
+.csv-validation-summary {
+  border-color: #dbe6ef;
+  border-radius: 9px;
+}
+
+.csv-preview th {
+  color: #34516c;
+  background: #f3f7fb;
+}
+
+.csv-draft-row {
+  background: #f8fbfd;
+}
+
+.csv-add-button {
+  color: var(--accent);
+  border-color: #bed3ed;
+}
+
+.csv-remove-button {
+  color: #9a3e3e;
+  border-color: #e6caca;
+}
+
+.csv-validation-summary.is-valid {
+  background: #f0f9f4;
+  border-color: #bcdfca;
+}
+
+@media (hover: hover) {
+  .csv-add-button:hover,
+  .csv-file-controls input[type="file"]::file-selector-button:hover {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-color: #a9c8ee;
+  }
+
+  .csv-remove-button:hover {
+    color: #842d2d;
+    background: #fff4f3;
+    border-color: #dbaaaa;
+  }
+}
+
 .toast {
   padding: 13px 16px;
   background: linear-gradient(135deg, #142b45, #10243a);
