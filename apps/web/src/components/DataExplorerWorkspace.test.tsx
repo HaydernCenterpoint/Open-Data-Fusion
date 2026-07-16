@@ -96,9 +96,12 @@ describe("DataExplorerWorkspace", () => {
     const listbox = await screen.findByRole("listbox", { name: "Data Explorer results" });
 
     fireEvent.keyDown(listbox, { key: "End" });
-    expect(within(listbox).getByRole("option", { name: /North OPC-UA/ })).toHaveAttribute("aria-selected", "true");
+    const activeOption = within(listbox).getByRole("option", { name: /North OPC-UA/ });
+    expect(listbox).toHaveAttribute("aria-activedescendant", activeOption.id);
+    expect(activeOption).toHaveAttribute("aria-selected", "false");
     fireEvent.keyDown(listbox, { key: "Enter" });
     expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ entityId: "opcua-north" }));
+    expect(activeOption).toHaveAttribute("aria-selected", "true");
   });
 
   it("retries a failed scoped search", async () => {

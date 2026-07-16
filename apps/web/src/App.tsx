@@ -184,7 +184,7 @@ export default function App() {
     const controller = new AbortController();
     explorerRequestRef.current = controller;
     setSelectedAssetId(externalId);
-    if (routeRef.current.view === "explorer" && routeRef.current.assetId !== externalId) {
+    if (routeRef.current.view === "explorer" && !routeRef.current.searchQuery && routeRef.current.assetId !== externalId) {
       updateRoute({ view: "explorer", assetId: externalId }, "replace");
     }
     setExplorerLoading(true);

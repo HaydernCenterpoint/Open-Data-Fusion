@@ -1,5 +1,5 @@
 import { ArrowRight, Search, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { ApiRequestError, searchPlatform } from "../lib/api";
 import type { PlatformContext, PlatformSearchResult } from "../types";
 
@@ -78,6 +78,7 @@ export function DataExplorerWorkspace({
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [localSelection, setLocalSelection] = useState<ResultSelection>(selected);
   const [reloadToken, setReloadToken] = useState(0);
+  const resultListId = useId();
   const normalizedQuery = query.trim();
 
   useEffect(() => {
@@ -116,6 +117,7 @@ export function DataExplorerWorkspace({
   const categories = useMemo(() => [...categoryCounts.keys()].sort((left, right) => entityLabel(left, true).localeCompare(entityLabel(right, true))), [categoryCounts]);
   const filteredItems = useMemo(() => activeType === "all" ? items : items.filter((item) => item.entityType === activeType), [activeType, items]);
   const selectedKey = localSelection ? resultKey(localSelection) : null;
+  const activeOptionId = activeKey ? `${resultListId}-${encodeURIComponent(activeKey)}` : undefined;
   const selectedResult = useMemo(() => selectedKey ? items.find((item) => resultKey(item) === selectedKey) ?? null : null, [items, selectedKey]);
 
   useEffect(() => {
@@ -171,7 +173,7 @@ export function DataExplorerWorkspace({
         {status === "error" ? <p className="data-explorer__error" role="alert">Search is unavailable <button type="button" onClick={() => setReloadToken((value) => value + 1)}>Retry</button></p> : null}
         {status === "ready" && filteredItems.length === 0 ? <p className="data-explorer__empty">No matching data in this category.</p> : null}
         {status === "ready" && filteredItems.length > 0 ? (
-          <div className="data-explorer__result-list" role="listbox" aria-label="Data Explorer results" tabIndex={0} onKeyDown={(event) => {
+          <div className="data-explorer__result-list" role="listbox" aria-label="Data Explorer results" aria-activedescendant={activeOptionId} tabIndex={0} onKeyDown={(event) => {
             if (["ArrowDown", "ArrowUp", "Home", "End", "Enter"].includes(event.key)) {
               event.preventDefault();
               moveActive(event.key as "ArrowDown" | "ArrowUp" | "Home" | "End" | "Enter");
@@ -179,9 +181,10 @@ export function DataExplorerWorkspace({
           }}>
             {filteredItems.map((item) => {
               const key = resultKey(item);
+              const optionId = `${resultListId}-${encodeURIComponent(key)}`;
               const isActive = key === activeKey;
               const isSelected = key === selectedKey;
-              return <button type="button" role="option" key={key} aria-selected={isActive} className={`data-explorer__result${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`} onClick={() => selectResult(item)}><span className="data-explorer__result-type">{entityLabel(item.entityType)}</span><strong>{item.title}</strong><span>{item.summary}</span><time dateTime={item.updatedAt}>Updated {formatUpdatedAt(item.updatedAt)}</time></button>;
+              return <button type="button" role="option" id={optionId} key={key} aria-selected={isSelected} className={`data-explorer__result${isSelected ? " is-selected" : ""}${isActive ? " is-active" : ""}`} onClick={() => selectResult(item)}><span className="data-explorer__result-type">{entityLabel(item.entityType)}</span><strong>{item.title}</strong><span>{item.summary}</span><time dateTime={item.updatedAt}>Updated {formatUpdatedAt(item.updatedAt)}</time></button>;
             })}
           </div>
         ) : null}
