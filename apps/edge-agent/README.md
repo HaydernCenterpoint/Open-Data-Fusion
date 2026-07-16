@@ -21,6 +21,18 @@ is specified by an environment-variable name such as `ODF_EDGE_CLIENT_SECRET`; u
 `delivery.tenantId` and `delivery.projectId` are sent as governed scope headers on every ingest request. The connector
 service identity must be a member of that project and cannot select a scope outside its assigned platform policy.
 
+### Outbound delivery mTLS
+
+When the ingest listener requires a client certificate, configure `delivery.mtls` with `certificateFile` and
+`privateKeyFile` paths. `caFile` is optional for a private server CA. The agent rejects inline PEM material, unreadable
+or empty files, and malformed client credentials before it starts. Server certificate verification is always enabled.
+
+`delivery.apiBaseUrl` must be `https` when `delivery.mtls` is present. Omit `serverName` unless the endpoint host needs a
+specific TLS SNI/hostname value; it is never inferred from a certificate path. mTLS applies only to the ingest delivery
+request. OAuth token fetching continues to use its normal HTTPS transport. For the disposable Compose proof of
+`CSV → queue → OAuth → mTLS → gateway → API`, see the [production ingress
+runbook](../../docs/operations/production-ingress-security.md).
+
 CSV checkpoints include file identity, processed-row count, and a boundary hash. A replaced, truncated, or rewritten
 file fails closed instead of silently skipping records. PostgreSQL queries must be one read-only `SELECT`/`WITH`
 statement, use `$1` as the exclusive checkpoint and `$2` as the limit, and include deterministic `ORDER BY`.

@@ -17,12 +17,16 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@open-data-fusion/postgres-runtime": "0.1.0"
+    "@open-data-fusion/postgres-runtime": "0.1.0",
+    "@opentelemetry/api-logs": "^0.220.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.220.0",
+    "@opentelemetry/resources": "^2.9.0",
+    "@opentelemetry/sdk-logs": "^0.220.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.10",
     "tsx": "^4.20.3",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitest": "4.1.10"
   }
 }

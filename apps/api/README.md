@@ -223,6 +223,8 @@ listed platform route falls through to SQLite.
 - `GET|POST /api/v1/platform/datasets`
 - `GET|POST /api/v1/platform/sources`
 - `GET|POST /api/v1/platform/connectors`
+- `GET /api/v1/platform/ingestion/raw` (immutable raw-ingestion evidence)
+- `POST /api/v1/platform/ingestion/raw/:rawId/replay` (creates a new replay run from scoped evidence)
 - `GET /api/v1/platform/data-models`
 - `POST /api/v1/platform/data-models/:modelId/versions`
 - `GET|POST /api/v1/platform/pipelines`

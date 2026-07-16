@@ -742,6 +742,7 @@ Additional references:
 - [ ] Rehearse backup/restore, broker failure, dead-letter, and multi-instance concurrency beyond the CI industrial/Canvas/outbox smoke
 - [ ] Complete production ingress, TLS/mTLS, secret-manager, and network-isolation design
 - [ ] Add durable trace/log storage, worker telemetry, SLOs, and operational runbooks
+  - The local/CI Collector rehearsal proves redacted API and worker log delivery; replicated or managed retention, backup, compliance retention, and alert delivery remain required to close this gate.
 - [ ] Validate live design-partner CSV, JDBC/PostgreSQL, and OPC UA connector backfill, resume, authentication, and schema-evolution behavior in the target deployment
 
 ### Intentionally gated

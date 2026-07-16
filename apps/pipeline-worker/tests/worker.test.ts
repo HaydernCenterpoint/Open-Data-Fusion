@@ -151,6 +151,27 @@ describe("pipeline worker", () => {
     expect(runtime.calls.filter((call) => call.method === "transition")).toHaveLength(1);
   });
 
+  it("reports a completed cycle to the observability hook", async () => {
+    const runtime = new FakeRuntime();
+    runtime.claimed = [];
+    let resolveObservation!: (value: { result: { scopesPolled: number; claimed: number }; durationMilliseconds: number }) => void;
+    const observation = new Promise<{ result: { scopesPolled: number; claimed: number }; durationMilliseconds: number }>((resolve) => {
+      resolveObservation = resolve;
+    });
+    const worker = new PipelineWorker(runtime, executor(async () => ({ output: {} })), new NullLogger(), options({
+      pollMilliseconds: 60_000,
+      onCycleCompleted: (result, durationMilliseconds) => {
+        resolveObservation({ result, durationMilliseconds });
+      },
+    }));
+
+    const loop = worker.run();
+    await expect(observation).resolves.toMatchObject({ result: { scopesPolled: 1, claimed: 0 } });
+    await worker.shutdown("test");
+    await loop;
+    expect((await observation).durationMilliseconds).toBeGreaterThanOrEqual(0);
+  });
+
   it("stops new claims, waits for the grace period, then aborts an active executor", async () => {
     const runtime = new FakeRuntime();
     let started!: () => void;

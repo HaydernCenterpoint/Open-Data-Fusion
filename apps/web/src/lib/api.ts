@@ -21,6 +21,9 @@ import type {
   PlatformPipelineRun,
   PlatformProject,
   PlatformQualityResult,
+  PlatformQualityRule,
+  PlatformRawIngestionRecord,
+  PlatformRawIngestionReplayResult,
   PlatformSearchResult,
   PlatformSource,
   PlatformSpatialLink,
@@ -248,12 +251,83 @@ export function listPlatformConnectors(context: PlatformContext, query: { limit?
   return listPlatformScoped<PlatformConnector>("connectors", context, query, signal);
 }
 
+export function createPlatformDataset(
+  context: PlatformContext,
+  body: { id: string; name: string; description?: string | null },
+): Promise<PlatformDataset> {
+  return request<PlatformDataset>("/api/v1/platform/datasets", {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function createPlatformSource(
+  context: PlatformContext,
+  body: { id: string; name: string; type: string; description?: string | null },
+): Promise<PlatformSource> {
+  return request<PlatformSource>("/api/v1/platform/sources", {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function createPlatformConnector(
+  context: PlatformContext,
+  body: { id: string; name: string; sourceId: string; type: string; configuration?: Record<string, unknown>; enabled?: boolean },
+): Promise<PlatformConnector> {
+  return request<PlatformConnector>("/api/v1/platform/connectors", {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
+export function listPlatformRawIngestion(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformRawIngestionRecord>("ingestion/raw", context, query, signal);
+}
+
+export function replayPlatformRawIngestion(
+  context: PlatformContext,
+  rawId: string,
+): Promise<PlatformRawIngestionReplayResult> {
+  return request<PlatformRawIngestionReplayResult>(`/api/v1/platform/ingestion/raw/${encodeURIComponent(rawId)}/replay`, {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify({}),
+  });
+}
+
 export function listPlatformDataModels(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
   return listPlatformScoped<PlatformDataModel>("data-models", context, query, signal);
 }
 
+export function createPlatformDataModelVersion(
+  context: PlatformContext,
+  modelId: string,
+  body: { name: string; schema: Record<string, unknown>; status?: "draft" | "published" },
+): Promise<PlatformDataModel> {
+  return request<PlatformDataModel>(`/api/v1/platform/data-models/${encodeURIComponent(modelId)}/versions`, {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
+}
+
 export function listPlatformPipelines(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
   return listPlatformScoped<PlatformPipeline>("pipelines", context, query, signal);
+}
+
+export function createPlatformPipeline(
+  context: PlatformContext,
+  body: { id: string; name: string; sourceId?: string | null; datasetId?: string | null; definition?: Record<string, unknown>; enabled?: boolean },
+): Promise<PlatformPipeline> {
+  return request<PlatformPipeline>("/api/v1/platform/pipelines", {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
 }
 
 export function listPlatformPipelineRuns(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
@@ -262,6 +336,28 @@ export function listPlatformPipelineRuns(context: PlatformContext, query: { limi
 
 export function listPlatformQualityResults(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
   return listPlatformScoped<PlatformQualityResult>("quality-results", context, query, signal);
+}
+
+export function listPlatformQualityRules(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {
+  return listPlatformScoped<PlatformQualityRule>("quality-rules", context, query, signal);
+}
+
+export function createPlatformQualityRule(
+  context: PlatformContext,
+  body: {
+    id: string;
+    name: string;
+    targetType?: string;
+    check: PlatformQualityRule["check"];
+    severity?: PlatformQualityRule["severity"];
+    enabled?: boolean;
+  },
+): Promise<PlatformQualityRule> {
+  return request<PlatformQualityRule>("/api/v1/platform/quality-rules", {
+    method: "POST",
+    headers: platformHeaders(context),
+    body: JSON.stringify(body),
+  });
 }
 
 export function listPlatformCandidates(context: PlatformContext, query: { limit?: number; cursor?: string } = {}, signal?: AbortSignal) {

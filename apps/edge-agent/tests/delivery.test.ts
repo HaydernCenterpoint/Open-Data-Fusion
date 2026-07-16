@@ -1,8 +1,24 @@
+import type { IncomingMessage } from "node:http";
+import { PassThrough } from "node:stream";
+import type { SecureContext } from "node:tls";
+
 import { describe, expect, it } from "vitest";
 
 import { ClientCredentialsTokenCache, type FetchLike } from "../src/auth.js";
 import { AuthenticatedIngestDelivery } from "../src/delivery.js";
+import {
+  createMutualTlsFetch,
+  MAX_MUTUAL_TLS_RESPONSE_BODY_BYTES,
+  readBoundedResponse,
+  type MutualTlsTransportOptions,
+} from "../src/mtls.js";
 import type { QueuedBatch } from "../src/types.js";
+
+function responseStream(headers: Record<string, string> = {}): PassThrough {
+  const response = new PassThrough();
+  Object.assign(response, { headers });
+  return response;
+}
 
 const queuedBatch: QueuedBatch = {
   id: "batch-1",
@@ -75,5 +91,99 @@ describe("authenticated ingest delivery", () => {
     expect(authorizations).toEqual(["Bearer token-1", "Bearer token-1", "Bearer token-2", "Bearer token-2"]);
     expect(idempotencyKeys).toEqual(Array(4).fill("edge:run-1"));
     expect(scopes).toEqual(Array(4).fill(["demo", "north-plant"]));
+  });
+
+  it("loads file-backed credentials into a verified mTLS delivery transport", async () => {
+    const files = new Map([
+      ["/run/secrets/client.crt", Buffer.from("client certificate")],
+      ["/run/secrets/client.key", Buffer.from("client private key")],
+      ["/run/secrets/ingest-ca.pem", Buffer.from("ingest CA")],
+    ]);
+    let transportOptions: MutualTlsTransportOptions | undefined;
+    let deliveryRequests = 0;
+    const transportFetch: FetchLike = async (input, init) => {
+      deliveryRequests += 1;
+      expect(String(input)).toBe("https://api.example.test/api/v1/ingest/bundle");
+      expect(init?.body).toBe("{}");
+      return new Response(null, { status: 201 });
+    };
+
+    const fetch = await createMutualTlsFetch(
+      {
+        certificateFile: "/run/secrets/client.crt",
+        privateKeyFile: "/run/secrets/client.key",
+        caFile: "/run/secrets/ingest-ca.pem",
+        serverName: "ingest.example.test",
+      },
+      {
+        readFile: async (path) => {
+          const value = files.get(path);
+          if (!value) throw new Error("missing test file");
+          return value;
+        },
+        createSecureContext: () => ({}) as SecureContext,
+        createTransport: (options) => {
+          transportOptions = options;
+          return transportFetch;
+        },
+      },
+    );
+
+    await fetch("https://api.example.test/api/v1/ingest/bundle", { method: "POST", body: "{}" });
+
+    expect(deliveryRequests).toBe(1);
+    expect(transportOptions).toEqual({
+      certificate: Buffer.from("client certificate"),
+      privateKey: Buffer.from("client private key"),
+      ca: Buffer.from("ingest CA"),
+      serverName: "ingest.example.test",
+      rejectUnauthorized: true,
+      minVersion: "TLSv1.2",
+    });
+  });
+
+  it("preserves bounded JSON delivery responses", async () => {
+    const response = responseStream({ "content-length": "11" });
+    const body = readBoundedResponse(response as unknown as IncomingMessage, 64);
+
+    response.end('{"ok":true}');
+
+    await expect(body).resolves.toEqual(Buffer.from('{"ok":true}'));
+  });
+
+  it("rejects and destroys mTLS responses exceeding the declared content length", async () => {
+    const response = responseStream({ "content-length": String(MAX_MUTUAL_TLS_RESPONSE_BODY_BYTES + 1) });
+
+    await expect(readBoundedResponse(response as unknown as IncomingMessage)).rejects.toThrow(
+      `exceeds ${MAX_MUTUAL_TLS_RESPONSE_BODY_BYTES} byte limit`,
+    );
+    expect(response.destroyed).toBe(true);
+  });
+
+  it("rejects and destroys streamed mTLS responses that exceed the byte limit", async () => {
+    const response = responseStream();
+    const body = readBoundedResponse(response as unknown as IncomingMessage, 4);
+
+    response.end("12345");
+
+    await expect(body).rejects.toThrow("exceeds 4 byte limit");
+    expect(response.destroyed).toBe(true);
+  });
+
+  it("fails closed when mTLS material is unreadable or invalid", async () => {
+    await expect(createMutualTlsFetch(
+      { certificateFile: "/missing/client.crt", privateKeyFile: "/missing/client.key" },
+      { readFile: async () => Buffer.alloc(0) },
+    )).rejects.toThrow("Unable to read a non-empty outbound mTLS client certificate file");
+
+    await expect(createMutualTlsFetch(
+      { certificateFile: "/run/secrets/client.crt", privateKeyFile: "/run/secrets/client.key" },
+      {
+        readFile: async () => Buffer.from("test material"),
+        createSecureContext: () => {
+          throw new Error("invalid test credentials");
+        },
+      },
+    )).rejects.toThrow("Unable to initialize outbound mTLS credentials");
   });
 });

@@ -20,6 +20,9 @@ describe("pipeline worker configuration", () => {
     expect(config.scopes).toEqual([{ tenantId: TENANT, projectId: PROJECT }]);
     expect(config.maxScopesPerPoll).toBe(1);
     expect(config.batchSize).toBe(20);
+    expect(config.metricsPort).toBe(9_466);
+    expect(config.healthFile).toBe("/tmp/odf-pipeline-health.json");
+    expect(config.healthMaximumAgeMilliseconds).toBe(30_000);
     expect(config.executor).toBe("builtin");
   });
 
@@ -33,8 +36,19 @@ describe("pipeline worker configuration", () => {
     [{ ODF_PIPELINE_CONCURRENCY: "0" }, "ODF_PIPELINE_CONCURRENCY"],
     [{ ODF_PIPELINE_MAX_SCOPES_PER_POLL: "2" }, "cannot exceed"],
     [{ ODF_PIPELINE_RETRY_BASE_MS: "200", ODF_PIPELINE_RETRY_MAX_MS: "100" }, "greater than or equal"],
+    [{ ODF_PIPELINE_METRICS_PORT: "0" }, "ODF_PIPELINE_METRICS_PORT"],
+    [{ ODF_PIPELINE_METRICS_PORT: "65536" }, "ODF_PIPELINE_METRICS_PORT"],
+    [{ ODF_PIPELINE_HEALTH_MAX_AGE_MS: "999" }, "ODF_PIPELINE_HEALTH_MAX_AGE_MS"],
+    [{ ODF_PIPELINE_HEALTH_MAX_AGE_MS: "300001" }, "ODF_PIPELINE_HEALTH_MAX_AGE_MS"],
+    [{ ODF_PIPELINE_POLL_MS: "20000", ODF_PIPELINE_HEALTH_MAX_AGE_MS: "30000" }, "at least twice"],
+    [{ ODF_PIPELINE_HEALTH_FILE: " " }, "ODF_PIPELINE_HEALTH_FILE"],
   ])("rejects out-of-bounds settings", (overrides, message) => {
     expect(() => loadPipelineWorkerConfig(environment(overrides))).toThrow(message);
+  });
+
+  it("scales the default heartbeat age to allow two idle polling intervals", () => {
+    const config = loadPipelineWorkerConfig(environment({ ODF_PIPELINE_POLL_MS: "60000" }));
+    expect(config.healthMaximumAgeMilliseconds).toBe(120_000);
   });
 
   it("rejects duplicate and malformed scopes", () => {
