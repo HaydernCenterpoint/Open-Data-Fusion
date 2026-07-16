@@ -195,17 +195,22 @@ services:
       ODF_PIPELINE_RETRY_BASE_MS: "${ODF_PIPELINE_RETRY_BASE_MS:-250}"
       ODF_PIPELINE_RETRY_MAX_MS: "${ODF_PIPELINE_RETRY_MAX_MS:-30000}"
       ODF_PIPELINE_SHUTDOWN_GRACE_MS: "${ODF_PIPELINE_SHUTDOWN_GRACE_MS:-30000}"
+      ODF_PIPELINE_METRICS_PORT: "9466"
+    expose:
+      - "9466"
     depends_on:
       migrate:
         condition: service_completed_successfully
       odf-postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9466/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      # A healthy response requires the first successful PostgreSQL polling
+      # cycle, rather than merely a live PID.
+      start_period: 45s
 
   edge-agent:
     profiles: ["edge"]

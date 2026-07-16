@@ -101,6 +101,22 @@ describe("source connectors", () => {
 
     source.query = async () => ({
       rows: [
+        { id: 9, timestamp: "2026-07-11T00:02:00Z", pressure: 100.5, quality: "good" },
+        { id: 11, timestamp: "2026-07-11T00:03:00Z", pressure: 100.6, quality: "good" },
+      ],
+    });
+    await expect(connector.poll("10")).rejects.toThrow("first checkpoint column 'id' must be strictly greater than the stored checkpoint");
+
+    source.query = async () => ({
+      rows: [
+        { id: 10, timestamp: "2026-07-11T00:02:00Z", pressure: 100.5, quality: "good" },
+        { id: 11, timestamp: "2026-07-11T00:03:00Z", pressure: 100.6, quality: "good" },
+      ],
+    });
+    await expect(connector.poll("10")).rejects.toThrow("first checkpoint column 'id' must be strictly greater than the stored checkpoint");
+
+    source.query = async () => ({
+      rows: [
         { id: 12, timestamp: "2026-07-11T00:02:00Z", pressure: 100.5, quality: "good" },
         { id: 11, timestamp: "2026-07-11T00:03:00Z", pressure: 100.6, quality: "good" },
       ],

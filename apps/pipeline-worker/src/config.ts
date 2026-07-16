@@ -17,6 +17,9 @@ export interface PipelineWorkerConfig {
   retryMaxMilliseconds: number;
   shutdownGraceMilliseconds: number;
   databasePoolSize: number;
+  metricsPort: number;
+  healthFile: string;
+  healthMaximumAgeMilliseconds: number;
   executor: "builtin" | "disabled";
 }
 
@@ -39,6 +42,14 @@ function boundedInteger(
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
   }
+  return value;
+}
+
+function optionalPath(environment: NodeJS.ProcessEnv, name: string, fallback: string): string {
+  const raw = environment[name];
+  if (raw === undefined) return fallback;
+  const value = raw.trim();
+  if (!value || value.includes("\0")) throw new Error(`${name} must be a non-empty path`);
   return value;
 }
 
@@ -89,6 +100,17 @@ export function loadPipelineWorkerConfig(environment: NodeJS.ProcessEnv = proces
   if (maxScopesPerPoll > scopes.length) {
     throw new Error("ODF_PIPELINE_MAX_SCOPES_PER_POLL cannot exceed the configured scope count");
   }
+  const pollMilliseconds = boundedInteger(environment, "ODF_PIPELINE_POLL_MS", 1_000, 10, 60_000);
+  const healthMaximumAgeMilliseconds = boundedInteger(
+    environment,
+    "ODF_PIPELINE_HEALTH_MAX_AGE_MS",
+    Math.max(30_000, pollMilliseconds * 2),
+    1_000,
+    300_000,
+  );
+  if (healthMaximumAgeMilliseconds < pollMilliseconds * 2) {
+    throw new Error("ODF_PIPELINE_HEALTH_MAX_AGE_MS must be at least twice ODF_PIPELINE_POLL_MS");
+  }
   return {
     postgresUrl: required(environment, "ODF_POSTGRES_URL"),
     actorId: (environment.ODF_PIPELINE_ACTOR_ID ?? "pipeline-worker").trim() || "pipeline-worker",
@@ -98,11 +120,14 @@ export function loadPipelineWorkerConfig(environment: NodeJS.ProcessEnv = proces
     concurrency: boundedInteger(environment, "ODF_PIPELINE_CONCURRENCY", 4, 1, 32),
     qualityRulePageSize: boundedInteger(environment, "ODF_PIPELINE_QUALITY_RULE_PAGE_SIZE", 100, 1, 200),
     maxQualityRules: boundedInteger(environment, "ODF_PIPELINE_MAX_QUALITY_RULES", 1_000, 1, 10_000),
-    pollMilliseconds: boundedInteger(environment, "ODF_PIPELINE_POLL_MS", 1_000, 10, 60_000),
+    pollMilliseconds,
     retryBaseMilliseconds,
     retryMaxMilliseconds,
     shutdownGraceMilliseconds: boundedInteger(environment, "ODF_PIPELINE_SHUTDOWN_GRACE_MS", 30_000, 100, 300_000),
     databasePoolSize: boundedInteger(environment, "ODF_PIPELINE_DB_POOL_SIZE", 10, 1, 50),
+    metricsPort: boundedInteger(environment, "ODF_PIPELINE_METRICS_PORT", 9_466, 1, 65_535),
+    healthFile: optionalPath(environment, "ODF_PIPELINE_HEALTH_FILE", "/tmp/odf-pipeline-health.json"),
+    healthMaximumAgeMilliseconds,
     executor,
   };
 }

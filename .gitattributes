@@ -1,0 +1,7 @@
+# Shell entrypoints are bind-mounted into Linux containers and must retain LF.
+*.sh text eol=lf
+
+# PostgreSQL migrations and their release manifest are also bind-mounted into
+# Linux containers; canonical line endings preserve their checksums.
+infra/postgres/migrations/*.sql text eol=lf
+infra/postgres/migrations/SHA256SUMS text eol=lf

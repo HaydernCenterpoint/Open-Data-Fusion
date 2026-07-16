@@ -4,6 +4,14 @@ import type { OutboxPumpResult } from "./outbox.js";
 import type { OutboxOperationalSnapshot } from "./types.js";
 
 const PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
+const OBSERVABILITY_PROBE_HEADER = "x-odf-observability-probe";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+type ObservabilityProbe = (probeId: string) => void;
+
+function observabilityProbeId(value: string | string[] | undefined): string | null {
+  return typeof value === "string" && UUID.test(value) ? value : null;
+}
 
 export class OutboxTelemetry {
   private cycles = 0;
@@ -78,7 +86,11 @@ export class OutboxTelemetry {
   }
 }
 
-export async function startOutboxTelemetryServer(port: number, telemetry: OutboxTelemetry): Promise<Server> {
+export async function startOutboxTelemetryServer(
+  port: number,
+  telemetry: OutboxTelemetry,
+  onObservabilityProbe?: ObservabilityProbe,
+): Promise<Server> {
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("Outbox metrics port must be between 1 and 65535");
   const server = createServer((request, response) => {
     if (request.method === "GET" && request.url === "/metrics") {
@@ -89,6 +101,14 @@ export async function startOutboxTelemetryServer(port: number, telemetry: Outbox
       return;
     }
     if (request.method === "GET" && request.url === "/healthz") {
+      const probeId = observabilityProbeId(request.headers[OBSERVABILITY_PROBE_HEADER]);
+      if (probeId) {
+        try {
+          onObservabilityProbe?.(probeId);
+        } catch {
+          // A telemetry probe must not make the worker's health check fail.
+        }
+      }
       response.statusCode = 200;
       response.setHeader("content-type", "application/json; charset=utf-8");
       response.end('{"status":"ok"}\n');

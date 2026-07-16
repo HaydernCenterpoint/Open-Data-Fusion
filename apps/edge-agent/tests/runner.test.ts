@@ -1,11 +1,20 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DeliveryClient } from "../src/delivery.js";
 import { EdgeQueue } from "../src/queue.js";
 import { EdgeAgentRunner, type EdgeAgentRunnerOptions, type ManagedConnector } from "../src/runner.js";
 import type { ConnectorBatch, EdgeConnector, IngestBundle } from "../src/types.js";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
 
 const runnerOptions: EdgeAgentRunnerOptions = {
   archiveDirectory: "raw",
@@ -114,6 +123,72 @@ describe("edge-agent runner", () => {
     expect(queue.pendingCount()).toBe(0);
     expect(attempts).toBe(2);
     queue.close();
+  });
+
+  it("redelivers a disk-backed queued bundle idempotently after restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "odf-edge-restart-"));
+    temporaryDirectories.push(directory);
+    const queuePath = join(directory, "queue.db");
+    const restartOptions: EdgeAgentRunnerOptions = {
+      ...runnerOptions,
+      archiveDirectory: join(directory, "raw"),
+      shutdownDrainTimeoutMs: 0,
+      retry: { baseDelayMs: 0, maxDelayMs: 0, jitterRatio: 0 },
+    };
+    const acceptedKeys = new Set<string>();
+    const deliveryKeys: string[] = [];
+    const initialQueue = new EdgeQueue(queuePath);
+    const initialRunner = new EdgeAgentRunner(
+      restartOptions,
+      [managedConnector({ async poll() { return batch; }, async close() {} })],
+      initialQueue,
+      {
+        async deliver(queued) {
+          deliveryKeys.push(queued.idempotencyKey);
+          acceptedKeys.add(queued.idempotencyKey);
+          throw new Error("connection closed after the remote ingest accepted the batch");
+        },
+      },
+      { createId: () => "first-queue-row", logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } },
+    );
+    let restartedRunner: EdgeAgentRunner | undefined;
+
+    try {
+      expect(await initialRunner.pollConnector("csv-pilot")).toBe(true);
+      expect(await initialRunner.drainOne()).toBe(true);
+      expect(initialQueue.pendingCount()).toBe(1);
+      await initialRunner.shutdown();
+
+      const restartedQueue = new EdgeQueue(queuePath);
+      let replayedBundle: IngestBundle | undefined;
+      let duplicateAcknowledgements = 0;
+      restartedRunner = new EdgeAgentRunner(
+        restartOptions,
+        [managedConnector({ async poll() { return null; }, async close() {} })],
+        restartedQueue,
+        {
+          async deliver(queued) {
+            deliveryKeys.push(queued.idempotencyKey);
+            replayedBundle = queued.bundle;
+            if (acceptedKeys.has(queued.idempotencyKey)) duplicateAcknowledgements += 1;
+            else acceptedKeys.add(queued.idempotencyKey);
+          },
+        },
+        { logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } },
+      );
+
+      expect(restartedQueue.checkpoint("csv-pilot")).toBe("row:1");
+      expect(await restartedRunner.drainOne()).toBe(true);
+      expect(restartedQueue.pendingCount()).toBe(0);
+      expect(deliveryKeys).toHaveLength(2);
+      expect(deliveryKeys[1]).toBe(deliveryKeys[0]);
+      expect(acceptedKeys.size).toBe(1);
+      expect(duplicateAcknowledgements).toBe(1);
+      expect(replayedBundle?.dataPoints).toEqual(batch.dataPoints);
+    } finally {
+      await restartedRunner?.shutdown();
+      await initialRunner.shutdown();
+    }
   });
 
   it("closes source handles and drains queued work during graceful shutdown", async () => {

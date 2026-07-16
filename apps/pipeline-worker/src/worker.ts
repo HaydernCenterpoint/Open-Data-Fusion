@@ -25,6 +25,7 @@ export interface PipelineWorkerOptions {
   retryBaseMilliseconds: number;
   retryMaxMilliseconds: number;
   shutdownGraceMilliseconds: number;
+  onCycleCompleted?: (result: PipelinePollResult, durationMilliseconds: number) => void | Promise<void>;
 }
 
 export interface PipelinePollResult {
@@ -192,6 +193,7 @@ export class PipelineWorker {
       executor: this.executor.name,
     });
     while (!this.stopping) {
+      const cycleStartedAt = this.now();
       const cycle = this.runOnce();
       this.activeCycle = cycle;
       let result: PipelinePollResult;
@@ -202,6 +204,11 @@ export class PipelineWorker {
         this.logger.log("error", "poll_failed", { error });
       } finally {
         if (this.activeCycle === cycle) this.activeCycle = null;
+      }
+      try {
+        await this.options.onCycleCompleted?.(result, elapsed(cycleStartedAt, this.now()));
+      } catch (error) {
+        this.logger.log("error", "cycle_observability_failed", { error });
       }
       if (this.stopping) break;
       if (result.pollErrors > 0) consecutiveFailures += 1;

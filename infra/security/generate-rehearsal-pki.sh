@@ -76,6 +76,8 @@ Rehearsal PKI created for seven days. Export:
 ODF_INGRESS_TLS_CERT_FILE=${absolute_directory}/server.crt
 ODF_INGRESS_TLS_KEY_FILE=${absolute_directory}/server.key
 ODF_INGRESS_CLIENT_CA_FILE=${absolute_directory}/ca.crt
+ODF_INGRESS_CLIENT_CERT_FILE=${absolute_directory}/client.crt
+ODF_INGRESS_CLIENT_KEY_FILE=${absolute_directory}/client.key
 
 Test clients with:
   --cert ${absolute_directory}/client.crt --key ${absolute_directory}/client.key --cacert ${absolute_directory}/ca.crt

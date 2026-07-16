@@ -25,6 +25,30 @@ services:
       api:
         condition: service_healthy
 
+  # The base service retains its `edge` profile, so this deterministic fixture
+  # is started only when that profile is explicitly selected.
+  edge-agent:
+    restart: "no"
+    environment:
+      ODF_EDGE_CLIENT_ID: open-data-fusion-connector
+      ODF_EDGE_CLIENT_SECRET: "${ODF_CONNECTOR_CLIENT_SECRET:?Set ODF_CONNECTOR_CLIENT_SECRET for the local/CI edge mTLS rehearsal}"
+    volumes:
+      - ./infra/security/rehearsal/edge-agent-mtls.json:/etc/open-data-fusion/edge-agent.json:ro
+      - ./infra/security/rehearsal/edge-agent-mtls.csv:/workspace/rehearsal/edge-agent-mtls.csv:ro
+      - odf-edge-mtls-rehearsal-data:/workspace/data/edge
+    secrets:
+      - odf_edge_ingest_client_cert
+      - odf_edge_ingest_client_key
+      - odf_ingress_client_ca
+    depends_on:
+      api:
+        condition: service_healthy
+      odf-mtls-gateway:
+        condition: service_started
+
+volumes:
+  odf-edge-mtls-rehearsal-data:
+
 secrets:
   odf_ingress_tls_cert:
     file: "${ODF_INGRESS_TLS_CERT_FILE:?Set ODF_INGRESS_TLS_CERT_FILE}"
@@ -32,3 +56,7 @@ secrets:
     file: "${ODF_INGRESS_TLS_KEY_FILE:?Set ODF_INGRESS_TLS_KEY_FILE}"
   odf_ingress_client_ca:
     file: "${ODF_INGRESS_CLIENT_CA_FILE:?Set ODF_INGRESS_CLIENT_CA_FILE}"
+  odf_edge_ingest_client_cert:
+    file: "${ODF_INGRESS_CLIENT_CERT_FILE:?Set ODF_INGRESS_CLIENT_CERT_FILE}"
+  odf_edge_ingest_client_key:
+    file: "${ODF_INGRESS_CLIENT_KEY_FILE:?Set ODF_INGRESS_CLIENT_KEY_FILE}"

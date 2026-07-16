@@ -6,6 +6,8 @@ on:
     paths:
       - "apps/api/**"
       - "apps/outbox-worker/**"
+      - "apps/pipeline-worker/**"
+      - "apps/edge-agent/**"
       - "packages/contracts/**"
       - "packages/platform-core/**"
       - "packages/postgres-runtime/**"
@@ -13,6 +15,8 @@ on:
       - "docker-compose*.yml"
       - "Dockerfile.api"
       - "Dockerfile.outbox"
+      - "Dockerfile.pipeline"
+      - "Dockerfile.edge"
       - "package.json"
       - "package-lock.json"
       - "tsconfig.base.json"
@@ -21,6 +25,8 @@ on:
     paths:
       - "apps/api/**"
       - "apps/outbox-worker/**"
+      - "apps/pipeline-worker/**"
+      - "apps/edge-agent/**"
       - "packages/contracts/**"
       - "packages/platform-core/**"
       - "packages/postgres-runtime/**"
@@ -28,6 +34,8 @@ on:
       - "docker-compose*.yml"
       - "Dockerfile.api"
       - "Dockerfile.outbox"
+      - "Dockerfile.pipeline"
+      - "Dockerfile.edge"
       - "package.json"
       - "package-lock.json"
       - "tsconfig.base.json"
@@ -39,7 +47,7 @@ permissions:
 jobs:
   canvas-outbox-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       # These are disposable CI-only credentials. Deployment profiles require
       # their own secrets and have no fallback values in Compose.
@@ -56,6 +64,7 @@ jobs:
       ODF_CONNECTOR_CLIENT_SECRET: ci-only-connector-client-secret
       ODF_CI_API_PASSWORD: ci-only-api-password
       ODF_CI_OUTBOX_PASSWORD: ci-only-outbox-password
+      ODF_CI_PIPELINE_PASSWORD: ci-only-pipeline-password
       ODF_CI_TENANT_PROVISION_PASSWORD: ci-only-tenant-provision-password
       ODF_MINIO_ROOT_USER: ci-minio-root
       ODF_MINIO_ROOT_PASSWORD: ci-only-minio-root-password
@@ -64,6 +73,9 @@ jobs:
       ODF_MINIO_KMS_SECRET_KEY: odf-ci-object-store:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       ODF_API_POSTGRES_URL: postgresql://odf_ci_api:ci-only-api-password@odf-postgres:5432/odf
       ODF_OUTBOX_POSTGRES_URL: postgresql://odf_ci_outbox:ci-only-outbox-password@odf-postgres:5432/odf
+      ODF_PIPELINE_POSTGRES_URL: postgresql://odf_ci_pipeline:ci-only-pipeline-password@odf-postgres:5432/odf
+      ODF_PIPELINE_SCOPES: '[{"tenantId":"11111111-1111-4111-8111-111111111111","projectId":"22222222-2222-4222-8222-222222222222"}]'
+      ODF_PIPELINE_EXECUTOR: builtin
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
@@ -73,7 +85,7 @@ jobs:
       - name: Validate production-like Compose shape
         run: |
           python3 infra/postgres/scripts/validate_static.py
-          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like --profile workers --profile observability config --quiet
 
       - name: Start PostgreSQL and Redis
         run: >-
@@ -252,6 +264,7 @@ jobs:
             psql --no-psqlrc --set=ON_ERROR_STOP=1 \
             --set=api_password="$ODF_CI_API_PASSWORD" \
             --set=outbox_password="$ODF_CI_OUTBOX_PASSWORD" \
+            --set=pipeline_password="$ODF_CI_PIPELINE_PASSWORD" \
             --username "$ODF_POSTGRES_ADMIN_USER" --dbname "$ODF_POSTGRES_DB" <<'SQL'
           DO $roles$
           BEGIN
@@ -261,12 +274,17 @@ jobs:
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'odf_ci_outbox') THEN
               CREATE ROLE odf_ci_outbox LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
             END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'odf_ci_pipeline') THEN
+              CREATE ROLE odf_ci_pipeline LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
           END
           $roles$;
           ALTER ROLE odf_ci_api PASSWORD :'api_password';
           ALTER ROLE odf_ci_outbox PASSWORD :'outbox_password';
+          ALTER ROLE odf_ci_pipeline PASSWORD :'pipeline_password';
           GRANT odf_app TO odf_ci_api;
           GRANT odf_outbox_publisher TO odf_ci_outbox;
+          GRANT odf_app TO odf_ci_pipeline;
 
           INSERT INTO odf.tenants (tenant_id, slug, name)
           VALUES ('11111111-1111-4111-8111-111111111111', 'ci-tenant', 'CI tenant');
@@ -292,7 +310,8 @@ jobs:
           );
           INSERT INTO odf.source_connections (
             source_connection_id, tenant_id, project_id, external_id, name, connector_kind, state, endpoint
-          ) VALUES (
+          ) VALUES
+          (
             '77777777-7777-4777-8777-777777777777',
             '11111111-1111-4111-8111-111111111111',
             '22222222-2222-4222-8222-222222222222',
@@ -301,31 +320,83 @@ jobs:
             'opcua',
             'ready',
             'opc.tcp://ci-edge.invalid:4840'
+          ),
+          (
+            '88888888-8888-4888-8888-888888888887',
+            '11111111-1111-4111-8111-111111111111',
+            '22222222-2222-4222-8222-222222222222',
+            'ci-edge-mtls',
+            'CI edge mTLS CSV source',
+            'csv',
+            'ready',
+            'file:///workspace/rehearsal/edge-agent-mtls.csv'
           );
           SQL
+
+      - name: Start Collector and Prometheus for the observability rehearsal
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml
+          --profile production-like --profile workers --profile observability up -d --wait otel-collector prometheus
 
       - name: Start identity, API replicas, and outbox publisher
         run: >-
           docker compose -f docker-compose.yml -f docker-compose.production-like.yml
-          --profile production-like up -d --build --wait keycloak api api-replica outbox-worker
+          --profile production-like --profile workers up -d --build --wait keycloak api api-replica outbox-worker pipeline-worker
 
       - name: Prove PostgreSQL industrial ingest plus Canvas outbox, Redis, and replica SSE
         run: bash infra/ci/production-like-smoke.sh
 
+      - name: Rehearse Redis write outage, dead-letter recovery, and two-worker lease drain
+        env:
+          ODF_OUTBOX_BROKER_REHEARSAL_CONFIRM: local-production-like
+        run: bash infra/ci/outbox-broker-rehearsal.sh
+
+      - name: Prove production-like trace export, durable buffer, and metric scraping
+        env:
+          ODF_OBSERVABILITY_REQUIRE_PIPELINE: "true"
+        run: bash infra/ci/production-like-observability-smoke.sh
+
+      - name: Note skipped edge mTLS rehearsal when no approved image is configured
+        if: ${{ vars.ODF_APPROVED_ENVOY_IMAGE == '' }}
+        run: echo "Skipping dynamic edge mTLS rehearsal because vars.ODF_APPROVED_ENVOY_IMAGE is not configured."
+
+      - name: Rehearse edge-agent mTLS delivery with an approved Envoy image
+        if: ${{ vars.ODF_APPROVED_ENVOY_IMAGE != '' }}
+        env:
+          ODF_ENVOY_IMAGE: ${{ vars.ODF_APPROVED_ENVOY_IMAGE }}
+        run: |
+          pki_directory="$RUNNER_TEMP/odf-edge-mtls-pki"
+          trap 'rm -rf "$pki_directory"' EXIT
+          bash infra/security/generate-rehearsal-pki.sh "$pki_directory"
+          export ODF_INGRESS_TLS_CERT_FILE="$pki_directory/server.crt"
+          export ODF_INGRESS_TLS_KEY_FILE="$pki_directory/server.key"
+          export ODF_INGRESS_CLIENT_CA_FILE="$pki_directory/ca.crt"
+          export ODF_INGRESS_CLIENT_CERT_FILE="$pki_directory/client.crt"
+          export ODF_INGRESS_CLIENT_KEY_FILE="$pki_directory/client.key"
+          docker compose -f docker-compose.yml \
+            -f docker-compose.production-like.yml \
+            -f docker-compose.security-rehearsal.yml \
+            --profile production-like --profile workers --profile security-rehearsal --profile edge \
+            up -d --build --wait odf-mtls-gateway edge-agent
+          export ODF_SECURITY_INGRESS_SMOKE_CONFIRM=local-security-ingress
+          bash infra/ci/security-ingress-smoke.sh
+          export ODF_EDGE_MTLS_REHEARSAL_CONFIRM=local-ci-edge-mtls-rehearsal
+          bash infra/ci/edge-agent-mtls-rehearsal.sh
+
       - name: Rehearse quiesced PostgreSQL backup and isolated restore
         run: |
           docker compose -f docker-compose.yml -f docker-compose.production-like.yml \
-            --profile production-like stop api api-replica outbox-worker
+            --profile production-like --profile workers stop api api-replica outbox-worker pipeline-worker
           bash infra/ci/postgres-backup-restore-rehearsal.sh
 
       - name: Show integration service logs after failure
         if: failure()
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like ps || true
-          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like logs --no-color --tail=200 api api-replica outbox-worker keycloak odf-minio minio-bootstrap odf-postgres odf-redis || true
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like --profile observability ps || true
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like --profile workers --profile observability logs --no-color --tail=200 api api-replica outbox-worker pipeline-worker keycloak odf-minio minio-bootstrap odf-postgres odf-redis otel-collector prometheus || true
 
       - name: Remove production-like integration resources
         if: always()
         run: >-
           docker compose -f docker-compose.yml -f docker-compose.production-like.yml
-          --profile production-like down --volumes --remove-orphans
+          --profile production-like --profile workers --profile observability down --volumes --remove-orphans

@@ -7,11 +7,13 @@ import { CsvConnector } from "./connectors/csv.js";
 import { NodeOpcUaReader, OpcUaConnector, type NodeOpcUaReaderOptions } from "./connectors/opcua.js";
 import { PgPoolSource, PostgresConnector, type PgPoolSourceOptions } from "./connectors/postgres.js";
 import { AuthenticatedIngestDelivery } from "./delivery.js";
+import { createMutualTlsFetch, type MutualTlsFetchFactory } from "./mtls.js";
 import { EdgeQueue } from "./queue.js";
 import { EdgeAgentRunner, type EdgeAgentLogger, type ManagedConnector } from "./runner.js";
 
 export interface EdgeAgentRuntimeDependencies {
   fetch?: FetchLike;
+  createMutualTlsFetch?: MutualTlsFetchFactory;
   logger?: EdgeAgentLogger;
 }
 
@@ -87,6 +89,9 @@ export async function createEdgeAgentRuntime(
   environment: NodeJS.ProcessEnv = process.env,
   dependencies: EdgeAgentRuntimeDependencies = {},
 ): Promise<EdgeAgentRunner> {
+  const deliveryFetch = configuration.delivery.mtls
+    ? await (dependencies.createMutualTlsFetch ?? createMutualTlsFetch)(configuration.delivery.mtls)
+    : dependencies.fetch;
   const token = configuration.delivery.token;
   const tokenCache = new ClientCredentialsTokenCache(
     {
@@ -108,7 +113,8 @@ export async function createEdgeAgentRuntime(
       requestTimeoutMs: configuration.delivery.requestTimeoutMs,
     },
     tokenCache,
-    dependencies.fetch ? { fetch: dependencies.fetch } : {},
+    // OAuth token requests retain the normal fetch path; mTLS is for the ingest listener only.
+    deliveryFetch ? { fetch: deliveryFetch } : {},
   );
   const connectors = await createConnectors(configuration, environment);
   return new EdgeAgentRunner(
