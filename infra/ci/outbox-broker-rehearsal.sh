@@ -661,7 +661,7 @@ SELECT (
       AND attempt_count = 0
       AND last_error IS NULL
   ) = 1
-)::text
+)
 FROM fixture;
 "
   wait_for_postgres_value "$concurrency_lease_state_query" "t" "two distinct active aggregate leases with blocked successors"
@@ -697,7 +697,7 @@ SELECT (
     WHERE event_id = ${concurrency_stale_head_event_id}
       AND attempt_count = $((CONCURRENCY_STALE_ATTEMPT_COUNT + 1))
   ) = 1
-)::text
+)
 FROM fixture;
 "
   wait_for_postgres_value "$concurrency_published_state_query" "t" "two-worker ordered drain and exactly one expired-lease takeover"
@@ -1083,7 +1083,7 @@ SELECT (
           AND attempt_count = 0
    FROM odf.outbox_events
    WHERE event_id = ${second_event_id})
-)::text;
+);
 "
 wait_for_postgres_value "$dead_letter_state_query" "t" "terminal dead-letter state and blocked successor"
 
@@ -1114,7 +1114,7 @@ SELECT (
   AND lease_owner IS NULL
   AND lease_expires_at IS NULL
   AND last_error LIKE 'requeued: %; previous: dead-letter:%'
-)::text
+)
 FROM odf.outbox_events
 WHERE event_id = ${first_event_id};
 "
@@ -1139,7 +1139,7 @@ SELECT (
           AND last_error IS NULL
    FROM odf.outbox_events
    WHERE event_id = ${second_event_id})
-)::text;
+);
 "
 wait_for_postgres_value "$published_state_query" "t" "recovered event and successor publication"
 

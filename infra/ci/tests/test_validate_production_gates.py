@@ -85,5 +85,16 @@ class ComposeVolumeSyntaxTests(unittest.TestCase):
         )
 
 
+class OutboxBrokerRehearsalTests(unittest.TestCase):
+    def test_boolean_wait_queries_preserve_postgres_boolean_output(self) -> None:
+        rehearsal = (VALIDATOR_PATH.parents[2] / "infra/ci/outbox-broker-rehearsal.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            ")::text",
+            rehearsal,
+            "wait_for_postgres_value compares PostgreSQL boolean output to 't', not its text cast 'true'",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
