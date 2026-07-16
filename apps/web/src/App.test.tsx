@@ -1214,6 +1214,36 @@ describe("Open Data Fusion workspace", () => {
     });
   });
 
+  it("opens the full Data Explorer from an unselected global query", async () => {
+    render(<App />);
+    openExplorer();
+
+    const search = screen.getByRole("combobox", { name: "Search project data" });
+    fireEvent.change(search, { target: { value: "telemetry" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    expect(await screen.findByRole("heading", { name: "Data Explorer" })).toBeInTheDocument();
+    expect(window.location.search).toContain("view=explorer");
+    expect(window.location.search).toContain("q=telemetry");
+    fireEvent.click(await screen.findByRole("option", { name: /Normalize telemetry/ }));
+    expect(await screen.findByRole("button", { name: "Open Pipelines" })).toBeInTheDocument();
+  });
+
+  it("restores a bookmarked Data Explorer selection and opens its workspace", async () => {
+    window.history.replaceState({}, "", "/?view=explorer&q=telemetry&resultType=pipeline&result=normalize-telemetry&tenant=demo&project=north-plant");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Data Explorer" })).toBeInTheDocument();
+    const preview = await screen.findByRole("complementary", { name: "Result preview" });
+    expect(await within(preview).findByRole("heading", { name: "Normalize telemetry" })).toBeInTheDocument();
+
+    fireEvent.click(within(preview).getByRole("button", { name: "Open Pipelines" }));
+
+    expect(await screen.findByRole("heading", { name: "Configure processing", level: 2 })).toBeInTheDocument();
+    expect(window.location.search).not.toContain("q=telemetry");
+    expect(window.location.search).not.toContain("result=normalize-telemetry");
+  });
+
   it("renders API-backed Context and Audit navigation", async () => {
     render(<App />);
     openExplorer();

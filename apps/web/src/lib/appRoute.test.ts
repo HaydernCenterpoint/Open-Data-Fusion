@@ -11,6 +11,23 @@ describe("app route", () => {
     });
   });
 
+  it("reads a bookmarkable Explorer search with a selected result", () => {
+    expect(readAppRoute("https://example.test/?view=explorer&q=pump&resultType=pipeline&result=normalize-telemetry&tenant=demo&project=north-plant")).toEqual({
+      view: "explorer",
+      searchQuery: "pump",
+      resultType: "pipeline",
+      resultId: "normalize-telemetry",
+      tenantId: "demo",
+      projectId: "north-plant",
+    });
+  });
+
+  it("drops orphaned Explorer result state", () => {
+    expect(readAppRoute("https://example.test/?view=explorer&resultType=pipeline&result=normalize-telemetry")).toEqual({
+      view: "explorer",
+    });
+  });
+
   it("reads a project overview route without an asset", () => {
     expect(readAppRoute("https://example.test/?view=overview&asset=P-101&tenant=demo&project=north-plant")).toEqual({
       view: "overview",
@@ -35,5 +52,14 @@ describe("app route", () => {
     expect(appRouteHref("https://example.test/?view=explorer&asset=P-101", {
       view: "audit",
     })).toBe("/?view=audit");
+  });
+
+  it("serializes a search route without stale asset parameters", () => {
+    expect(appRouteHref("https://example.test/?view=explorer&asset=P-101", {
+      view: "explorer",
+      searchQuery: "pump",
+      resultType: "pipeline",
+      resultId: "normalize-telemetry",
+    })).toBe("/?view=explorer&q=pump&resultType=pipeline&result=normalize-telemetry");
   });
 });

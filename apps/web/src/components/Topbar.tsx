@@ -10,6 +10,7 @@ interface TopbarProps {
   query: string;
   onQueryChange: (query: string) => void;
   onResultSelect: (result: PlatformSearchResult) => void;
+  onSearchSubmit: (query: string) => void;
   apiOnline: boolean | null;
   platformContext: PlatformContext | null;
   tenants: PlatformTenant[];
@@ -25,7 +26,7 @@ interface TopbarProps {
 
 type SearchState = "idle" | "loading" | "ready" | "degraded" | "unauthorized" | "forbidden" | "error";
 
-export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platformContext, tenants, projects, selectedTenantId, platformState, activeSection, onTenantChange, onProjectChange, onRetry, onSectionChange }: TopbarProps) {
+export function Topbar({ query, onQueryChange, onResultSelect, onSearchSubmit, apiOnline, platformContext, tenants, projects, selectedTenantId, platformState, activeSection, onTenantChange, onProjectChange, onRetry, onSectionChange }: TopbarProps) {
   const deferredQuery = useDeferredValue(query.trim());
   const [matches, setMatches] = useState<PlatformSearchResult[]>([]);
   const [searchState, setSearchState] = useState<SearchState>("idle");
@@ -166,6 +167,12 @@ export function Topbar({ query, onQueryChange, onResultSelect, apiOnline, platfo
     if (event.key === "Enter" && resultsVisible && hasNavigableResults && activeIndex >= 0 && activeIndex < matches.length) {
       event.preventDefault();
       selectResult(matches[activeIndex]);
+      return;
+    }
+    if (event.key === "Enter" && query.trim()) {
+      event.preventDefault();
+      closeResults();
+      onSearchSubmit(query.trim());
       return;
     }
     if (event.key === "Escape" && resultsVisible) {
