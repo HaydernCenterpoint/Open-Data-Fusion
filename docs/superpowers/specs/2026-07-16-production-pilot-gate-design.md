@@ -1,6 +1,6 @@
 # Production Pilot Gate Design
 
-**Date:** 2026-07-16  
+**Date:** 2026-07-16
 **Status:** Approved direction; awaiting review of this written specification
 
 ## Decision
@@ -142,10 +142,12 @@ Each invocation receives a unique `pilotRunId` and records:
 - connector schema fingerprint and checkpoint transition hashes;
 - reviewer identity, review time, and final go/no-go decision.
 
-The manifest has append-only run states:
+The manifest has append-only run states and only these transitions:
 
 ```text
-created -> preflight_passed -> executing -> passed | failed
+created -> preflight_passed | failed
+preflight_passed -> executing | failed
+executing -> passed | failed
 ```
 
 A failed run is never edited into a passing run. A retry creates a new
@@ -176,7 +178,8 @@ but still produce a final no-go result.
 - Verify the real pilot project and the synthetic isolation project are active,
   membership-scoped, and backed by forced PostgreSQL RLS.
 - Verify the deployment has enough capacity for the approved backfill and at
-  least twice the measured peak steady-state source rate.
+  least twice the measured peak steady-state source rate, or twice the
+  approved CSV backfill throughput when a source has no steady-state rate.
 
 ### Gate 1: Security and isolation
 
@@ -225,6 +228,9 @@ but still produce a final no-go result.
   pass.
 - Measure API availability of at least 99.9% over a 30-day read-only pilot
   window and p95 request latency below one second.
+- Start the 30-day measurement only after fault injection and shakedown have
+  completed. Once it starts, all user-impacting unavailability counts,
+  including scheduled maintenance; there are no post-hoc exclusions.
 - Keep the oldest deliverable outbox event below five minutes, unresolved
   dead-letter rows at zero, Redis continuously ready, and pipeline polling
   within its configured heartbeat window.
@@ -242,8 +248,12 @@ approval for its mapped schema fingerprint.
 For every connector:
 
 - perform an approved historical backfill and steady-state collection;
-- sustain at least twice the measured peak steady-state source rate for one
-  hour without data loss, unsafe source load, or unbounded queue growth;
+- for PostgreSQL/JDBC and OPC UA, sustain at least twice the measured peak
+  steady-state source rate for one hour without data loss, unsafe source load,
+  or unbounded queue growth;
+- for CSV, process the approved backfill at twice its required average
+  throughput, or at the highest source-safe rate when twice the target would
+  violate the design partner's source-safety limit;
 - restart the edge agent and API during collection and prove checkpoint resume;
 - interrupt the network, restore it, and prove bounded retry and ordered drain;
 - rotate credentials without resetting checkpoints or exposing secret values;
@@ -265,7 +275,10 @@ window, entity counts, time-series counts, average record size, and retention
 needs. The certification target is:
 
 - the complete approved backfill within the agreed maintenance window;
-- two times the measured peak steady-state rate for one continuous hour;
+- for streaming and incremental sources, two times the measured peak
+  steady-state rate for one continuous hour;
+- for CSV, twice the required average backfill throughput or the documented
+  source-safety ceiling, whichever is lower;
 - no unbounded queue, memory, database, or object-store growth;
 - no source-side safety or availability impact; and
 - service objectives remaining within their thresholds during the test.
@@ -287,7 +300,7 @@ pilot run; it may not rewrite the failed evidence.
   new migration rather than editing history.
 - Restore into an isolated target first. Application traffic moves only after
   RLS, object reconciliation, representative reads, and an explicit cutover
-  decision pass.
+  decision have passed.
 - Cleanup may remove only resources carrying the current reserved synthetic
   correlation prefix. Any ambiguous resource is retained for review.
 
@@ -374,7 +387,7 @@ a new reviewed certification manifest and, when material, a separate design.
    and durable telemetry are exercised as one deployment.
 5. Cross-tenant, unauthenticated, invalid-mTLS, direct-dependency, and
    prohibited-route attempts are denied and recorded without leaking secrets.
-6. Database plus object recovery meets measured RPO <= 15 minutes and RTO <= 4
+6. Database plus object recovery meets measured RPO ≤ 15 minutes and RTO ≤ 4
    hours, with RLS and representative product reads verified after restore.
 7. Broker, dead-letter, lease, replica, worker, retry, and rolling-release
    scenarios recover without authoritative-store fallback, unexplained loss,
@@ -382,8 +395,8 @@ a new reviewed certification manifest and, when material, a separate design.
 8. API availability is at least 99.9% over the 30-day pilot window, p95 latency
    is below one second, outbox freshness remains below five minutes, unresolved
    dead letters remain zero, and required worker/broker health stays ready.
-9. CSV, PostgreSQL/JDBC, and OPC UA each pass approved backfill, two-times-peak
-   sustained collection, restart/resume, network interruption, credential
+9. CSV, PostgreSQL/JDBC, and OPC UA each pass the applicable approved backfill
+   or sustained-rate target, restart/resume, network interruption, credential
    rotation, schema evolution, and source-to-target reconciliation.
 10. An independent reviewer can reproduce the go/no-go decision from retained
     evidence without access to raw source data or deployment credentials.
