@@ -5,3 +5,7 @@
 # Linux containers; canonical line endings preserve their checksums.
 infra/postgres/migrations/*.sql text eol=lf
 infra/postgres/migrations/SHA256SUMS text eol=lf
+
+# Rehearsal fixtures are bind-mounted into Linux containers and validated
+# byte-for-byte by the edge-agent configuration tests.
+infra/security/rehearsal/*.csv text eol=lf
