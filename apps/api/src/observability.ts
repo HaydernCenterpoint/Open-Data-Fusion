@@ -1,8 +1,18 @@
 import { timingSafeEqual } from "node:crypto";
+import { createRequire } from "node:module";
 
 import type { RequestHandler } from "express";
-import pino, { type DestinationStream, type Logger, type LoggerOptions } from "pino";
+import type pinoFactory from "pino";
+import type { DestinationStream, Logger, LoggerOptions } from "pino";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
+
+type PinoFactory = typeof pinoFactory;
+
+// The OpenTelemetry Pino instrumentation observes Pino's CommonJS loading
+// path. Keep this runtime import on that path so its OTLP log stream is
+// attached before the API creates its logger.
+const require = createRequire(import.meta.url);
+const pino: PinoFactory = require("pino");
 
 export interface ApiObservability {
   logger: Logger;

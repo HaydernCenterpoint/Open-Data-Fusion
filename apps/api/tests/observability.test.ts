@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { afterEach, describe, expect, it } from "vitest";
 import request from "supertest";
 
@@ -12,6 +14,14 @@ afterEach(() => {
 });
 
 describe("API operational endpoints", () => {
+  it("loads Pino through CommonJS so the OTLP log stream is attached", () => {
+    const source = readFileSync(new URL("../src/observability.ts", import.meta.url), "utf8");
+
+    expect(source).toContain('import { createRequire } from "node:module";');
+    expect(source).toContain('const pino: PinoFactory = require("pino");');
+    expect(source).not.toContain('import pino, { type DestinationStream, type Logger, type LoggerOptions } from "pino";');
+  });
+
   it("redacts Pino fields before serialized request logs can reach OTLP", () => {
     const lines: string[] = [];
     const secret = "unexportable-log-secret";
