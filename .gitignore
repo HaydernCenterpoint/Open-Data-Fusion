@@ -15,6 +15,7 @@ data/*.db-wal
 apps/api/data/
 .serena/
 docs/superpowers/
+.worktrees/
 
 # Clean-room research captures are local evidence, not redistributable product assets.
 docs/design/cognite-demo-reference.png
