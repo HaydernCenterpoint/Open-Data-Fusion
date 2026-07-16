@@ -37,7 +37,7 @@ const assets = [
   },
 ];
 
-function renderTopbar(onResultSelect = vi.fn()) {
+function renderTopbar(onResultSelect = vi.fn(), onSearchSubmit = vi.fn()) {
   const onTenantChange = vi.fn();
   const onProjectChange = vi.fn();
   const onRetry = vi.fn();
@@ -48,6 +48,7 @@ function renderTopbar(onResultSelect = vi.fn()) {
         query={query}
         onQueryChange={setQuery}
         onResultSelect={onResultSelect}
+        onSearchSubmit={onSearchSubmit}
         apiOnline
         platformContext={{ tenantId: "tenant-1", projectId: "project-1" }}
         tenants={[{ id: "tenant-1", name: "Tenant One", createdBy: "system", createdAt: "2026-01-01T00:00:00.000Z" }]}
@@ -67,7 +68,7 @@ function renderTopbar(onResultSelect = vi.fn()) {
   }
 
   render(<Harness />);
-  return { onProjectChange, onResultSelect };
+  return { onProjectChange, onResultSelect, onSearchSubmit };
 }
 
 async function openSearchResults() {
@@ -104,6 +105,16 @@ describe("Topbar search", () => {
     expect(onResultSelect).toHaveBeenCalledWith(expect.objectContaining({ entityId: "P-101", title: "Pump P-101" }));
     expect(screen.queryByRole("listbox", { name: "Search results" })).not.toBeInTheDocument();
     expect(input).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("submits an unselected query to the full Data Explorer", async () => {
+    const { onSearchSubmit } = renderTopbar();
+    const { input } = await openSearchResults();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSearchSubmit).toHaveBeenCalledWith("pump");
+    expect(screen.queryByRole("listbox", { name: "Search results" })).not.toBeInTheDocument();
   });
 
   it("closes results on Escape, blur, and an outside pointer event", async () => {
