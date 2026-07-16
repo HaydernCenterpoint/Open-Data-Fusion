@@ -4,6 +4,7 @@ import { AssetTree } from "./components/AssetTree";
 import { AssetWorkspace } from "./components/AssetWorkspace";
 import { DiagramsWorkspace, MatchingWorkspace, SpatialWorkspace, WritebackWorkspace } from "./components/AdvancedPlatformWorkspaces";
 import { CanvasWorkspace } from "./components/CanvasWorkspace";
+import { DataExplorerWorkspace } from "./components/DataExplorerWorkspace";
 import { IngestModal } from "./components/IngestModal";
 import { ProjectOverviewWorkspace } from "./components/ProjectOverviewWorkspace";
 import { RelatedRail } from "./components/RelatedRail";
@@ -96,7 +97,8 @@ async function collectCursorPages<T>(requestPage: CursorPageRequest<T>, signal?:
 export default function App() {
   const initialRouteRef = useRef(readAppRoute());
   const routeRef = useRef<AppRoute>(initialRouteRef.current);
-  const [query, setQuery] = useState("");
+  const [route, setRoute] = useState<AppRoute>(initialRouteRef.current);
+  const [query, setQuery] = useState(initialRouteRef.current.searchQuery ?? "");
   const [viewMode, setViewMode] = useState<ViewMode>(initialRouteRef.current.view);
   const [treeVisible, setTreeVisible] = useState(() => typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 791px)").matches);
   const [relatedRailOpen, setRelatedRailOpen] = useState(false);
@@ -128,9 +130,25 @@ export default function App() {
 
   const updateRoute = useCallback((patch: Partial<AppRoute>, mode: AppRouteHistoryMode = "push") => {
     const nextRoute: AppRoute = { ...routeRef.current, ...patch };
-    if (nextRoute.view !== "explorer") delete nextRoute.assetId;
+    if (nextRoute.view !== "explorer") {
+      delete nextRoute.assetId;
+      delete nextRoute.searchQuery;
+      delete nextRoute.resultType;
+      delete nextRoute.resultId;
+    } else if (nextRoute.searchQuery) {
+      delete nextRoute.assetId;
+      if (!nextRoute.resultType || !nextRoute.resultId) {
+        delete nextRoute.resultType;
+        delete nextRoute.resultId;
+      }
+    } else {
+      delete nextRoute.searchQuery;
+      delete nextRoute.resultType;
+      delete nextRoute.resultId;
+    }
     if (!nextRoute.tenantId) delete nextRoute.projectId;
     routeRef.current = nextRoute;
+    setRoute(nextRoute);
     commitAppRoute(nextRoute, mode);
   }, []);
 
@@ -188,7 +206,13 @@ export default function App() {
     setViewMode("explorer");
     setQuery("");
     setRelatedRailOpen(false);
-    updateRoute({ view: "explorer", assetId: externalId }, historyMode);
+    updateRoute({
+      view: "explorer",
+      assetId: externalId,
+      searchQuery: undefined,
+      resultType: undefined,
+      resultId: undefined,
+    }, historyMode);
     void loadExplorerAsset(externalId);
   }, [loadExplorerAsset, updateRoute]);
 
@@ -330,6 +354,13 @@ export default function App() {
         setAssets(response.items);
         setAssetTotal(response.total);
         setAssetsLoading(false);
+        if (routeRef.current.searchQuery) {
+          setSelectedAssetId("");
+          setSnapshot(null);
+          setExplorerLoading(false);
+          setExplorerError("");
+          return;
+        }
         const routedAssetId = routeRef.current.assetId;
         const initialAssetId = routedAssetId ?? response.items[0]?.externalId;
         if (initialAssetId) void loadExplorerAsset(initialAssetId);
@@ -380,10 +411,18 @@ export default function App() {
     const restoreRoute = () => {
       const route = readAppRoute();
       routeRef.current = route;
+      setRoute(route);
       setViewMode(route.view);
-      setQuery("");
+      setQuery(route.searchQuery ?? "");
       setRelatedRailOpen(false);
-      setTreeVisible(route.view === "explorer" && (typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 791px)").matches));
+      setTreeVisible(route.view === "explorer" && !route.searchQuery && (typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 791px)").matches));
+      if (route.searchQuery) {
+        explorerRequestRef.current?.abort();
+        setSelectedAssetId("");
+        setSnapshot(null);
+        setExplorerLoading(false);
+        setExplorerError("");
+      }
       if (route.assetId) void loadExplorerAsset(route.assetId);
       if (route.tenantId) void loadProjectsForTenant(route.tenantId, route.projectId, null);
     };
@@ -434,6 +473,9 @@ export default function App() {
     updateRoute({
       view: nextView,
       assetId: nextView === "explorer" ? selectedAssetId || undefined : undefined,
+      searchQuery: undefined,
+      resultType: undefined,
+      resultId: undefined,
     }, historyMode);
   }
 
@@ -468,7 +510,58 @@ export default function App() {
     else if (result.entityType === "matchingEvaluation") showView("matching");
     else if (result.entityType === "spatialAssetLink") showView("spatial");
     else if (result.entityType === "writebackRequest") showView("writeback");
+    else if (result.entityType === "audit") showView("audit");
     else notify(`${result.title} selected`);
+  }
+
+  function openDataExplorer(nextQuery: string, historyMode: AppRouteHistoryMode = "push") {
+    const searchQuery = nextQuery.trim();
+    if (!searchQuery) return;
+    explorerRequestRef.current?.abort();
+    setViewMode("explorer");
+    setQuery(searchQuery);
+    setTreeVisible(false);
+    setRelatedRailOpen(false);
+    setSelectedAssetId("");
+    setSnapshot(null);
+    setExplorerLoading(false);
+    setExplorerError("");
+    updateRoute({
+      view: "explorer",
+      assetId: undefined,
+      searchQuery,
+      resultType: undefined,
+      resultId: undefined,
+    }, historyMode);
+  }
+
+  function selectDataExplorerResult(result: PlatformSearchResult) {
+    const searchQuery = routeRef.current.searchQuery;
+    if (!searchQuery) return;
+    updateRoute({
+      view: "explorer",
+      assetId: undefined,
+      searchQuery,
+      resultType: result.entityType,
+      resultId: result.entityId,
+    }, "replace");
+  }
+
+  function clearDataExplorer() {
+    const fallbackAssetId = assets[0]?.externalId;
+    setQuery("");
+    setTreeVisible(typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 791px)").matches);
+    if (fallbackAssetId) {
+      openAsset(fallbackAssetId, "replace");
+      return;
+    }
+    updateRoute({
+      view: "explorer",
+      assetId: undefined,
+      searchQuery: undefined,
+      resultType: undefined,
+      resultId: undefined,
+    }, "replace");
   }
 
   if (viewMode === "canvas") {
@@ -497,14 +590,17 @@ export default function App() {
 
   const activeNavigation = navigationByView[viewMode];
   const sectionView = viewMode !== "explorer";
+  const dataExplorerQuery = viewMode === "explorer" ? route.searchQuery ?? "" : "";
+  const dataExplorerActive = Boolean(dataExplorerQuery);
 
   return (
-    <div className={`app-shell${treeVisible && viewMode === "explorer" ? "" : " tree-collapsed"}${sectionView ? " section-shell" : ""}${navigationCollapsed ? " navigation-collapsed" : ""}`}>
+    <div className={`app-shell${treeVisible && viewMode === "explorer" && !dataExplorerActive ? "" : " tree-collapsed"}${sectionView ? " section-shell" : ""}${navigationCollapsed ? " navigation-collapsed" : ""}`}>
       <Sidebar active={activeNavigation} collapsed={navigationCollapsed} collapseLocked={compactNavigation} onNavigate={navigate} onToggleCollapsed={() => setNavigationCollapsed((collapsed) => !collapsed)} />
       <Topbar
         query={query}
         onQueryChange={setQuery}
         onResultSelect={selectSearchResult}
+        onSearchSubmit={openDataExplorer}
         apiOnline={apiOnline}
         platformContext={platformContext}
         tenants={platformTenants}
@@ -519,7 +615,16 @@ export default function App() {
       />
       {sectionView ? <PlatformContextBar tenants={platformTenants} projects={platformProjects} selectedTenantId={selectedTenantId} context={platformContext} state={platformBootstrap} onTenantChange={selectPlatformTenant} onProjectChange={selectPlatformProject} onRetry={() => void retryPlatformBootstrap()} /> : null}
       {viewMode === "explorer" ? (
-        <>
+        dataExplorerActive ? (
+          <DataExplorerWorkspace
+            context={platformContext}
+            query={dataExplorerQuery}
+            selected={route.resultType && route.resultId ? { entityType: route.resultType, entityId: route.resultId } : null}
+            onSelect={selectDataExplorerResult}
+            onOpen={selectSearchResult}
+            onClear={clearDataExplorer}
+          />
+        ) : <>
           {treeVisible ? (
             <AssetTree assets={assets} total={assetTotal} selectedExternalId={selectedAssetId} loading={assetsLoading} loadingMore={assetsLoadingMore} error={assetsError} onCollapse={() => setTreeVisible(false)} onSelect={(asset) => openAsset(asset.externalId)} onRetry={() => void reloadAssets()} onLoadMore={() => void loadMoreAssets()} />
           ) : <button className="show-tree-button" type="button" onClick={() => setTreeVisible(true)} aria-label="Show asset hierarchy"><PanelLeftOpen size={20} /></button>}
