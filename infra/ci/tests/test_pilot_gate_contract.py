@@ -15,6 +15,9 @@ from infra.pilot_gate.contract import (
 )
 
 
+REVIEWER_KEY = b"reviewer-controlled-test-key-32bytes-minimum"
+
+
 def valid_manifest() -> dict[str, object]:
     digest = "sha256:" + ("a" * 64)
     return {
@@ -33,6 +36,7 @@ def valid_manifest() -> dict[str, object]:
             "id": "managed-staging",
             "kind": "managed-staging",
             "applicationCommit": "1" * 40,
+            "reviewerKeySha256": hashlib.sha256(REVIEWER_KEY).hexdigest(),
             "migrations": [
                 {"version": "202607160001", "sha256": "7" * 64},
             ],
@@ -103,6 +107,10 @@ class PilotManifestContractTests(unittest.TestCase):
         self.assertEqual(manifest.pilot_run_id, "pilot-managed-20260716-001")
         self.assertEqual(manifest.targets.rto_minutes, 240.0)
         self.assertEqual(manifest.migrations[0].version, "202607160001")
+        self.assertEqual(
+            manifest.reviewer_key_sha256,
+            hashlib.sha256(REVIEWER_KEY).hexdigest(),
+        )
         self.assertEqual(
             manifest.migration_set_sha256,
             "ac0f8176205045a99e50d679600d4a192b6e57cb29eb4f6d4e92a4212cce90ed",
@@ -318,6 +326,15 @@ class PilotManifestContractTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(ContractError, "exactly the required images"):
                     parse_manifest(raw)
+
+    def test_reviewer_key_fingerprint_is_required_and_strict(self) -> None:
+        raw = valid_manifest()
+        environment = raw["environment"]
+        assert isinstance(environment, dict)
+        environment["reviewerKeySha256"] = "not-a-sha256"
+
+        with self.assertRaisesRegex(ContractError, "reviewerKeySha256"):
+            parse_manifest(raw)
 
     def test_migration_versions_must_be_unique(self) -> None:
         raw = valid_manifest()

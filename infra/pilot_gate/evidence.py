@@ -185,6 +185,19 @@ def _write_content_addressed(path: Path, value: bytes) -> None:
         path.chmod(0o600)
 
 
+def _write_exclusive(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("xb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError as error:
+        raise EvidenceError(f"append-only file already exists: {path.name}") from error
+    if os.name != "nt":
+        path.chmod(0o600)
+
+
 @contextmanager
 def _run_lock(run_directory: Path) -> Iterator[None]:
     lock_path = run_directory / ".lock"
@@ -222,6 +235,7 @@ class EvidenceStore:
         self.manifest = manifest
         self.run_directory = output_root / manifest.pilot_run_id
         self.run_path = self.run_directory / "run.json"
+        self.decision_path = self.run_directory / "decision.json"
 
     def initialize(self) -> None:
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -249,6 +263,7 @@ class EvidenceStore:
                 "predecessorPilotRunId": predecessor,
                 "environmentId": self.manifest.environment_id,
                 "applicationCommit": self.manifest.application_commit,
+                "reviewerKeySha256": self.manifest.reviewer_key_sha256,
                 "migrations": [asdict(item) for item in self.manifest.migrations],
                 "migrationSetSha256": self.manifest.migration_set_sha256,
                 "imageDigests": dict(self.manifest.image_digests),
@@ -270,7 +285,7 @@ class EvidenceStore:
             }
             self._write_run(run)
 
-    def _read_run(self) -> dict[str, Any]:
+    def _read_run_unlocked(self) -> dict[str, Any]:
         value = _load_json(self.run_path)
         if not isinstance(value, dict):
             raise EvidenceError("pilot run must be an object")
@@ -279,15 +294,140 @@ class EvidenceStore:
         return dict(value)
 
     def read_run(self) -> dict[str, Any]:
-        return self._read_run()
+        with _run_lock(self.run_directory):
+            run = self._read_run_unlocked()
+            return self._repair_decision(run)
 
     def _write_run(self, run: dict[str, Any]) -> None:
         assert_safe_json(run)
         _atomic_write(self.run_path, canonical_json(run))
 
+    def _repair_decision(self, run: dict[str, Any]) -> dict[str, Any]:
+        if not self.decision_path.exists():
+            if "decision" in run:
+                raise EvidenceError("pilot decision index references a missing file")
+            return run
+        encoded = self.decision_path.read_bytes()
+        decision_value = _load_json(self.decision_path)
+        if not isinstance(decision_value, dict):
+            raise EvidenceError("pilot decision must be an object")
+        decision = dict(decision_value)
+        if encoded != canonical_json(decision):
+            raise EvidenceError("pilot decision is not canonical JSON")
+        expected_fields = {
+            "schemaVersion",
+            "pilotRunId",
+            "environmentId",
+            "manifestSha256",
+            "outcome",
+            "violations",
+            "reviewerId",
+            "reviewedAt",
+            "reviewerAttestationPath",
+            "reviewerAttestationSha256",
+            "managedCheckIndexSha256",
+            "supportingEvidenceIndexSha256",
+            "decidedAt",
+        }
+        if set(decision) != expected_fields:
+            raise EvidenceError("pilot decision fields do not match the contract")
+        if type(decision.get("schemaVersion")) is not int or decision.get(
+            "schemaVersion"
+        ) != SCHEMA_VERSION:
+            raise EvidenceError(f"schemaVersion must be the integer {SCHEMA_VERSION}")
+        if decision.get("pilotRunId") != self.manifest.pilot_run_id:
+            raise EvidenceError("pilot decision run does not match")
+        if decision.get("environmentId") != self.manifest.environment_id:
+            raise EvidenceError("pilot decision environment does not match")
+        expected_manifest_sha256 = manifest_sha256(self.manifest)
+        if decision.get("manifestSha256") != expected_manifest_sha256:
+            raise EvidenceError("pilot decision manifest hash does not match")
+        outcome = decision.get("outcome")
+        if outcome not in {"passed", "failed"}:
+            raise EvidenceError("pilot decision outcome is invalid")
+        violations = decision.get("violations")
+        if not isinstance(violations, list) or any(
+            not isinstance(item, str) for item in violations
+        ):
+            raise EvidenceError("pilot decision violations are invalid")
+        if (outcome == "passed") != (violations == []):
+            raise EvidenceError("pilot decision outcome contradicts violations")
+        reviewer_id = decision.get("reviewerId")
+        if not isinstance(reviewer_id, str) or not IDENTIFIER_PATTERN.fullmatch(
+            reviewer_id
+        ):
+            raise EvidenceError("pilot decision reviewer is invalid")
+        _utc_timestamp(decision.get("reviewedAt"), "reviewedAt")
+        _utc_timestamp(decision.get("decidedAt"), "decidedAt")
+        checks = run.get("checks")
+        supporting = run.get("supportingEvidence")
+        if not isinstance(checks, dict) or not isinstance(supporting, dict):
+            raise EvidenceError("pilot evidence indexes are invalid")
+        if decision.get("managedCheckIndexSha256") != sha256_hex(
+            canonical_json(checks)
+        ):
+            raise EvidenceError("pilot decision check index hash does not match")
+        if decision.get("supportingEvidenceIndexSha256") != sha256_hex(
+            canonical_json(supporting)
+        ):
+            raise EvidenceError("pilot decision supporting index hash does not match")
+        attestation_digest = decision.get("reviewerAttestationSha256")
+        attestation_path_value = decision.get("reviewerAttestationPath")
+        if not isinstance(attestation_digest, str) or not SHA256_PATTERN.fullmatch(
+            attestation_digest
+        ):
+            raise EvidenceError("pilot decision attestation hash is invalid")
+        expected_attestation_path = (
+            Path("reviewer-attestations") / f"{attestation_digest}.json"
+        )
+        if attestation_path_value != expected_attestation_path.as_posix():
+            raise EvidenceError("pilot decision attestation path is invalid")
+        attestation_path = self.run_directory / expected_attestation_path
+        try:
+            attestation_encoded = attestation_path.read_bytes()
+        except OSError as error:
+            raise EvidenceError("pilot reviewer attestation is missing") from error
+        if sha256_hex(attestation_encoded) != attestation_digest:
+            raise EvidenceError("pilot reviewer attestation hash does not match")
+        attestation = _load_json(attestation_path)
+        if not isinstance(attestation, dict):
+            raise EvidenceError("pilot reviewer attestation is invalid")
+        for field in (
+            "pilotRunId",
+            "environmentId",
+            "reviewerId",
+            "reviewedAt",
+            "manifestSha256",
+            "managedCheckIndexSha256",
+            "supportingEvidenceIndexSha256",
+        ):
+            decision_field = {
+                "reviewerId": "reviewerId",
+                "reviewedAt": "reviewedAt",
+            }.get(field, field)
+            if attestation.get(field) != decision.get(decision_field):
+                raise EvidenceError(
+                    f"pilot decision does not match reviewer attestation field {field}"
+                )
+        decision_digest = sha256_hex(encoded)
+        decision_entry = {
+            "path": "decision.json",
+            "sha256": decision_digest,
+            "outcome": outcome,
+            "reviewerAttestationSha256": attestation_digest,
+        }
+        existing_entry = run.get("decision")
+        if existing_entry is None:
+            run["decision"] = decision_entry
+            run["state"] = outcome
+            self._write_run(run)
+        elif existing_entry != decision_entry or run.get("state") != outcome:
+            raise EvidenceError("pilot decision index does not match immutable decision")
+        return run
+
     def record_check(self, evidence: CheckEvidence) -> None:
         with _run_lock(self.run_directory):
-            run = self._read_run()
+            run = self._repair_decision(self._read_run_unlocked())
             if evidence.pilot_run_id != self.manifest.pilot_run_id:
                 raise EvidenceError("pilotRunId does not match initialized run")
             if evidence.environment_id != self.manifest.environment_id:
@@ -341,8 +481,9 @@ class EvidenceStore:
                 run["state"] = "executing"
             self._write_run(run)
 
-    def load_checks(self) -> dict[str, CheckEvidence]:
-        run = self._read_run()
+    def _load_checks_from_run(
+        self, run: dict[str, Any]
+    ) -> dict[str, CheckEvidence]:
         checks_value = run.get("checks")
         if not isinstance(checks_value, dict):
             raise EvidenceError("pilot check index is invalid")
@@ -372,3 +513,70 @@ class EvidenceStore:
                 raise EvidenceError(f"check evidence identity mismatch: {check_id}")
             result[check_id] = evidence
         return result
+
+    def load_checks(self) -> dict[str, CheckEvidence]:
+        with _run_lock(self.run_directory):
+            run = self._repair_decision(self._read_run_unlocked())
+            return self._load_checks_from_run(run)
+
+    def finalize(
+        self, attestation: object, reviewer_key: bytes
+    ) -> dict[str, object]:
+        from .evaluation import evaluate, verify_reviewer_attestation
+
+        with _run_lock(self.run_directory):
+            run = self._read_run_unlocked()
+            if self.decision_path.exists() or "decision" in run:
+                self._repair_decision(run)
+                raise EvidenceError("pilot decision is append-only")
+            verified_attestation = verify_reviewer_attestation(
+                self.manifest, run, attestation, reviewer_key
+            )
+            checks = self._load_checks_from_run(run)
+            violations = evaluate(self.manifest, checks)
+            outcome = "passed" if not violations else "failed"
+            attestation_encoded = canonical_json(verified_attestation)
+            attestation_digest = sha256_hex(attestation_encoded)
+            attestation_relative_path = (
+                Path("reviewer-attestations") / f"{attestation_digest}.json"
+            )
+            _write_content_addressed(
+                self.run_directory / attestation_relative_path,
+                attestation_encoded,
+            )
+            checks_value = run.get("checks")
+            supporting_value = run.get("supportingEvidence")
+            assert isinstance(checks_value, dict)
+            assert isinstance(supporting_value, dict)
+            decision: dict[str, object] = {
+                "schemaVersion": SCHEMA_VERSION,
+                "pilotRunId": self.manifest.pilot_run_id,
+                "environmentId": self.manifest.environment_id,
+                "manifestSha256": manifest_sha256(self.manifest),
+                "outcome": outcome,
+                "violations": violations,
+                "reviewerId": verified_attestation["reviewerId"],
+                "reviewedAt": verified_attestation["reviewedAt"],
+                "reviewerAttestationPath": attestation_relative_path.as_posix(),
+                "reviewerAttestationSha256": attestation_digest,
+                "managedCheckIndexSha256": sha256_hex(
+                    canonical_json(checks_value)
+                ),
+                "supportingEvidenceIndexSha256": sha256_hex(
+                    canonical_json(supporting_value)
+                ),
+                "decidedAt": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+            decision_encoded = canonical_json(decision)
+            _write_exclusive(self.decision_path, decision_encoded)
+            run["decision"] = {
+                "path": "decision.json",
+                "sha256": sha256_hex(decision_encoded),
+                "outcome": outcome,
+                "reviewerAttestationSha256": attestation_digest,
+            }
+            run["state"] = outcome
+            self._write_run(run)
+            return decision

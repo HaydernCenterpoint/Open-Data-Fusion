@@ -99,6 +99,7 @@ class PilotManifest:
     scope: Scope
     environment_id: str
     application_commit: str
+    reviewer_key_sha256: str
     migrations: tuple[Migration, ...]
     migration_set_sha256: str
     image_digests: tuple[tuple[str, str], ...]
@@ -236,6 +237,7 @@ def parse_manifest(raw_value: object) -> PilotManifest:
             "id",
             "kind",
             "applicationCommit",
+            "reviewerKeySha256",
             "migrations",
             "migrationSetSha256",
             "imageDigests",
@@ -249,6 +251,11 @@ def parse_manifest(raw_value: object) -> PilotManifest:
         environment.get("applicationCommit"),
         "environment.applicationCommit",
         COMMIT_PATTERN,
+    )
+    reviewer_key_sha256 = _text(
+        environment.get("reviewerKeySha256"),
+        "environment.reviewerKeySha256",
+        SHA256_PATTERN,
     )
     migration_values = environment.get("migrations")
     if not isinstance(migration_values, list) or not migration_values:
@@ -511,6 +518,7 @@ def parse_manifest(raw_value: object) -> PilotManifest:
         scope=scope,
         environment_id=environment_id,
         application_commit=application_commit,
+        reviewer_key_sha256=reviewer_key_sha256,
         migrations=tuple(migrations),
         migration_set_sha256=migration_set_sha256,
         image_digests=image_digests,
