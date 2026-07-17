@@ -742,10 +742,17 @@ Additional references:
 - [x] Persist governed PostgreSQL tenant/project administration and project membership workflows; retain initial tenant bootstrap as a separate operator boundary
 - [x] Move platform catalog compatibility, cross-surface search/indexing, advanced-product API records, and write-back ledgers to PostgreSQL without SQLite fallback
 - [x] Add a provider-neutral Production Pilot Gate runner, immutable evidence contract, and managed-staging operator runbook
-- [ ] Rehearse backup/restore, broker failure, dead-letter, and multi-instance concurrency beyond the CI industrial/Canvas/outbox smoke
-- [ ] Complete production ingress, TLS/mTLS, secret-manager, and network-isolation design
-- [ ] Add durable trace/log storage, worker telemetry, SLOs, and operational runbooks
-  - The local/CI Collector rehearsal proves redacted API and worker log delivery; replicated or managed retention, backup, compliance retention, and alert delivery remain required to close this gate.
+- [x] Add local/CI backup/restore, broker-outage, dead-letter recovery, expired-lease, and two-worker concurrency rehearsals
+- [x] Define provider-neutral TLS/mTLS ingress, secret-delivery, and default-deny network-isolation contracts with local/CI security rehearsals
+- [x] Add bounded durable local trace/log storage, API and worker telemetry, SLO/alert rules, and operational runbooks
+
+The remaining boxes are managed-staging acceptance gates. Synthetic or CI
+evidence cannot close them; record and independently attest them with the
+[Production Pilot Gate runbook](docs/operations/production-pilot-gate.md).
+
+- [ ] Rehearse managed backup/restore, broker outage/dead-letter recovery, and replica/worker concurrency beyond CI
+- [ ] Deploy and validate provider-specific ingress, managed TLS/mTLS renewal, secret-manager integration, an approved digest-pinned gateway, and network isolation
+- [ ] Configure and independently verify replicated external telemetry retention, backup, compliance retention, and alert delivery
 - [ ] Validate live design-partner CSV, JDBC/PostgreSQL, and OPC UA connector backfill, resume, authentication, and schema-evolution behavior in the target deployment
 
 ### Intentionally gated
