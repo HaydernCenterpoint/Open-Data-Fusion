@@ -156,6 +156,55 @@ export interface ModelViewRecord {
   createdAt: string;
 }
 
+export type PublicModelPropertyType =
+  | "text"
+  | "int64"
+  | "float64"
+  | "boolean"
+  | "timestamp"
+  | "date"
+  | "json"
+  | "direct";
+
+export interface PublicModelPropertyDefinition {
+  type: PublicModelPropertyType;
+  required?: boolean;
+  nullable?: boolean;
+  list?: boolean;
+}
+
+export interface PublicModelViewDefinition {
+  externalId: string;
+  name: string;
+  usedFor: "node" | "edge";
+  properties: Record<string, PublicModelPropertyDefinition>;
+}
+
+export interface PublicModelVersion {
+  tenantId: string;
+  projectId: string;
+  id: string;
+  version: number;
+  name: string;
+  schema: JsonObject;
+  status: "draft" | "published";
+  createdBy: string;
+  createdAt: string;
+  publishedAt: string | null;
+}
+
+export interface PublicModelView extends PublicModelViewDefinition {
+  modelId: string;
+  modelVersion: number;
+  createdAt: string;
+}
+
+export interface ModelVersionCursor {
+  createdAt: string;
+  modelId: string;
+  version: number;
+}
+
 export interface GraphInstanceRecord {
   instanceId: string;
   tenantId: string;
@@ -526,6 +575,18 @@ export interface CreateModelViewInput {
   correlationId: string;
 }
 
+export interface CreatePublicModelVersionInput {
+  name: string;
+  schema: JsonObject;
+  status?: "draft" | "published";
+  views?: PublicModelViewDefinition[];
+  correlationId: string;
+}
+
+export interface CreatePublicModelViewInput extends PublicModelViewDefinition {
+  correlationId: string;
+}
+
 export interface CreateGraphInstanceInput {
   instanceId: string;
   datasetId?: string | null;
@@ -745,8 +806,15 @@ export interface CatalogRepository {
 export interface ModelRepository {
   createDataModel(scope: ProjectScope, input: CreateDataModelInput): Promise<DataModelRecord>;
   listDataModels(scope: ProjectScope, limit: number, cursor?: TimestampIdCursor): Promise<KeysetPage<DataModelRecord, TimestampIdCursor>>;
-  createModelView(scope: ProjectScope, input: CreateModelViewInput): Promise<ModelViewRecord>;
+  createModelViewRecord(scope: ProjectScope, input: CreateModelViewInput): Promise<ModelViewRecord>;
   createGraphInstance(scope: ProjectScope, input: CreateGraphInstanceInput): Promise<GraphInstanceRecord>;
+  listModelVersions(scope: ProjectScope, limit: number, cursor?: ModelVersionCursor): Promise<KeysetPage<PublicModelVersion, ModelVersionCursor>>;
+  listVersionsForModel(scope: ProjectScope, modelId: string, limit: number, cursor?: ModelVersionCursor): Promise<KeysetPage<PublicModelVersion, ModelVersionCursor>>;
+  getModelVersion(scope: ProjectScope, modelId: string, version: number): Promise<PublicModelVersion>;
+  createModelVersion(scope: ProjectScope, modelId: string, input: CreatePublicModelVersionInput): Promise<PublicModelVersion>;
+  listModelViews(scope: ProjectScope, modelId: string, version: number): Promise<PublicModelView[]>;
+  createModelView(scope: ProjectScope, modelId: string, version: number, input: CreatePublicModelViewInput): Promise<PublicModelView>;
+  publishModelVersion(scope: ProjectScope, modelId: string, version: number, correlationId: string): Promise<PublicModelVersion>;
 }
 
 export interface PipelineQualityRepository {

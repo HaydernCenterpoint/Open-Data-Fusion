@@ -18,6 +18,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@open-data-fusion/platform-core": "0.1.0",
     "pg": "^8.22.0"
   },
   "devDependencies": {
