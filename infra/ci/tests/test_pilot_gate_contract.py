@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
-from infra.pilot_gate.contract import CHECKS_BY_GATE, ContractError, parse_manifest
+from infra.pilot_gate.contract import (
+    CHECKS_BY_GATE,
+    REQUIRED_IMAGES,
+    ContractError,
+    load_manifest,
+    parse_manifest,
+)
 
 
 def valid_manifest() -> dict[str, object]:
@@ -110,6 +118,16 @@ class PilotManifestContractTests(unittest.TestCase):
             ["csv", "postgres", "opcua"],
         )
 
+    def test_image_digests_are_an_immutable_sorted_pair_sequence(self) -> None:
+        manifest = parse_manifest(valid_manifest())
+        digest = "sha256:" + ("a" * 64)
+        expected = tuple((name, digest) for name in sorted(REQUIRED_IMAGES))
+
+        self.assertIsInstance(manifest.image_digests, tuple)
+        self.assertFalse(hasattr(manifest.image_digests, "__setitem__"))
+        self.assertEqual(manifest.image_digests, expected)
+        self.assertEqual(dict(manifest.image_digests), dict(expected))
+
     def test_schema_version_requires_the_integer_one(self) -> None:
         for schema_version in (True, 1.0):
             with self.subTest(schema_version=schema_version):
@@ -153,6 +171,17 @@ class PilotManifestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "csv, opcua, and postgres"):
             parse_manifest(raw)
 
+    def test_connector_kind_must_be_text(self) -> None:
+        for kind in ([], {}):
+            with self.subTest(kind=kind):
+                raw = valid_manifest()
+                assert isinstance(raw["connectors"], list)
+                assert isinstance(raw["connectors"][0], dict)
+                raw["connectors"][0]["kind"] = kind
+
+                with self.assertRaisesRegex(ContractError, "kind is invalid"):
+                    parse_manifest(raw)
+
     def test_csv_safety_ceiling_cannot_be_below_required_rate(self) -> None:
         raw = valid_manifest()
         assert isinstance(raw["connectors"], list)
@@ -179,12 +208,36 @@ class PilotManifestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "finite"):
             parse_manifest(raw)
 
+    def test_numeric_overflow_is_rejected_as_contract_error(self) -> None:
+        for value in (10**400, float("inf")):
+            with self.subTest(value=value):
+                raw = valid_manifest()
+                assert isinstance(raw["targets"], dict)
+                raw["targets"]["rpoMinutes"] = value
+
+                with self.assertRaisesRegex(ContractError, "finite"):
+                    parse_manifest(raw)
+
     def test_rejects_unknown_manifest_fields(self) -> None:
         raw = valid_manifest()
         raw["password"] = "must-never-enter-the-contract"
 
         with self.assertRaisesRegex(ContractError, "unexpected fields"):
             parse_manifest(raw)
+
+    def test_load_manifest_rejects_duplicate_json_object_keys(self) -> None:
+        payload = json.dumps(valid_manifest()).replace(
+            '{"schemaVersion": 1,',
+            '{"schemaVersion": 2, "schemaVersion": 1,',
+            1,
+        )
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "pilot.json"
+            path.write_text(payload, encoding="utf-8")
+
+            with self.assertRaisesRegex(ContractError, "duplicate.*schemaVersion"):
+                load_manifest(path)
 
     def test_scope_is_read_only_and_separates_synthetic_project(self) -> None:
         raw = valid_manifest()
@@ -244,6 +297,28 @@ class PilotManifestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "managed-staging"):
             parse_manifest(raw)
 
+    def test_requires_the_exact_image_digest_set(self) -> None:
+        digest = "sha256:" + ("a" * 64)
+        self.assertEqual(
+            REQUIRED_IMAGES,
+            frozenset(
+                {"api", "web", "outbox-worker", "pipeline-worker", "edge-agent"}
+            ),
+        )
+        for case in ("missing", "extra"):
+            with self.subTest(case=case):
+                raw = valid_manifest()
+                assert isinstance(raw["environment"], dict)
+                image_digests = raw["environment"]["imageDigests"]
+                assert isinstance(image_digests, dict)
+                if case == "missing":
+                    image_digests.pop("web")
+                else:
+                    image_digests["unexpected"] = digest
+
+                with self.assertRaisesRegex(ContractError, "exactly the required images"):
+                    parse_manifest(raw)
+
     def test_migration_versions_must_be_unique(self) -> None:
         raw = valid_manifest()
         assert isinstance(raw["environment"], dict)
@@ -262,7 +337,26 @@ class PilotManifestContractTests(unittest.TestCase):
             parse_manifest(raw)
 
     def test_catalog_has_all_five_gates_and_unique_check_ids(self) -> None:
-        self.assertEqual(set(CHECKS_BY_GATE), {0, 1, 2, 3, 4})
+        self.assertEqual(
+            CHECKS_BY_GATE,
+            {
+                0: ("deployment-preflight", "tenant-isolation"),
+                1: (
+                    "ingress-security",
+                    "network-isolation",
+                    "credential-rotation",
+                    "secret-scan",
+                ),
+                2: (
+                    "database-object-restore",
+                    "broker-recovery",
+                    "replica-worker-recovery",
+                    "idempotency-checkpoints",
+                ),
+                3: ("durable-telemetry", "alert-delivery", "service-objectives"),
+                4: ("connector-csv", "connector-postgres", "connector-opcua"),
+            },
+        )
         flattened = [
             check_id
             for check_ids in CHECKS_BY_GATE.values()

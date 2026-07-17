@@ -101,9 +101,18 @@ class PilotManifest:
     application_commit: str
     migrations: tuple[Migration, ...]
     migration_set_sha256: str
-    image_digests: dict[str, str]
+    image_digests: tuple[tuple[str, str], ...]
     targets: Targets
     connectors: tuple[ConnectorTarget, ...]
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ContractError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
 
 
 def _object(value: object, label: str) -> dict[str, Any]:
@@ -134,7 +143,10 @@ def _text(
 def _number(value: object, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ContractError(f"{label} must be numeric")
-    result = float(value)
+    try:
+        result = float(value)
+    except OverflowError as error:
+        raise ContractError(f"{label} must be finite") from error
     if not math.isfinite(result):
         raise ContractError(f"{label} must be finite")
     if result <= 0:
@@ -297,10 +309,17 @@ def parse_manifest(raw_value: object) -> PilotManifest:
         raise ContractError(
             "environment.imageDigests must contain exactly the required images"
         )
-    image_digests = {
-        name: _text(value, f"environment.imageDigests.{name}", DIGEST_PATTERN)
-        for name, value in image_values.items()
-    }
+    image_digests = tuple(
+        (
+            name,
+            _text(
+                image_values[name],
+                f"environment.imageDigests.{name}",
+                DIGEST_PATTERN,
+            ),
+        )
+        for name in sorted(image_values)
+    )
 
     target_values = _object(raw.get("targets"), "targets")
     _require_keys(
@@ -371,7 +390,7 @@ def parse_manifest(raw_value: object) -> PilotManifest:
     for index, connector_value in enumerate(connector_values):
         connector = _object(connector_value, f"connectors[{index}]")
         kind = connector.get("kind")
-        if kind not in {"csv", "postgres", "opcua"}:
+        if not isinstance(kind, str) or kind not in {"csv", "postgres", "opcua"}:
             raise ContractError(f"connectors[{index}].kind is invalid")
         common_connector_keys = {
             "kind",
@@ -502,7 +521,10 @@ def parse_manifest(raw_value: object) -> PilotManifest:
 
 def load_manifest(path: Path) -> PilotManifest:
     try:
-        raw: object = json.loads(path.read_text(encoding="utf-8"))
+        raw: object = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ContractError(f"could not read pilot manifest: {error}") from error
     return parse_manifest(raw)
