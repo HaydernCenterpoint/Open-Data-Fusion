@@ -618,6 +618,81 @@ export interface PublicInstanceUpsertResult {
   requestHash: string;
 }
 
+export type PublicModelFilter =
+  | { equals: { property: string; value: unknown } }
+  | { in: { property: string; values: unknown[] } }
+  | { range: { property: string; gt?: unknown; gte?: unknown; lt?: unknown; lte?: unknown } }
+  | { exists: { property: string } }
+  | { and: PublicModelFilter[] }
+  | { or: PublicModelFilter[] }
+  | { not: PublicModelFilter };
+
+export interface PublicInstanceQueryRequest {
+  viewExternalId: string;
+  projection?: string[];
+  filter?: PublicModelFilter;
+  sort?: { property: string; direction?: "asc" | "desc" };
+  limit?: number;
+  cursor?: string;
+}
+
+export interface PublicModelGraphInstance extends PublicInstanceKey {
+  kind: "node" | "edge";
+  viewExternalId: string;
+  source?: PublicInstanceKey;
+  target?: PublicInstanceKey;
+  properties: JsonObject;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PublicInstanceQueryResult {
+  items: PublicModelGraphInstance[];
+  nextCursor: string | null;
+}
+
+export interface PublicInstanceTraverseRequest {
+  starts: PublicInstanceKey[];
+  direction: "in" | "out" | "both";
+  edgeViewExternalId?: string;
+  maxHops?: number;
+  limit?: number;
+}
+
+export interface PublicInstancePath {
+  instances: PublicInstanceKey[];
+  edges: PublicInstanceKey[];
+}
+
+export interface PublicInstanceTraverseResult {
+  paths: PublicInstancePath[];
+  truncated: boolean;
+}
+
+export interface PublicInstanceAggregateMetric {
+  name: string;
+  operation: "count" | "min" | "max" | "sum" | "avg";
+  property?: string;
+}
+
+export interface PublicInstanceAggregateRequest {
+  viewExternalId: string;
+  filter?: PublicModelFilter;
+  groupBy?: string[];
+  metrics: PublicInstanceAggregateMetric[];
+  limit?: number;
+}
+
+export interface PublicInstanceAggregateGroup {
+  group: JsonObject;
+  metrics: Record<string, number | null>;
+}
+
+export interface PublicInstanceAggregateResult {
+  groups: PublicInstanceAggregateGroup[];
+  truncated: boolean;
+}
+
 export interface CreateGraphInstanceInput {
   instanceId: string;
   datasetId?: string | null;
@@ -847,6 +922,9 @@ export interface ModelRepository {
   createModelView(scope: ProjectScope, modelId: string, version: number, input: CreatePublicModelViewInput): Promise<PublicModelView>;
   publishModelVersion(scope: ProjectScope, modelId: string, version: number, correlationId: string): Promise<PublicModelVersion>;
   upsertModelInstances(scope: ProjectScope, modelId: string, version: number, input: PublicInstanceUpsertRequest, correlationId: string): Promise<PublicInstanceUpsertResult>;
+  queryModelInstances(scope: ProjectScope, modelId: string, version: number, input: PublicInstanceQueryRequest): Promise<PublicInstanceQueryResult>;
+  traverseModelInstances(scope: ProjectScope, modelId: string, version: number, input: PublicInstanceTraverseRequest): Promise<PublicInstanceTraverseResult>;
+  aggregateModelInstances(scope: ProjectScope, modelId: string, version: number, input: PublicInstanceAggregateRequest): Promise<PublicInstanceAggregateResult>;
 }
 
 export interface PipelineQualityRepository {

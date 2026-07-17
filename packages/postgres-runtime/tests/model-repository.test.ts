@@ -318,4 +318,113 @@ describe("PostgreSQL public model lifecycle", () => {
     }, "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")).resolves.toMatchObject({ total: 100, created: 100, updated: 0 });
     expect(graphInsert).toBe(100);
   });
+
+  it("queries with stable keyset pagination and projected properties", async () => {
+    const client = new RecordingClient((query) => {
+      if (query.text.includes("FROM odf.data_models") && query.text.includes("state = 'published'")) {
+        return result([{ ...modelRow, state: "published", published_at: "2026-07-17T08:00:00.000Z" }]);
+      }
+      if (query.text.includes("FROM odf.model_views")) return result([viewRow]);
+      if (query.text.includes("JOIN odf.model_spaces space")) {
+        return result(["a", "b", "c"].map((externalId, index) => ({
+          instance_kind: "node",
+          view_external_id: "Equipment",
+          space_external_id: "plant-a",
+          external_id: externalId,
+          properties: { name: externalId.toUpperCase() },
+          created_at: "2026-07-17T09:00:00.000Z",
+          updated_at: "2026-07-17T09:00:00.000Z",
+          source_space_external_id: null,
+          source_external_id: null,
+          target_space_external_id: null,
+          target_external_id: null,
+          sort_is_null: false,
+          sort_value: index + 1,
+        })));
+      }
+      return result();
+    });
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, { projectAccessResolver: allowAll() });
+
+    const page = await runtime.models.queryModelInstances(scope, "plant-model", 2, {
+      viewExternalId: "Equipment",
+      projection: ["name"],
+      sort: { property: "name", direction: "asc" },
+      limit: 2,
+    });
+
+    expect(page.items.map((item) => item.externalId)).toEqual(["a", "b"]);
+    expect(page.nextCursor).toEqual(expect.any(String));
+    expect(page.nextCursor).not.toContain("plant-a");
+    const query = client.queries.find((entry) => entry.text.includes("JOIN odf.model_spaces space"));
+    expect(query?.text).toContain("IS NULL ASC");
+    expect(query?.text).toContain("space.external_id ASC, graph.external_id ASC");
+    expect(query?.values?.at(-1)).toBe(3);
+  });
+
+  it("uses a bounded recursive CTE for traversal and returns key-only paths", async () => {
+    const client = new RecordingClient((query) => {
+      if (query.text.includes("FROM odf.data_models") && query.text.includes("state = 'published'")) {
+        return result([{ ...modelRow, state: "published", published_at: "2026-07-17T08:00:00.000Z" }]);
+      }
+      if (query.text.includes("FROM odf.model_views")) return result([viewRow, edgeViewRow]);
+      if (query.text.includes("WITH RECURSIVE start_nodes")) return result([{
+        instance_path: [{ space: "plant-a", externalId: "source" }, { space: "plant-a", externalId: "target" }],
+        edge_path: [{ space: "plant-a", externalId: "feeds" }],
+      }]);
+      return result();
+    });
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, { projectAccessResolver: allowAll() });
+
+    await expect(runtime.models.traverseModelInstances(scope, "plant-model", 2, {
+      starts: [{ space: "plant-a", externalId: "source" }],
+      direction: "out",
+      edgeViewExternalId: "Feeds",
+      maxHops: 3,
+      limit: 10,
+    })).resolves.toEqual({
+      paths: [{
+        instances: [{ space: "plant-a", externalId: "source" }, { space: "plant-a", externalId: "target" }],
+        edges: [{ space: "plant-a", externalId: "feeds" }],
+      }],
+      truncated: false,
+    });
+    const query = client.queries.find((entry) => entry.text.includes("WITH RECURSIVE start_nodes"));
+    expect(query?.text).not.toContain("plant-a");
+    expect(query?.text).not.toContain("'source'");
+    expect(query?.values).toContain(3);
+    expect(query?.values).toContain(11);
+  });
+
+  it("returns bounded grouped numeric aggregates", async () => {
+    const client = new RecordingClient((query) => {
+      if (query.text.includes("FROM odf.data_models") && query.text.includes("state = 'published'")) {
+        return result([{ ...modelRow, state: "published", published_at: "2026-07-17T08:00:00.000Z" }]);
+      }
+      if (query.text.includes("FROM odf.model_views")) {
+        return result([{ ...viewRow, definition: {
+          ...viewDefinition,
+          properties: { ...viewDefinition.properties, pressure: { type: "float64" }, active: { type: "boolean" } },
+        } }]);
+      }
+      if (query.text.includes("AS metric_values")) {
+        return result([{ group_values: { active: true }, metric_values: { total: 2, averagePressure: 12.5 } }]);
+      }
+      return result();
+    });
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, { projectAccessResolver: allowAll() });
+
+    await expect(runtime.models.aggregateModelInstances(scope, "plant-model", 2, {
+      viewExternalId: "Equipment",
+      groupBy: ["active"],
+      metrics: [
+        { name: "total", operation: "count" },
+        { name: "averagePressure", operation: "avg", property: "pressure" },
+      ],
+      limit: 20,
+    })).resolves.toEqual({
+      groups: [{ group: { active: true }, metrics: { total: 2, averagePressure: 12.5 } }],
+      truncated: false,
+    });
+  });
 });

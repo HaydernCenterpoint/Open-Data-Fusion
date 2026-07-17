@@ -1,14 +1,27 @@
-import { normalizeModelView, normalizeModelViews } from "@open-data-fusion/platform-core";
+import {
+  normalizeInstanceAggregate,
+  normalizeInstanceQuery,
+  normalizeModelView,
+  normalizeModelViews,
+} from "@open-data-fusion/platform-core";
 import { ConflictError, NotFoundError } from "./errors.js";
 import { appendPlatformAuditAndOutbox } from "./platform-events.js";
 import { insertGraphInstanceIdempotent } from "./graph-helpers.js";
 import { json } from "./mappers.js";
 import { normalizeModelInstanceBatch, publicInstanceKey } from "./model-instance-helpers.js";
 import {
+  compilePostgresModelAggregate,
+  compilePostgresModelQuery,
+  encodePostgresModelQueryCursor,
+} from "./model-query-sql.js";
+import {
   dataModelFromRow,
   graphInstanceFromRow,
   modelViewFromRow,
   publicModelVersionFromRow,
+  optionalRowString,
+  requiredRowString,
+  rowJsonObject,
 } from "./platform-mappers.js";
 import { PolicyAwareRepository } from "./platform-repository-base.js";
 import { boundedPageSize, pageFromRows, requiredText } from "./platform-support.js";
@@ -29,8 +42,16 @@ import type {
   PublicModelView,
   PublicModelViewDefinition,
   PublicInstanceKey,
+  PublicInstanceAggregateRequest,
+  PublicInstanceAggregateResult,
+  PublicInstancePath,
+  PublicInstanceQueryRequest,
+  PublicInstanceQueryResult,
+  PublicInstanceTraverseRequest,
+  PublicInstanceTraverseResult,
   PublicInstanceUpsertRequest,
   PublicInstanceUpsertResult,
+  PublicModelGraphInstance,
   TimestampIdCursor,
 } from "./platform-types.js";
 import type { JsonObject, KeysetPage, ScopedTransaction, TransactionRunner } from "./types.js";
@@ -84,6 +105,43 @@ function replayCount(summary: unknown, field: "total" | "created" | "updated"): 
 
 function keyArrays(keys: PublicInstanceKey[]): [string[], string[]] {
   return [keys.map((key) => key.space), keys.map((key) => key.externalId)];
+}
+
+function publicGraphInstanceFromQueryRow(row: Record<string, unknown>): PublicModelGraphInstance {
+  const kind = requiredRowString(row, "instance_kind");
+  if (kind !== "node" && kind !== "edge") throw new TypeError("Expected model graph instance kind from PostgreSQL");
+  const sourceSpace = optionalRowString(row, "source_space_external_id");
+  const sourceExternalId = optionalRowString(row, "source_external_id");
+  const targetSpace = optionalRowString(row, "target_space_external_id");
+  const targetExternalId = optionalRowString(row, "target_external_id");
+  return {
+    space: requiredRowString(row, "space_external_id"),
+    externalId: requiredRowString(row, "external_id"),
+    kind,
+    viewExternalId: requiredRowString(row, "view_external_id"),
+    properties: rowJsonObject(row, "properties"),
+    createdAt: requiredRowString(row, "created_at"),
+    updatedAt: requiredRowString(row, "updated_at"),
+    ...(sourceSpace && sourceExternalId ? { source: { space: sourceSpace, externalId: sourceExternalId } } : {}),
+    ...(targetSpace && targetExternalId ? { target: { space: targetSpace, externalId: targetExternalId } } : {}),
+  };
+}
+
+function parsedJson(value: unknown): unknown {
+  return typeof value === "string" ? JSON.parse(value) as unknown : value;
+}
+
+function instancePathFromRow(row: Record<string, unknown>): PublicInstancePath {
+  const instances = parsedJson(row.instance_path);
+  const edges = parsedJson(row.edge_path);
+  if (!Array.isArray(instances) || !Array.isArray(edges)) throw new TypeError("Expected model graph path arrays from PostgreSQL");
+  const mapKey = (value: unknown): PublicInstanceKey => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("Expected model graph path key from PostgreSQL");
+    const key = value as Record<string, unknown>;
+    if (typeof key.space !== "string" || typeof key.externalId !== "string") throw new TypeError("Expected model graph path key from PostgreSQL");
+    return { space: key.space, externalId: key.externalId };
+  };
+  return { instances: instances.map(mapKey), edges: edges.map(mapKey) };
 }
 
 function canonical(value: unknown): string {
@@ -735,6 +793,195 @@ export class PostgresModelRepository extends PolicyAwareRepository implements Mo
         replayed: false,
         requestHash: normalized.requestHash,
       };
+    });
+  }
+
+  async queryModelInstances(
+    scope: ProjectScope,
+    modelIdInput: string,
+    version: number,
+    input: PublicInstanceQueryRequest,
+  ): Promise<PublicInstanceQueryResult> {
+    const modelId = requiredText(modelIdInput, "modelId");
+    if (!Number.isSafeInteger(version) || version < 1) throw new RangeError("version must be a positive integer");
+    return this.read(scope, async (transaction) => {
+      await setModelStatementTimeout(transaction);
+      const model = await transaction.query({
+        text: "SELECT " + DATA_MODEL_COLUMNS + " FROM odf.data_models WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND external_id = $3 AND version = $4 AND state = 'published'",
+        values: [scope.tenantId, scope.projectId, modelId, String(version)],
+      });
+      const modelRow = model.rows[0];
+      if (!modelRow) throw new NotFoundError("Published model version was not found");
+      const dataModelId = String(modelRow.data_model_id);
+      const views = await transaction.query({
+        text: "SELECT " + MODEL_VIEW_COLUMNS + " FROM odf.model_views WHERE tenant_id = $1::uuid AND data_model_id = $2::uuid ORDER BY created_at, external_id, model_view_id",
+        values: [scope.tenantId, dataModelId],
+      });
+      const viewRecord = views.rows.map(modelViewFromRow).find((candidate) => candidate.externalId === input.viewExternalId);
+      if (!viewRecord) throw new NotFoundError("Model view was not found");
+      const view = normalizeModelView(viewRecord.definition as unknown as PublicModelViewDefinition);
+      const normalized = normalizeInstanceQuery(view, input) as PublicInstanceQueryRequest;
+      const compiled = compilePostgresModelQuery({
+        tenantId: scope.tenantId,
+        projectId: scope.projectId,
+        dataModelId,
+        modelViewId: viewRecord.modelViewId,
+        view,
+        request: normalized,
+      });
+      const rows = (await transaction.query(compiled)).rows;
+      const limit = normalized.limit ?? 50;
+      const pageRows = rows.slice(0, limit);
+      return {
+        items: pageRows.map(publicGraphInstanceFromQueryRow),
+        nextCursor: rows.length > limit && pageRows.at(-1)
+          ? encodePostgresModelQueryCursor(pageRows.at(-1)!)
+          : null,
+      };
+    });
+  }
+
+  async traverseModelInstances(
+    scope: ProjectScope,
+    modelIdInput: string,
+    version: number,
+    input: PublicInstanceTraverseRequest,
+  ): Promise<PublicInstanceTraverseResult> {
+    const modelId = requiredText(modelIdInput, "modelId");
+    if (!Number.isSafeInteger(version) || version < 1) throw new RangeError("version must be a positive integer");
+    if (!Array.isArray(input.starts) || input.starts.length < 1 || input.starts.length > 20) {
+      throw new RangeError("starts must contain between 1 and 20 keys");
+    }
+    if (input.direction !== "in" && input.direction !== "out" && input.direction !== "both") {
+      throw new RangeError("direction must be in, out, or both");
+    }
+    const maxHops = input.maxHops ?? 1;
+    const limit = input.limit ?? 50;
+    if (!Number.isInteger(maxHops) || maxHops < 1 || maxHops > 3) throw new RangeError("maxHops must be between 1 and 3");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new RangeError("limit must be between 1 and 200");
+    const starts = input.starts.map((start) => ({
+      space: requiredText(start.space, "start.space"),
+      externalId: requiredText(start.externalId, "start.externalId"),
+    }));
+    return this.read(scope, async (transaction) => {
+      await setModelStatementTimeout(transaction);
+      const model = await transaction.query({
+        text: "SELECT " + DATA_MODEL_COLUMNS + " FROM odf.data_models WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND external_id = $3 AND version = $4 AND state = 'published'",
+        values: [scope.tenantId, scope.projectId, modelId, String(version)],
+      });
+      const modelRow = model.rows[0];
+      if (!modelRow) throw new NotFoundError("Published model version was not found");
+      const dataModelId = String(modelRow.data_model_id);
+      const views = await transaction.query({
+        text: "SELECT " + MODEL_VIEW_COLUMNS + " FROM odf.model_views WHERE tenant_id = $1::uuid AND data_model_id = $2::uuid ORDER BY created_at, external_id, model_view_id",
+        values: [scope.tenantId, dataModelId],
+      });
+      const viewRecords = views.rows.map(modelViewFromRow);
+      let edgeViewId: string | null = null;
+      if (input.edgeViewExternalId) {
+        const edgeViewRecord = viewRecords.find((candidate) => candidate.externalId === input.edgeViewExternalId);
+        if (!edgeViewRecord) throw new NotFoundError("Edge model view was not found");
+        const edgeView = normalizeModelView(edgeViewRecord.definition as unknown as PublicModelViewDefinition);
+        if (edgeView.usedFor !== "edge") throw new ConflictError("Traversal edge view must be used for edges");
+        edgeViewId = edgeViewRecord.modelViewId;
+      }
+      const [startSpaces, startExternalIds] = keyArrays(starts);
+      const edgeJoin = input.direction === "out"
+        ? "edge.source_instance_id = walk.current_id"
+        : input.direction === "in"
+          ? "edge.target_instance_id = walk.current_id"
+          : "(edge.source_instance_id = walk.current_id OR edge.target_instance_id = walk.current_id)";
+      const nextId = input.direction === "out"
+        ? "edge.target_instance_id"
+        : input.direction === "in"
+          ? "edge.source_instance_id"
+          : "CASE WHEN edge.source_instance_id = walk.current_id THEN edge.target_instance_id ELSE edge.source_instance_id END";
+      const traversal = await transaction.query({
+        text: [
+          "WITH RECURSIVE start_nodes AS (",
+          "  SELECT graph.instance_id, space.external_id AS space_external_id, graph.external_id",
+          "  FROM odf.graph_instances graph",
+          "  JOIN odf.model_spaces space ON space.tenant_id = graph.tenant_id AND space.project_id = graph.project_id AND space.space_id = graph.space_id",
+          "  WHERE graph.tenant_id = $1::uuid AND graph.project_id = $2::uuid AND graph.data_model_id = $3::uuid AND graph.instance_kind = 'node'",
+          "    AND (space.external_id, graph.external_id) IN (SELECT * FROM unnest($4::text[], $5::text[]))",
+          "), walk AS (",
+          "  SELECT start_nodes.instance_id AS current_id, ARRAY[start_nodes.instance_id]::uuid[] AS visited, 0 AS depth,",
+          "    jsonb_build_array(jsonb_build_object('space', start_nodes.space_external_id, 'externalId', start_nodes.external_id)) AS instance_path,",
+          "    '[]'::jsonb AS edge_path",
+          "  FROM start_nodes",
+          "  UNION ALL",
+          `  SELECT next_graph.instance_id, walk.visited || next_graph.instance_id, walk.depth + 1,`,
+          "    walk.instance_path || jsonb_build_array(jsonb_build_object('space', next_space.external_id, 'externalId', next_graph.external_id)),",
+          "    walk.edge_path || jsonb_build_array(jsonb_build_object('space', edge_space.external_id, 'externalId', edge.external_id))",
+          "  FROM walk",
+          `  JOIN odf.graph_instances edge ON edge.tenant_id = $1::uuid AND edge.project_id = $2::uuid AND edge.data_model_id = $3::uuid AND edge.instance_kind = 'edge' AND ${edgeJoin}`,
+          "    AND ($7::uuid IS NULL OR edge.model_view_id = $7::uuid)",
+          `  JOIN odf.graph_instances next_graph ON next_graph.tenant_id = $1::uuid AND next_graph.project_id = $2::uuid AND next_graph.data_model_id = $3::uuid AND next_graph.instance_id = ${nextId} AND next_graph.instance_kind = 'node'`,
+          "  JOIN odf.model_spaces next_space ON next_space.tenant_id = next_graph.tenant_id AND next_space.project_id = next_graph.project_id AND next_space.space_id = next_graph.space_id",
+          "  JOIN odf.model_spaces edge_space ON edge_space.tenant_id = edge.tenant_id AND edge_space.project_id = edge.project_id AND edge_space.space_id = edge.space_id",
+          "  WHERE walk.depth < $6::integer AND NOT (next_graph.instance_id = ANY(walk.visited))",
+          ")",
+          "SELECT instance_path, edge_path FROM walk WHERE depth > 0",
+          "ORDER BY depth, instance_path::text, edge_path::text",
+          "LIMIT $8::integer",
+        ].join("\n"),
+        values: [scope.tenantId, scope.projectId, dataModelId, startSpaces, startExternalIds, maxHops, edgeViewId, limit + 1],
+      });
+      return {
+        paths: traversal.rows.slice(0, limit).map(instancePathFromRow),
+        truncated: traversal.rows.length > limit,
+      };
+    });
+  }
+
+  async aggregateModelInstances(
+    scope: ProjectScope,
+    modelIdInput: string,
+    version: number,
+    input: PublicInstanceAggregateRequest,
+  ): Promise<PublicInstanceAggregateResult> {
+    const modelId = requiredText(modelIdInput, "modelId");
+    if (!Number.isSafeInteger(version) || version < 1) throw new RangeError("version must be a positive integer");
+    return this.read(scope, async (transaction) => {
+      await setModelStatementTimeout(transaction);
+      const model = await transaction.query({
+        text: "SELECT " + DATA_MODEL_COLUMNS + " FROM odf.data_models WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND external_id = $3 AND version = $4 AND state = 'published'",
+        values: [scope.tenantId, scope.projectId, modelId, String(version)],
+      });
+      const modelRow = model.rows[0];
+      if (!modelRow) throw new NotFoundError("Published model version was not found");
+      const dataModelId = String(modelRow.data_model_id);
+      const views = await transaction.query({
+        text: "SELECT " + MODEL_VIEW_COLUMNS + " FROM odf.model_views WHERE tenant_id = $1::uuid AND data_model_id = $2::uuid ORDER BY created_at, external_id, model_view_id",
+        values: [scope.tenantId, dataModelId],
+      });
+      const viewRecord = views.rows.map(modelViewFromRow).find((candidate) => candidate.externalId === input.viewExternalId);
+      if (!viewRecord) throw new NotFoundError("Model view was not found");
+      const view = normalizeModelView(viewRecord.definition as unknown as PublicModelViewDefinition);
+      const normalized = normalizeInstanceAggregate(view, input) as PublicInstanceAggregateRequest;
+      const compiled = compilePostgresModelAggregate({
+        tenantId: scope.tenantId,
+        projectId: scope.projectId,
+        dataModelId,
+        modelViewId: viewRecord.modelViewId,
+        view,
+        request: normalized,
+      });
+      const rows = (await transaction.query(compiled)).rows;
+      const limit = normalized.limit ?? 200;
+      const groups = rows.slice(0, limit).map((row) => {
+        const group = rowJsonObject(row, "group_values");
+        const rawMetrics = rowJsonObject(row, "metric_values");
+        const metrics: Record<string, number | null> = {};
+        for (const [name, value] of Object.entries(rawMetrics)) {
+          if (value !== null && (typeof value !== "number" || !Number.isFinite(value))) {
+            throw new TypeError("Expected numeric model aggregate from PostgreSQL");
+          }
+          metrics[name] = value;
+        }
+        return { group, metrics };
+      });
+      return { groups, truncated: rows.length > limit };
     });
   }
 }
