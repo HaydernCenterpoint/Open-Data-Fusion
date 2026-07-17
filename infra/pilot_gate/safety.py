@@ -72,6 +72,11 @@ VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"\s*[:=]\s*(?:\"(?:\\.|[^\"\r\n])*\"|'(?:\\.|[^'\r\n])*'|[^\r\n]+)"
     ),
     re.compile(
+        r"(?i)\bhttps?://[^\s\"']*[?&]"
+        r"(?:x-amz-signature|x-goog-signature|access_token|token|signature|sig)="
+        r"[^\s\"']+"
+    ),
+    re.compile(
         r"""
         (?<![A-Za-z0-9_-])[\"']?
         (?:

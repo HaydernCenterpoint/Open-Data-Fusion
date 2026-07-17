@@ -167,6 +167,29 @@ class PilotEvidenceSafetyTests(unittest.TestCase):
                 redacted, count = redact_text(value)
                 self.assertEqual((redacted, count), ("[REDACTED]", 1))
 
+    def test_rejects_and_redacts_signed_query_credentials(self) -> None:
+        values = (
+            "https://objects.example/pilot?X-Amz-Signature=deadbeef&part=1",
+            "https://objects.example/pilot?X-Goog-Signature=deadbeef",
+            "https://api.example/export?access_token=opaque-token",
+        )
+
+        for value in values:
+            with self.subTest(value=value):
+                with self.assertRaises(UnsafeEvidenceError):
+                    assert_safe_json({"summary": value})
+                redacted, count = redact_text(value)
+                self.assertEqual((redacted, count), ("[REDACTED]", 1))
+
+    def test_allows_ordinary_security_summaries(self) -> None:
+        value = (
+            "Authorization checks passed; cookie policy enabled; "
+            "database URL validation and API key rotation completed"
+        )
+
+        assert_safe_json({"summary": value, "metrics": {"checksPassed": 4}})
+        self.assertEqual(redact_text(value), (value, 0))
+
 
 if __name__ == "__main__":
     unittest.main()
