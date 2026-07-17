@@ -19,7 +19,7 @@ from .contract import (
     RUN_ID_PATTERN,
     SHA256_PATTERN,
 )
-from .safety import assert_safe_json
+from .safety import UnsafeEvidenceError, assert_safe_json
 
 
 class EvidenceError(ValueError):
@@ -371,6 +371,7 @@ class EvidenceStore:
             canonical_json(supporting)
         ):
             raise EvidenceError("pilot decision supporting index hash does not match")
+        self._load_supporting_from_run(run)
         attestation_digest = decision.get("reviewerAttestationSha256")
         attestation_path_value = decision.get("reviewerAttestationPath")
         if not isinstance(attestation_digest, str) or not SHA256_PATTERN.fullmatch(
@@ -519,6 +520,159 @@ class EvidenceStore:
             run = self._repair_decision(self._read_run_unlocked())
             return self._load_checks_from_run(run)
 
+    @staticmethod
+    def _validate_supporting_evidence(raw_value: object) -> dict[str, object]:
+        try:
+            assert_safe_json(raw_value)
+        except UnsafeEvidenceError as error:
+            raise EvidenceError(str(error)) from error
+        if not isinstance(raw_value, dict):
+            raise EvidenceError("supporting evidence must be an object")
+        expected_fields = {
+            "schemaVersion",
+            "checkId",
+            "status",
+            "startedAt",
+            "completedAt",
+            "summary",
+            "metrics",
+        }
+        if set(raw_value) != expected_fields or type(
+            raw_value.get("schemaVersion")
+        ) is not int or raw_value.get("schemaVersion") != SCHEMA_VERSION:
+            raise EvidenceError("supporting evidence fields do not match the contract")
+        check_id = raw_value.get("checkId")
+        from .adapters import ADAPTERS
+
+        expected_check_ids = {f"synthetic-{adapter_id}" for adapter_id in ADAPTERS}
+        if not isinstance(check_id, str) or check_id not in expected_check_ids:
+            raise EvidenceError("supporting checkId is not an allowlisted adapter")
+        status = raw_value.get("status")
+        if status not in {"passed", "failed"}:
+            raise EvidenceError("supporting status must be passed or failed")
+        started_at = _utc_timestamp(
+            raw_value.get("startedAt"), "supporting.startedAt"
+        )
+        completed_at = _utc_timestamp(
+            raw_value.get("completedAt"), "supporting.completedAt"
+        )
+        if datetime.fromisoformat(completed_at.replace("Z", "+00:00")) < datetime.fromisoformat(
+            started_at.replace("Z", "+00:00")
+        ):
+            raise EvidenceError("supporting completedAt must not precede startedAt")
+        metrics = raw_value.get("metrics")
+        if not isinstance(metrics, dict) or set(metrics) != {
+            "returnCode",
+            "durationMilliseconds",
+            "redactionCount",
+            "timedOut",
+        }:
+            raise EvidenceError("supporting metrics do not match the contract")
+        return_code = metrics.get("returnCode")
+        duration = metrics.get("durationMilliseconds")
+        redaction_count = metrics.get("redactionCount")
+        timed_out = metrics.get("timedOut")
+        if type(duration) is not int or duration < 0:
+            raise EvidenceError("supporting durationMilliseconds is invalid")
+        if type(redaction_count) is not int or redaction_count < 0:
+            raise EvidenceError("supporting redactionCount is invalid")
+        if type(timed_out) is not bool:
+            raise EvidenceError("supporting timedOut is invalid")
+        if timed_out:
+            if return_code is not None or status != "failed":
+                raise EvidenceError("timed-out supporting evidence is inconsistent")
+            expected_summary = f"{str(check_id)[len('synthetic-'):]} exceeded its fixed timeout"
+        else:
+            if type(return_code) is not int:
+                raise EvidenceError("supporting returnCode is invalid")
+            expected_status = "passed" if return_code == 0 else "failed"
+            if status != expected_status:
+                raise EvidenceError("supporting status contradicts returnCode")
+            adapter_id = str(check_id)[len("synthetic-") :]
+            expected_summary = (
+                f"{adapter_id} completed successfully"
+                if return_code == 0
+                else f"{adapter_id} failed with exit code {return_code}"
+            )
+        if raw_value.get("summary") != expected_summary:
+            raise EvidenceError("supporting summary must be the fixed adapter summary")
+        return json.loads(canonical_json(raw_value))
+
+    def _load_supporting_from_run(
+        self, run: dict[str, Any]
+    ) -> dict[str, dict[str, object]]:
+        supporting_value = run.get("supportingEvidence")
+        if not isinstance(supporting_value, dict):
+            raise EvidenceError("supporting evidence index is invalid")
+        result: dict[str, dict[str, object]] = {}
+        for check_id, entry_value in supporting_value.items():
+            if not isinstance(check_id, str) or not isinstance(entry_value, dict):
+                raise EvidenceError("supporting evidence index entry is invalid")
+            digest = entry_value.get("sha256")
+            expected_path = (
+                Path("supporting") / f"{check_id}-{digest}.json"
+                if isinstance(digest, str)
+                else None
+            )
+            if (
+                set(entry_value) != {"path", "sha256", "status"}
+                or not isinstance(digest, str)
+                or not SHA256_PATTERN.fullmatch(digest)
+                or expected_path is None
+                or entry_value.get("path") != expected_path.as_posix()
+                or entry_value.get("status") not in {"passed", "failed"}
+            ):
+                raise EvidenceError(f"invalid supporting index entry: {check_id}")
+            path = self.run_directory / expected_path
+            try:
+                encoded = path.read_bytes()
+            except OSError as error:
+                raise EvidenceError(
+                    f"supporting evidence is missing: {check_id}"
+                ) from error
+            if sha256_hex(encoded) != digest:
+                raise EvidenceError(f"supporting evidence hash mismatch: {check_id}")
+            parsed = self._validate_supporting_evidence(_load_json(path))
+            if parsed.get("checkId") != check_id:
+                raise EvidenceError(
+                    f"supporting evidence identity mismatch: {check_id}"
+                )
+            if parsed.get("status") != entry_value.get("status"):
+                raise EvidenceError(f"supporting evidence status mismatch: {check_id}")
+            result[check_id] = parsed
+        return result
+
+    def load_supporting_evidence(self) -> dict[str, dict[str, object]]:
+        with _run_lock(self.run_directory):
+            run = self._repair_decision(self._read_run_unlocked())
+            return self._load_supporting_from_run(run)
+
+    def record_supporting_evidence(self, raw_value: object) -> None:
+        payload = self._validate_supporting_evidence(raw_value)
+        check_id = payload["checkId"]
+        assert isinstance(check_id, str)
+        with _run_lock(self.run_directory):
+            run = self._repair_decision(self._read_run_unlocked())
+            if run.get("state") in {"passed", "failed"}:
+                raise EvidenceError("terminal pilot state cannot be modified")
+            supporting_value = run.get("supportingEvidence")
+            if not isinstance(supporting_value, dict):
+                raise EvidenceError("supporting evidence index is invalid")
+            supporting = dict(supporting_value)
+            if check_id in supporting:
+                raise EvidenceError("supporting evidence is append-only")
+            encoded = canonical_json(payload)
+            digest = sha256_hex(encoded)
+            relative_path = Path("supporting") / f"{check_id}-{digest}.json"
+            _write_content_addressed(self.run_directory / relative_path, encoded)
+            supporting[check_id] = {
+                "path": relative_path.as_posix(),
+                "sha256": digest,
+                "status": payload["status"],
+            }
+            run["supportingEvidence"] = supporting
+            self._write_run(run)
+
     def finalize(
         self, attestation: object, reviewer_key: bytes
     ) -> dict[str, object]:
@@ -533,6 +687,7 @@ class EvidenceStore:
                 self.manifest, run, attestation, reviewer_key
             )
             checks = self._load_checks_from_run(run)
+            self._load_supporting_from_run(run)
             violations = evaluate(self.manifest, checks)
             outcome = "passed" if not violations else "failed"
             attestation_encoded = canonical_json(verified_attestation)
