@@ -137,6 +137,60 @@ class PilotGateAssetTests(unittest.TestCase):
 
         self.assertEqual(package["scripts"]["pilot:gate"], "python -m infra.pilot_gate")
 
+    def test_operator_runbook_preserves_pilot_safety_boundaries(self) -> None:
+        from infra.pilot_gate.contract import REQUIRED_CHECK_IDS
+        from infra.pilot_gate.evaluation import (
+            BOOLEAN_PROOFS_BY_CHECK,
+            CONNECTOR_PROOFS_BY_KIND,
+        )
+
+        root = VALIDATOR_PATH.parents[2]
+        runbook_path = root / "docs/operations/production-pilot-gate.md"
+        runbook = runbook_path.read_text(encoding="utf-8")
+        lowered = runbook.lower()
+
+        for invariant in (
+            "synthetic results do not satisfy",
+            "failed predecessor",
+            "independent reviewer",
+            "pilot:gate -- evaluate",
+            "read-only pilot scope",
+            "managed staging",
+            "stdout/stderr",
+        ):
+            with self.subTest(invariant=invariant):
+                self.assertIn(invariant, lowered)
+        self.assertIn("ODF_PILOT_REVIEWER_HMAC_KEY", runbook)
+        self.assertIn("OIDC/KMS", runbook)
+        required_names = set(REQUIRED_CHECK_IDS)
+        required_names.update(
+            proof
+            for proofs in BOOLEAN_PROOFS_BY_CHECK.values()
+            for proof in proofs
+        )
+        required_names.update(
+            proof
+            for proofs in CONNECTOR_PROOFS_BY_KIND.values()
+            for proof in proofs
+        )
+        self.assertEqual(
+            sorted(name for name in required_names if name not in runbook), []
+        )
+
+    def test_readme_discovers_the_runner_without_closing_live_drills(self) -> None:
+        readme = (VALIDATOR_PATH.parents[2] / "README.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("docs/operations/production-pilot-gate.md", readme)
+        self.assertIn(
+            "- [x] Add a provider-neutral Production Pilot Gate runner", readme
+        )
+        self.assertIn(
+            "- [ ] Validate live design-partner CSV, JDBC/PostgreSQL, and OPC UA",
+            readme,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -504,7 +504,7 @@ Before starting infrastructure, supply unique secrets through the environment or
 > [!NOTE]
 > `application-preview` explicitly uses `ODF_DATA_PERSISTENCE=sqlite` and starts without demonstration data. The static web image has no `/api` reverse proxy, so the browser UI cannot reach the API until an ingress/proxy routes `/api` to port `4310`. The profile proves container build contexts and service startup; it is not a functional standalone deployment or the PostgreSQL production cutover.
 
-The [`production-like` runbook](docs/operations/postgres-canvas-production-like.md) documents the separate least-privilege API/outbox logins, required tenant/project UUID headers for industrial-core and Canvas calls, a real bundle-ingest check, and the multi-instance outbox/Redis/SSE rehearsal. The [shared object-storage runbook](docs/operations/shared-object-storage.md) covers the versioned S3-compatible boundary, recovery, and credential rotation. This is a local/CI validation topology, not an internet-facing production deployment.
+The [`production-like` runbook](docs/operations/postgres-canvas-production-like.md) documents the separate least-privilege API/outbox logins, required tenant/project UUID headers for industrial-core and Canvas calls, a real bundle-ingest check, and the multi-instance outbox/Redis/SSE rehearsal. The [Production Pilot Gate runbook](docs/operations/production-pilot-gate.md) explains how a managed-staging operator and independent reviewer record and evaluate immutable read-only pilot evidence. The [shared object-storage runbook](docs/operations/shared-object-storage.md) covers the versioned S3-compatible boundary, recovery, and credential rotation. Local/CI validation alone does not certify an internet-facing production deployment.
 
 ### Running workers
 
@@ -642,6 +642,7 @@ membership after evidence and validation are retained.
 | `npm test` | Run every workspace test suite |
 | `npm run build` | Build every workspace and the production web bundle |
 | `npm run infra:validate` | Verify migration checksums, RLS, Compose, Docker, and observability guardrails |
+| `npm run pilot:gate -- <command>` | Validate, initialize, record, attest, and evaluate a managed-staging Production Pilot Gate |
 | `npm run infra:production-like` | Start the PostgreSQL industrial-core/Canvas, Redis, Keycloak, two-replica validation topology (requires explicit secrets and dedicated URLs) |
 | `npm run check` | Run typecheck, tests, builds, and infrastructure validation |
 | `npm run check:release` | Add dependency audit and full dependency-tree validation |
@@ -710,6 +711,7 @@ Additional references:
 - [API documentation](apps/api/README.md)
 - [PostgreSQL runtime contract](packages/postgres-runtime/README.md)
 - [PostgreSQL industrial-core and Canvas production-like runbook](docs/operations/postgres-canvas-production-like.md)
+- [Production Pilot Gate managed-staging runbook](docs/operations/production-pilot-gate.md)
 - [Shared PostgreSQL object-storage runbook](docs/operations/shared-object-storage.md)
 - [Design system](docs/design/design-system.md)
 - [Authentication profiles](docs/security/authentication.md)
@@ -739,6 +741,7 @@ Additional references:
 - [x] Move raw landing and governed-object metadata/content to PostgreSQL plus shared versioned S3-compatible storage without dual-write
 - [x] Persist governed PostgreSQL tenant/project administration and project membership workflows; retain initial tenant bootstrap as a separate operator boundary
 - [x] Move platform catalog compatibility, cross-surface search/indexing, advanced-product API records, and write-back ledgers to PostgreSQL without SQLite fallback
+- [x] Add a provider-neutral Production Pilot Gate runner, immutable evidence contract, and managed-staging operator runbook
 - [ ] Rehearse backup/restore, broker failure, dead-letter, and multi-instance concurrency beyond the CI industrial/Canvas/outbox smoke
 - [ ] Complete production ingress, TLS/mTLS, secret-manager, and network-isolation design
 - [ ] Add durable trace/log storage, worker telemetry, SLOs, and operational runbooks

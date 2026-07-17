@@ -51,6 +51,25 @@ def main() -> None:
         ["reviewerKeySha256", "migrationSetSha256", "writebackAuthorized"],
         "production pilot manifest",
     )
+    pilot_runbook = read("docs/operations/production-pilot-gate.md")
+    require(
+        pilot_runbook.lower(),
+        [
+            "synthetic results do not satisfy",
+            "failed predecessor",
+            "independent reviewer",
+            "pilot:gate -- evaluate",
+            "read-only pilot scope",
+            "managed staging",
+            "stdout/stderr",
+        ],
+        "production pilot gate runbook",
+    )
+    require(
+        pilot_runbook,
+        ["ODF_PILOT_REVIEWER_HMAC_KEY", "OIDC/KMS"],
+        "production pilot gate runbook",
+    )
 
     backup = read("infra/ci/postgres-backup-restore-rehearsal.sh")
     broker_rehearsal = read("infra/ci/outbox-broker-rehearsal.sh")
@@ -327,6 +346,7 @@ def main() -> None:
         "docs/operations/outbox-dead-letter-recovery.md",
         "docs/operations/observability-slos.md",
         "docs/operations/production-ingress-security.md",
+        "docs/operations/production-pilot-gate.md",
     ]:
         _ = read(runbook)
 
