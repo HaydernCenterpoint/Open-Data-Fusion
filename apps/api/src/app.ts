@@ -62,6 +62,7 @@ import {
   telemetryAggregateQuerySchema,
   telemetryLatestQuerySchema,
   telemetryQuerySchema,
+  type IngestBundle,
   workspaceCreateSchema,
   workspaceIdSchema,
   workspaceMemberUpsertSchema,
@@ -285,7 +286,9 @@ export function createApp(
   const identityProvider = options.identityProvider ?? new DevelopmentIdentityProvider();
   const workspacePersistence = options.workspacePersistence;
   const industrialPersistence = options.industrialPersistence ?? new SqliteIndustrialPersistence(database.database);
+  const usesScopedSqliteIndustrialPersistence = industrialPersistence instanceof SqliteIndustrialPersistence;
   const platformCatalog = new PlatformCatalog(database.database);
+  if (usesScopedSqliteIndustrialPersistence) platformCatalog.rebuildSqliteAssetSearchIndex();
   const platformDiscovery = options.platformDiscovery ?? new SqlitePlatformDiscoveryPersistence(platformCatalog);
   const advancedPlatformCatalog = new AdvancedPlatformCatalog(database.database, {
     ...(options.writebackPolicy ? { writebackPolicy: options.writebackPolicy } : {}),
@@ -385,6 +388,19 @@ export function createApp(
     return scope;
   };
 
+  const indexSqliteAssets = (context: PlatformContext, assets: IngestBundle['assets']): void => {
+    if (!usesScopedSqliteIndustrialPersistence) return;
+    for (const asset of assets) {
+      platformCatalog.indexSearchDocument(
+        context,
+        'asset',
+        asset.externalId,
+        asset.name,
+        `${asset.description ?? ''} ${asset.type}`.trim(),
+      );
+    }
+  };
+
   // Register binary upload/download routes before JSON parsing so a governed
   // `application/json` file remains an opaque stream rather than an API body.
   registerGovernedObjectRoutes(app, governedObjectStore, async (request, permission, roles) => {
@@ -472,6 +488,7 @@ export function createApp(
           contentType: 'application/json',
         } : undefined,
       );
+      indexSqliteAssets(scope, authorizedBundle.assets);
       if (rawLanding && rawRecord && context) await rawLanding.complete(context, rawRecord.id, 'accepted');
       response.status(result.status === 'already_processed' ? 200 : 201).json({
         ...result,
@@ -575,6 +592,7 @@ export function createApp(
         contentType: 'application/json',
       },
     );
+    indexSqliteAssets(context, bundle.assets);
     const rawObject = await rawLanding.markReplayed(context, rawId, replayRunId);
     response.status(201).json({ ...result, replayedFromRawObjectId: rawId, rawObject });
   });

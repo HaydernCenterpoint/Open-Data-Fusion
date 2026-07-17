@@ -530,6 +530,16 @@ describe('platform catalog API', () => {
   });
 
   it('searches existing assets and newly projected platform entities', async () => {
+    const ingest = await scope(authorize(
+      request(app).post('/api/v1/ingest/bundle'),
+      'riley.chen',
+      ['data:ingest'],
+    )).send({
+      source: { system: 'search-test', runId: 'search-test-pump' },
+      assets: [{ externalId: 'P-101', name: 'Pump P-101', type: 'Pump' }],
+    });
+    expect(ingest.status).toBe(201);
+
     await scope(authorize(
       request(app).post('/api/v1/platform/datasets'),
       'riley.chen',
@@ -537,12 +547,15 @@ describe('platform catalog API', () => {
     )).send({ id: 'maintenance-insights', name: 'Maintenance Insights', description: 'Pump maintenance analytics' });
 
     const assetSearch = await scope(authorize(
-      request(app).get('/api/v1/platform/search').query({ q: 'Pump P-101' }),
+      request(app).get('/api/v1/platform/search').query({ q: 'Pump' }),
       'samantha.lee',
       ['data:read'],
     ));
     expect(assetSearch.body.items).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityType: 'asset', entityId: 'P-101' }),
+    ]));
+    expect(assetSearch.body.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityType: 'asset', entityId: 'P-102' }),
     ]));
 
     const catalogSearch = await scope(authorize(
