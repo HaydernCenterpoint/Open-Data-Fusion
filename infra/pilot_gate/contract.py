@@ -171,7 +171,8 @@ def parse_manifest(raw_value: object) -> PilotManifest:
         },
         "manifest",
     )
-    if raw.get("schemaVersion") != SCHEMA_VERSION:
+    schema_version = raw.get("schemaVersion")
+    if type(schema_version) is not int or schema_version != SCHEMA_VERSION:
         raise ContractError(f"schemaVersion must be {SCHEMA_VERSION}")
 
     pilot_run_id = _text(raw.get("pilotRunId"), "pilotRunId", RUN_ID_PATTERN)

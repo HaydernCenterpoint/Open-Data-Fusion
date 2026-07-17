@@ -110,6 +110,15 @@ class PilotManifestContractTests(unittest.TestCase):
             ["csv", "postgres", "opcua"],
         )
 
+    def test_schema_version_requires_the_integer_one(self) -> None:
+        for schema_version in (True, 1.0):
+            with self.subTest(schema_version=schema_version):
+                raw = valid_manifest()
+                raw["schemaVersion"] = schema_version
+
+                with self.assertRaisesRegex(ContractError, "schemaVersion must be 1"):
+                    parse_manifest(raw)
+
     def test_rejects_a_weaker_target(self) -> None:
         raw = valid_manifest()
         assert isinstance(raw["targets"], dict)
