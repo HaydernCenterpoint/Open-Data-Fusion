@@ -214,6 +214,9 @@ export interface GraphInstanceRecord {
   externalId: string;
   instanceKind: "node" | "edge";
   dataModelId: string | null;
+  modelViewId: string | null;
+  sourceInstanceId: string | null;
+  targetInstanceId: string | null;
   properties: JsonObject;
   validFrom: string | null;
   validTo: string | null;
@@ -587,6 +590,34 @@ export interface CreatePublicModelViewInput extends PublicModelViewDefinition {
   correlationId: string;
 }
 
+export interface PublicInstanceKey {
+  space: string;
+  externalId: string;
+}
+
+export interface PublicInstanceUpsertItem extends PublicInstanceKey {
+  kind: "node" | "edge";
+  viewExternalId: string;
+  source?: PublicInstanceKey;
+  target?: PublicInstanceKey;
+  properties: JsonObject;
+}
+
+export interface PublicInstanceUpsertRequest {
+  idempotencyKey: string;
+  instances: PublicInstanceUpsertItem[];
+}
+
+export interface PublicInstanceUpsertResult {
+  modelId: string;
+  version: number;
+  total: number;
+  created: number;
+  updated: number;
+  replayed: boolean;
+  requestHash: string;
+}
+
 export interface CreateGraphInstanceInput {
   instanceId: string;
   datasetId?: string | null;
@@ -815,6 +846,7 @@ export interface ModelRepository {
   listModelViews(scope: ProjectScope, modelId: string, version: number): Promise<PublicModelView[]>;
   createModelView(scope: ProjectScope, modelId: string, version: number, input: CreatePublicModelViewInput): Promise<PublicModelView>;
   publishModelVersion(scope: ProjectScope, modelId: string, version: number, correlationId: string): Promise<PublicModelVersion>;
+  upsertModelInstances(scope: ProjectScope, modelId: string, version: number, input: PublicInstanceUpsertRequest, correlationId: string): Promise<PublicInstanceUpsertResult>;
 }
 
 export interface PipelineQualityRepository {

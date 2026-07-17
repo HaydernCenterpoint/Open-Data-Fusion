@@ -3,8 +3,10 @@ import { ConflictError, NotFoundError } from "./errors.js";
 import { appendPlatformAuditAndOutbox } from "./platform-events.js";
 import { insertGraphInstanceIdempotent } from "./graph-helpers.js";
 import { json } from "./mappers.js";
+import { normalizeModelInstanceBatch, publicInstanceKey } from "./model-instance-helpers.js";
 import {
   dataModelFromRow,
+  graphInstanceFromRow,
   modelViewFromRow,
   publicModelVersionFromRow,
 } from "./platform-mappers.js";
@@ -26,6 +28,9 @@ import type {
   PublicModelVersion,
   PublicModelView,
   PublicModelViewDefinition,
+  PublicInstanceKey,
+  PublicInstanceUpsertRequest,
+  PublicInstanceUpsertResult,
   TimestampIdCursor,
 } from "./platform-types.js";
 import type { JsonObject, KeysetPage, ScopedTransaction, TransactionRunner } from "./types.js";
@@ -37,6 +42,11 @@ const DATA_MODEL_COLUMNS = [
 
 const MODEL_VIEW_COLUMNS = [
   "model_view_id, tenant_id, data_model_id, external_id, version, name, definition, created_at",
+].join(" ");
+
+const MANAGED_GRAPH_COLUMNS = [
+  "instance_id, tenant_id, project_id, dataset_id, space_id, external_id, instance_kind, data_model_id,",
+  "model_view_id, source_instance_id, target_instance_id, properties, valid_from, valid_to, created_at, updated_at",
 ].join(" ");
 
 const PUBLIC_VERSION_PREDICATE = "version ~ '^[1-9][0-9]*$' AND length(version) <= 9";
@@ -60,6 +70,20 @@ function publicView(record: ModelViewRecord, modelId: string, modelVersion: numb
     modelVersion,
     createdAt: record.createdAt,
   };
+}
+
+function replayCount(summary: unknown, field: "total" | "created" | "updated"): number {
+  const parsed = typeof summary === "string" ? JSON.parse(summary) as unknown : summary;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new ConflictError("Model graph replay summary is invalid");
+  const value = (parsed as Record<string, unknown>)[field];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new ConflictError("Model graph replay summary is invalid");
+  }
+  return value;
+}
+
+function keyArrays(keys: PublicInstanceKey[]): [string[], string[]] {
+  return [keys.map((key) => key.space), keys.map((key) => key.externalId)];
 }
 
 function canonical(value: unknown): string {
@@ -509,6 +533,208 @@ export class PostgresModelRepository extends PolicyAwareRepository implements Mo
         details: { modelId, version },
       });
       return result;
+    });
+  }
+
+  async upsertModelInstances(
+    scope: ProjectScope,
+    modelIdInput: string,
+    version: number,
+    input: PublicInstanceUpsertRequest,
+    correlationIdInput: string,
+  ): Promise<PublicInstanceUpsertResult> {
+    const modelId = requiredText(modelIdInput, "modelId");
+    if (!Number.isSafeInteger(version) || version < 1) throw new RangeError("version must be a positive integer");
+    const idempotencyKey = requiredText(input.idempotencyKey, "idempotencyKey");
+    const correlationId = requiredText(correlationIdInput, "correlationId");
+    return this.write(scope, async (transaction) => {
+      await setModelStatementTimeout(transaction);
+      const modelResult = await transaction.query({
+        text: [
+          "SELECT " + DATA_MODEL_COLUMNS,
+          "FROM odf.data_models",
+          "WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND external_id = $3 AND version = $4",
+          "  AND state = 'published'",
+        ].join("\n"),
+        values: [scope.tenantId, scope.projectId, modelId, String(version)],
+      });
+      const modelRow = modelResult.rows[0];
+      if (!modelRow) throw new NotFoundError("Published model version was not found");
+      const dataModelId = String(modelRow.data_model_id);
+
+      const viewResult = await transaction.query({
+        text: "SELECT " + MODEL_VIEW_COLUMNS + " FROM odf.model_views WHERE tenant_id = $1::uuid AND data_model_id = $2::uuid ORDER BY created_at, external_id, model_view_id",
+        values: [scope.tenantId, dataModelId],
+      });
+      const viewRecords = viewResult.rows.map(modelViewFromRow);
+      const views = viewRecords.map((record) => normalizeModelView(record.definition as unknown as PublicModelViewDefinition));
+      const viewIds = new Map(viewRecords.map((record) => [record.externalId, record.modelViewId]));
+      const normalized = normalizeModelInstanceBatch(modelId, version, views, input);
+
+      await transaction.query({
+        text: "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        values: [`odf:model-batch:${scope.tenantId}:${scope.projectId}:${dataModelId}:${idempotencyKey}`],
+      });
+      const replay = await transaction.query({
+        text: [
+          "SELECT request_hash, summary",
+          "FROM odf.model_graph_batch_keys",
+          "WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND data_model_id = $3::uuid AND idempotency_key = $4",
+        ].join("\n"),
+        values: [scope.tenantId, scope.projectId, dataModelId, idempotencyKey],
+      });
+      if (replay.rows[0]) {
+        if (replay.rows[0].request_hash !== normalized.requestHash) {
+          throw new ConflictError("Idempotency key is already bound to a different model graph request");
+        }
+        const summary = replay.rows[0].summary;
+        return {
+          modelId,
+          version,
+          total: replayCount(summary, "total"),
+          created: replayCount(summary, "created"),
+          updated: replayCount(summary, "updated"),
+          replayed: true,
+          requestHash: normalized.requestHash,
+        };
+      }
+
+      const allKeys = new Map<string, PublicInstanceKey>();
+      for (const instance of normalized.instances) allKeys.set(publicInstanceKey(instance), instance);
+      for (const reference of normalized.referencedKeys) allKeys.set(publicInstanceKey(reference), reference);
+      const keys = [...allKeys.values()];
+      const spaces = [...new Set(keys.map((key) => key.space))];
+      const resolvedSpaces = await transaction.query({
+        text: [
+          "SELECT space_id, external_id",
+          "FROM odf.model_spaces",
+          "WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND external_id = ANY($3::text[])",
+        ].join("\n"),
+        values: [scope.tenantId, scope.projectId, spaces],
+      });
+      const spaceIds = new Map(resolvedSpaces.rows.map((row) => [String(row.external_id), String(row.space_id)]));
+      const missingSpace = spaces.find((space) => !spaceIds.has(space));
+      if (missingSpace) throw new NotFoundError(`Model space '${missingSpace}' was not found`);
+
+      const [keySpaces, keyExternalIds] = keyArrays(keys);
+      const existingResult = await transaction.query({
+        text: [
+          "WITH existing_graph_instances AS (",
+          "  SELECT graph_instances.*, model_spaces.external_id AS space_external_id",
+          "  FROM odf.graph_instances graph_instances",
+          "  JOIN odf.model_spaces model_spaces",
+          "    ON model_spaces.tenant_id = graph_instances.tenant_id",
+          "   AND model_spaces.project_id = graph_instances.project_id",
+          "   AND model_spaces.space_id = graph_instances.space_id",
+          "  WHERE graph_instances.tenant_id = $1::uuid AND graph_instances.project_id = $2::uuid",
+          "    AND (model_spaces.external_id, graph_instances.external_id) IN",
+          "      (SELECT * FROM unnest($3::text[], $4::text[]))",
+          ") SELECT * FROM existing_graph_instances",
+        ].join("\n"),
+        values: [scope.tenantId, scope.projectId, keySpaces, keyExternalIds],
+      });
+      const existingByKey = new Map<string, ReturnType<typeof graphInstanceFromRow>>();
+      for (const row of existingResult.rows) {
+        const graph = graphInstanceFromRow(row);
+        existingByKey.set(publicInstanceKey({ space: String(row.space_external_id), externalId: graph.externalId }), graph);
+      }
+
+      const batchByKey = new Map(normalized.instances.map((instance) => [publicInstanceKey(instance), instance]));
+      for (const instance of normalized.instances) {
+        const existing = existingByKey.get(publicInstanceKey(instance));
+        if (existing && (existing.dataModelId !== dataModelId || existing.modelViewId === null)) {
+          throw new ConflictError("Instance key collides with an unbound or different-model graph record");
+        }
+      }
+      for (const reference of normalized.referencedKeys) {
+        const key = publicInstanceKey(reference);
+        const batched = batchByKey.get(key);
+        if (batched) {
+          if (batched.kind !== "node") throw new ConflictError("Model graph references must target nodes");
+          continue;
+        }
+        const existing = existingByKey.get(key);
+        if (!existing) throw new NotFoundError("Model graph reference was not found in the project");
+        if (existing.instanceKind !== "node") throw new ConflictError("Model graph references must target nodes");
+      }
+
+      let created = 0;
+      let updated = 0;
+      const resolvedIds = new Map<string, string>();
+      for (const [key, existing] of existingByKey) resolvedIds.set(key, existing.instanceId);
+      const ordered = [
+        ...normalized.instances.filter((instance) => instance.kind === "node"),
+        ...normalized.instances.filter((instance) => instance.kind === "edge"),
+      ];
+      for (const instance of ordered) {
+        const sourceId = instance.source ? resolvedIds.get(publicInstanceKey(instance.source)) : null;
+        const targetId = instance.target ? resolvedIds.get(publicInstanceKey(instance.target)) : null;
+        if (instance.kind === "edge" && (!sourceId || !targetId)) {
+          throw new NotFoundError("Model graph edge endpoint was not found in the project");
+        }
+        const modelViewId = viewIds.get(instance.viewExternalId);
+        if (!modelViewId) throw new NotFoundError("Model view was not found");
+        const written = await transaction.query({
+          text: [
+            "INSERT INTO odf.graph_instances",
+            "  (tenant_id, project_id, space_id, external_id, instance_kind, data_model_id, model_view_id, source_instance_id, target_instance_id, properties)",
+            "VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::uuid, $7::uuid, $8::uuid, $9::uuid, $10::jsonb)",
+            "ON CONFLICT (project_id, space_id, external_id) DO UPDATE SET",
+            "  instance_kind = EXCLUDED.instance_kind, data_model_id = EXCLUDED.data_model_id, model_view_id = EXCLUDED.model_view_id,",
+            "  source_instance_id = EXCLUDED.source_instance_id, target_instance_id = EXCLUDED.target_instance_id,",
+            "  properties = EXCLUDED.properties, updated_at = now()",
+            "WHERE graph_instances.tenant_id = EXCLUDED.tenant_id AND graph_instances.data_model_id = EXCLUDED.data_model_id",
+            "RETURNING " + MANAGED_GRAPH_COLUMNS + ", (xmax = 0) AS created",
+          ].join("\n"),
+          values: [
+            scope.tenantId,
+            scope.projectId,
+            spaceIds.get(instance.space),
+            instance.externalId,
+            instance.kind,
+            dataModelId,
+            modelViewId,
+            sourceId,
+            targetId,
+            json(instance.properties),
+          ],
+        });
+        const row = written.rows[0];
+        if (!row) throw new ConflictError("Model graph instance update conflicted");
+        const graph = graphInstanceFromRow(row);
+        resolvedIds.set(publicInstanceKey(instance), graph.instanceId);
+        if (row.created === true || row.created === "t") created += 1;
+        else updated += 1;
+      }
+
+      const summary: JsonObject = { total: normalized.instances.length, created, updated };
+      await transaction.query({
+        text: [
+          "INSERT INTO odf.model_graph_batch_keys",
+          "  (tenant_id, project_id, data_model_id, idempotency_key, request_hash, summary, actor)",
+          "VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::jsonb, $7)",
+        ].join("\n"),
+        values: [scope.tenantId, scope.projectId, dataModelId, idempotencyKey, normalized.requestHash, json(summary), scope.userId],
+      });
+      await appendPlatformAuditAndOutbox(transaction, {
+        actor: scope.userId,
+        action: "platform.model_instances_upserted",
+        entityType: "dataModel",
+        entityId: `${modelId}@${version}`,
+        tenantId: scope.tenantId,
+        projectId: scope.projectId,
+        correlationId,
+        details: { modelId, version, total: normalized.instances.length, created, updated, requestHash: normalized.requestHash },
+      });
+      return {
+        modelId,
+        version,
+        total: normalized.instances.length,
+        created,
+        updated,
+        replayed: false,
+        requestHash: normalized.requestHash,
+      };
     });
   }
 }

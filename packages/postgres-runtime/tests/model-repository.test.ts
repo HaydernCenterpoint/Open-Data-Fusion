@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ConflictError, NotFoundError, PostgresRuntime } from "../src/index.js";
+import { normalizeModelInstanceBatch } from "../src/model-instance-helpers.js";
 import { RecordingClient, RecordingPool, result } from "./recording-pg.js";
 
 const scope = {
@@ -42,6 +43,19 @@ const viewRow = {
   name: "Equipment",
   definition: viewDefinition,
   created_at: "2026-07-17T07:00:00.000Z",
+};
+const edgeViewDefinition = {
+  externalId: "Feeds",
+  name: "Feeds",
+  usedFor: "edge" as const,
+  properties: {},
+};
+const edgeViewRow = {
+  ...viewRow,
+  model_view_id: "99999999-9999-9999-9999-999999999999",
+  external_id: "Feeds",
+  name: "Feeds",
+  definition: edgeViewDefinition,
 };
 
 function allowAll(events: string[] = []) {
@@ -136,5 +150,172 @@ describe("PostgreSQL public model lifecycle", () => {
     const query = client.queries.find((entry) => entry.text.includes("FROM odf.data_models"));
     expect(query?.text).toContain("tenant_id = $1::uuid AND project_id = $2::uuid");
     expect(query?.values).toEqual([scope.tenantId, scope.projectId, "missing-model", "9"]);
+  });
+
+  it("atomically upserts two nodes and one edge without persisting properties in replay evidence", async () => {
+    let graphInsert = 0;
+    const client = new RecordingClient((query) => {
+      if (query.text.includes("FROM odf.data_models") && query.text.includes("state = 'published'")) {
+        return result([{ ...modelRow, state: "published", published_at: "2026-07-17T08:00:00.000Z" }]);
+      }
+      if (query.text.includes("FROM odf.model_views")) return result([viewRow, edgeViewRow]);
+      if (query.text.includes("FROM odf.model_graph_batch_keys")) return result();
+      if (query.text.includes("FROM odf.model_spaces")) return result([{ space_id: internalSpaceId, external_id: "plant-a" }]);
+      if (query.text.includes("existing_graph_instances")) return result();
+      if (query.text.startsWith("INSERT INTO odf.graph_instances")) {
+        graphInsert += 1;
+        return result([{
+          instance_id: `aaaaaaaa-aaaa-aaaa-aaaa-${String(graphInsert).padStart(12, "0")}`,
+          tenant_id: scope.tenantId,
+          project_id: scope.projectId,
+          dataset_id: null,
+          space_id: internalSpaceId,
+          external_id: graphInsert === 1 ? "source" : graphInsert === 2 ? "target" : "feeds",
+          instance_kind: graphInsert < 3 ? "node" : "edge",
+          data_model_id: internalModelId,
+          model_view_id: graphInsert < 3 ? internalViewId : edgeViewRow.model_view_id,
+          source_instance_id: graphInsert === 3 ? "aaaaaaaa-aaaa-aaaa-aaaa-000000000001" : null,
+          target_instance_id: graphInsert === 3 ? "aaaaaaaa-aaaa-aaaa-aaaa-000000000002" : null,
+          properties: graphInsert === 1 ? { name: "Source" } : graphInsert === 2 ? { name: "Target" } : {},
+          valid_from: null,
+          valid_to: null,
+          created_at: "2026-07-17T09:00:00.000Z",
+          updated_at: "2026-07-17T09:00:00.000Z",
+          created: true,
+        }]);
+      }
+      return result();
+    });
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, { projectAccessResolver: allowAll() });
+
+    await expect(runtime.models.upsertModelInstances(scope, "plant-model", 2, {
+      idempotencyKey: "batch-1",
+      instances: [
+        { space: "plant-a", externalId: "source", kind: "node", viewExternalId: "Equipment", properties: { name: "Source" } },
+        { space: "plant-a", externalId: "target", kind: "node", viewExternalId: "Equipment", properties: { name: "Target" } },
+        {
+          space: "plant-a", externalId: "feeds", kind: "edge", viewExternalId: "Feeds", properties: {},
+          source: { space: "plant-a", externalId: "source" },
+          target: { space: "plant-a", externalId: "target" },
+        },
+      ],
+    }, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")).resolves.toMatchObject({
+      modelId: "plant-model",
+      version: 2,
+      total: 3,
+      created: 3,
+      updated: 0,
+      replayed: false,
+      requestHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+
+    expect(graphInsert).toBe(3);
+    const replayWrite = client.queries.find((query) => query.text.startsWith("INSERT INTO odf.model_graph_batch_keys"));
+    expect(replayWrite).toBeDefined();
+    expect(replayWrite?.values?.some((value) => String(value).includes("properties"))).toBe(false);
+    const auditAndOutbox = client.queries.filter((query) => query.text.startsWith("INSERT INTO odf.audit_log") || query.text.startsWith("INSERT INTO odf.outbox_events"));
+    expect(auditAndOutbox).toHaveLength(2);
+    expect(auditAndOutbox.flatMap((query) => query.values ?? []).some((value) => String(value).includes("properties"))).toBe(false);
+    expect(client.queries.at(-1)?.text).toBe("COMMIT");
+  });
+
+  it("returns exact replays without mutation and rejects changed bodies", async () => {
+    const original = {
+      idempotencyKey: "batch-replay",
+      instances: [{
+        space: "plant-a", externalId: "pump", kind: "node" as const,
+        viewExternalId: "Equipment", properties: { name: "Pump" },
+      }],
+    };
+    const requestHash = normalizeModelInstanceBatch("plant-model", 2, [viewDefinition], original).requestHash;
+    const client = new RecordingClient((query) => {
+      if (query.text.includes("FROM odf.data_models") && query.text.includes("state = 'published'")) {
+        return result([{ ...modelRow, state: "published", published_at: "2026-07-17T08:00:00.000Z" }]);
+      }
+      if (query.text.includes("FROM odf.model_views")) return result([viewRow]);
+      if (query.text.includes("FROM odf.model_graph_batch_keys")) {
+        return result([{ request_hash: requestHash, summary: { total: 1, created: 1, updated: 0 } }]);
+      }
+      return result();
+    });
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, { projectAccessResolver: allowAll() });
+
+    await expect(runtime.models.upsertModelInstances(
+      scope, "plant-model", 2, original, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    )).resolves.toMatchObject({ replayed: true, requestHash, total: 1, created: 1, updated: 0 });
+    expect(client.queries.some((query) => query.text.startsWith("INSERT INTO odf.graph_instances"))).toBe(false);
+    expect(client.queries.some((query) => query.text.startsWith("INSERT INTO odf.audit_log"))).toBe(false);
+
+    await expect(runtime.models.upsertModelInstances(scope, "plant-model", 2, {
+      ...original,
+      instances: [{ ...original.instances[0]!, properties: { name: "Changed" } }],
+    }, "cccccccc-cccc-cccc-cccc-cccccccccccc")).rejects.toEqual(expect.any(ConflictError));
+  });
+
+  it("rolls back before writes when a direct reference is missing", async () => {
+    const referenceView = {
+      ...viewDefinition,
+      properties: {
+        ...viewDefinition.properties,
+        parent: { type: "direct" as const },
+      },
+    };
+    const client = new RecordingClient((query) => {
+      if (query.text.includes("FROM odf.data_models") && query.text.includes("state = 'published'")) {
+        return result([{ ...modelRow, state: "published", published_at: "2026-07-17T08:00:00.000Z" }]);
+      }
+      if (query.text.includes("FROM odf.model_views")) return result([{ ...viewRow, definition: referenceView }]);
+      if (query.text.includes("FROM odf.model_graph_batch_keys")) return result();
+      if (query.text.includes("FROM odf.model_spaces")) return result([{ space_id: internalSpaceId, external_id: "plant-a" }]);
+      if (query.text.includes("existing_graph_instances")) return result();
+      return result();
+    });
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, { projectAccessResolver: allowAll() });
+
+    await expect(runtime.models.upsertModelInstances(scope, "plant-model", 2, {
+      idempotencyKey: "missing-reference",
+      instances: [{
+        space: "plant-a", externalId: "pump", kind: "node", viewExternalId: "Equipment",
+        properties: { name: "Pump", parent: { space: "plant-a", externalId: "missing" } },
+      }],
+    }, "dddddddd-dddd-dddd-dddd-dddddddddddd")).rejects.toEqual(expect.any(NotFoundError));
+    expect(client.queries.some((query) => query.text.startsWith("INSERT INTO odf.graph_instances"))).toBe(false);
+    expect(client.queries.at(-1)?.text).toBe("ROLLBACK");
+  });
+
+  it("accepts the full 100-instance atomic batch", async () => {
+    let graphInsert = 0;
+    const client = new RecordingClient((query) => {
+      if (query.text.includes("FROM odf.data_models") && query.text.includes("state = 'published'")) {
+        return result([{ ...modelRow, state: "published", published_at: "2026-07-17T08:00:00.000Z" }]);
+      }
+      if (query.text.includes("FROM odf.model_views")) return result([viewRow]);
+      if (query.text.includes("FROM odf.model_graph_batch_keys")) return result();
+      if (query.text.includes("FROM odf.model_spaces")) return result([{ space_id: internalSpaceId, external_id: "plant-a" }]);
+      if (query.text.includes("existing_graph_instances")) return result();
+      if (query.text.startsWith("INSERT INTO odf.graph_instances")) {
+        graphInsert += 1;
+        return result([{
+          instance_id: `aaaaaaaa-aaaa-aaaa-bbbb-${String(graphInsert).padStart(12, "0")}`,
+          tenant_id: scope.tenantId, project_id: scope.projectId, dataset_id: null,
+          space_id: internalSpaceId, external_id: String(query.values?.[3]), instance_kind: "node",
+          data_model_id: internalModelId, model_view_id: internalViewId,
+          source_instance_id: null, target_instance_id: null, properties: { name: String(query.values?.[3]) },
+          valid_from: null, valid_to: null,
+          created_at: "2026-07-17T09:00:00.000Z", updated_at: "2026-07-17T09:00:00.000Z", created: true,
+        }]);
+      }
+      return result();
+    });
+    const runtime = PostgresRuntime.fromPool(new RecordingPool(client), {}, { projectAccessResolver: allowAll() });
+
+    await expect(runtime.models.upsertModelInstances(scope, "plant-model", 2, {
+      idempotencyKey: "batch-100",
+      instances: Array.from({ length: 100 }, (_, index) => ({
+        space: "plant-a", externalId: `node-${index}`, kind: "node" as const,
+        viewExternalId: "Equipment", properties: { name: `Node ${index}` },
+      })),
+    }, "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")).resolves.toMatchObject({ total: 100, created: 100, updated: 0 });
+    expect(graphInsert).toBe(100);
   });
 });

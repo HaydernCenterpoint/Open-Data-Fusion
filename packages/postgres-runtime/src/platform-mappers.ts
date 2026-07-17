@@ -193,6 +193,7 @@ export function graphInstanceFromRow(row: Row): GraphInstanceRecord {
     instanceId: requiredRowString(row, "instance_id"), tenantId: requiredRowString(row, "tenant_id"), projectId: requiredRowString(row, "project_id"),
     datasetId: optionalRowString(row, "dataset_id"), spaceId: requiredRowString(row, "space_id"), externalId: requiredRowString(row, "external_id"),
     instanceKind: oneOf(requiredRowString(row, "instance_kind"), ["node", "edge"], "instance kind"), dataModelId: optionalRowString(row, "data_model_id"),
+    modelViewId: optionalRowString(row, "model_view_id"), sourceInstanceId: optionalRowString(row, "source_instance_id"), targetInstanceId: optionalRowString(row, "target_instance_id"),
     properties: rowJsonObject(row, "properties"), validFrom: optionalRowString(row, "valid_from"), validTo: optionalRowString(row, "valid_to"),
     createdAt: requiredRowString(row, "created_at"), updatedAt: requiredRowString(row, "updated_at"),
   };
