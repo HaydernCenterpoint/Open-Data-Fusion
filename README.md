@@ -705,6 +705,7 @@ scripts/               Dependency and release guardrails
 | [0004](docs/architecture/0004-collaborative-canvas-operations.md) | Use semantic operations, immutable revisions, and optimistic concurrency |
 | [0005](docs/architecture/0005-postgresql-cutover-and-transactional-outbox.md) | Use a rehearsed one-way cutover and transactional outbox |
 | [0006](docs/architecture/0006-tenant-data-plane-and-operations-baseline.md) | Establish tenant RLS, industrial data plane, and operations baseline |
+| [0007](docs/architecture/0007-data-modeling-and-bounded-graph-query.md) | Add versioned data models and bounded graph operations through one persistence contract |
 
 Additional references:
 
