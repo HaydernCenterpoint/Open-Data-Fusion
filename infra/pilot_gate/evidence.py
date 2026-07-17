@@ -371,6 +371,11 @@ class EvidenceStore:
             canonical_json(supporting)
         ):
             raise EvidenceError("pilot decision supporting index hash does not match")
+        checks_by_id = self._load_checks_from_run(run)
+        from .evaluation import evaluate
+
+        if violations != evaluate(self.manifest, checks_by_id):
+            raise EvidenceError("pilot decision violations do not match evidence")
         self._load_supporting_from_run(run)
         attestation_digest = decision.get("reviewerAttestationSha256")
         attestation_path_value = decision.get("reviewerAttestationPath")

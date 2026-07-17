@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -13,7 +14,12 @@ from infra.pilot_gate.evaluation import (
     evaluate,
     sign_reviewer_attestation,
 )
-from infra.pilot_gate.evidence import CheckEvidence, EvidenceError, EvidenceStore
+from infra.pilot_gate.evidence import (
+    CheckEvidence,
+    EvidenceError,
+    EvidenceStore,
+    canonical_json,
+)
 
 
 REVIEWER_KEY = b"reviewer-controlled-test-key-32bytes-minimum"
@@ -281,6 +287,55 @@ class PilotEvaluationTests(unittest.TestCase):
             self.assertEqual(repaired["state"], "passed")
             self.assertEqual(repaired["decision"]["path"], "decision.json")
             self.assertRegex(repaired["decision"]["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_terminal_run_read_rejects_tampered_managed_evidence(self) -> None:
+        manifest = parse_manifest(valid_manifest())
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = EvidenceStore(Path(temporary_directory), manifest)
+            store.initialize()
+            record_all(store, passing_checks())
+            run = store.read_run()
+            entry = run["checks"]["deployment-preflight"]
+            attestation = sign_reviewer_attestation(
+                manifest,
+                run,
+                "reviewer@example.test",
+                REVIEWER_KEY,
+                reviewed_at="2026-07-16T12:00:00Z",
+            )
+            store.finalize(attestation, REVIEWER_KEY)
+            (store.run_directory / entry["path"]).write_text(
+                "{}\n", encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(EvidenceError, "hash mismatch"):
+                store.read_run()
+
+    def test_crash_repair_recomputes_decision_violations(self) -> None:
+        manifest = parse_manifest(valid_manifest())
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            store = EvidenceStore(Path(temporary_directory), manifest)
+            store.initialize()
+            checks = passing_checks()
+            checks["service-objectives"].metrics["availabilityPercent"] = 99.8
+            record_all(store, checks)
+            attestation = sign_reviewer_attestation(
+                manifest,
+                store.read_run(),
+                "reviewer@example.test",
+                REVIEWER_KEY,
+                reviewed_at="2026-07-16T12:00:00Z",
+            )
+            with patch.object(store, "_write_run", side_effect=OSError("crash")):
+                with self.assertRaisesRegex(OSError, "crash"):
+                    store.finalize(attestation, REVIEWER_KEY)
+            decision = json.loads(store.decision_path.read_text(encoding="utf-8"))
+            decision["outcome"] = "passed"
+            decision["violations"] = []
+            store.decision_path.write_bytes(canonical_json(decision))
+
+            with self.assertRaisesRegex(EvidenceError, "violations do not match"):
+                store.read_run()
 
 
 if __name__ == "__main__":

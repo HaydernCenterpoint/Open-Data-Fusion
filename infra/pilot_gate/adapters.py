@@ -129,6 +129,7 @@ def run_adapter(
     ):
         raise AdapterError(f"{adapter_id} requires explicit confirmation")
     environment = dict(os.environ)
+    environment.pop("ODF_PILOT_REVIEWER_HMAC_KEY", None)
     if adapter.confirmation_env is not None:
         assert adapter.confirmation_value is not None
         environment[adapter.confirmation_env] = adapter.confirmation_value

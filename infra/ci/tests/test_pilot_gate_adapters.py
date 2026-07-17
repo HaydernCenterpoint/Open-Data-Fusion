@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -82,6 +83,23 @@ class PilotAdapterTests(unittest.TestCase):
         self.assertIs(result["metrics"]["timedOut"], True)
         self.assertNotIn("do-not-store", serialized)
         self.assertNotIn("partial adapter details", serialized)
+
+    @patch("infra.pilot_gate.adapters.subprocess.run")
+    def test_reviewer_signing_key_is_never_inherited(self, run: Mock) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="validated", stderr=""
+        )
+
+        with patch.dict(
+            os.environ,
+            {"ODF_PILOT_REVIEWER_HMAC_KEY": "must-not-reach-adapter"},
+            clear=False,
+        ):
+            run_adapter("static-validation", Path.cwd(), None)
+
+        self.assertNotIn(
+            "ODF_PILOT_REVIEWER_HMAC_KEY", run.call_args.kwargs["env"]
+        )
 
     @patch("infra.pilot_gate.adapters.subprocess.run")
     def test_supporting_evidence_is_hashed_without_advancing_the_gate(
