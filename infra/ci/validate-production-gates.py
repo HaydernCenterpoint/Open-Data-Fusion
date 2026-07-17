@@ -5,10 +5,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 from typing import cast
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from infra.pilot_gate.contract import REQUIRED_CHECK_IDS, load_manifest
 
 
 def read(relative: str) -> str:
@@ -32,6 +37,20 @@ def require_lf_shell_scripts(root: Path) -> None:
 
 def main() -> None:
     require_lf_shell_scripts(ROOT / "infra")
+
+    pilot_manifest_text = read("infra/pilot-gate.example.json")
+    pilot_manifest = load_manifest(ROOT / "infra/pilot-gate.example.json")
+    if pilot_manifest.environment_id != "managed-staging":
+        raise AssertionError("pilot manifest must target managed staging")
+    if not pilot_manifest.scope.read_only or pilot_manifest.scope.writeback_authorized:
+        raise AssertionError("pilot manifest scope must remain read-only")
+    if len(REQUIRED_CHECK_IDS) != 16:
+        raise AssertionError("pilot gate must retain all 16 managed checks")
+    require(
+        pilot_manifest_text,
+        ["reviewerKeySha256", "migrationSetSha256", "writebackAuthorized"],
+        "production pilot manifest",
+    )
 
     backup = read("infra/ci/postgres-backup-restore-rehearsal.sh")
     broker_rehearsal = read("infra/ci/outbox-broker-rehearsal.sh")

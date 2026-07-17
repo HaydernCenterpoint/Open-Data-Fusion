@@ -107,5 +107,36 @@ class OutboxBrokerRehearsalTests(unittest.TestCase):
                 )
 
 
+class PilotGateAssetTests(unittest.TestCase):
+    def test_checked_in_manifest_is_valid_and_non_secret(self) -> None:
+        from infra.pilot_gate.contract import load_manifest
+
+        path = VALIDATOR_PATH.parents[2] / "infra/pilot-gate.example.json"
+        manifest = load_manifest(path)
+
+        self.assertEqual(manifest.environment_id, "managed-staging")
+        self.assertEqual(manifest.targets.evidence_retention_days, 90)
+        self.assertTrue(manifest.scope.read_only)
+        self.assertFalse(manifest.scope.writeback_authorized)
+        raw = path.read_text(encoding="utf-8").lower()
+        for forbidden in ("password", "privatekey", "authorization", "access_token"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, raw)
+
+    def test_validator_references_the_pilot_contract(self) -> None:
+        validator_text = VALIDATOR_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("infra/pilot-gate.example.json", validator_text)
+        self.assertIn("REQUIRED_CHECK_IDS", validator_text)
+        self.assertIn("load_manifest", validator_text)
+
+    def test_package_exposes_the_pilot_gate_cli(self) -> None:
+        package = json.loads(
+            (VALIDATOR_PATH.parents[2] / "package.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(package["scripts"]["pilot:gate"], "python -m infra.pilot_gate")
+
+
 if __name__ == "__main__":
     unittest.main()
