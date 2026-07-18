@@ -337,7 +337,7 @@ export default function App() {
 
   useEffect(() => {
     explorerRequestRef.current?.abort();
-    if (!workspaceTenantId || !workspaceProjectId) {
+    if (viewMode !== "explorer" || !workspaceTenantId || !workspaceProjectId) {
       setAssets([]);
       setAssetTotal(0);
       setAssetsLoading(false);
@@ -377,7 +377,7 @@ export default function App() {
         setAssetsError(errorMessage(error, "Assets could not be loaded"));
       });
     return () => controller.abort();
-  }, [loadExplorerAsset, workspaceProjectId, workspaceTenantId]);
+  }, [loadExplorerAsset, viewMode, workspaceProjectId, workspaceTenantId]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return undefined;
