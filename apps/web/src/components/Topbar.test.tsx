@@ -41,6 +41,7 @@ function renderTopbar(onResultSelect = vi.fn(), onSearchSubmit = vi.fn()) {
   const onTenantChange = vi.fn();
   const onProjectChange = vi.fn();
   const onRetry = vi.fn();
+  const onOpenCanvas = vi.fn();
   function Harness() {
     const [query, setQuery] = useState("");
     return (
@@ -63,12 +64,13 @@ function renderTopbar(onResultSelect = vi.fn(), onSearchSubmit = vi.fn()) {
         onProjectChange={onProjectChange}
         onRetry={onRetry}
         onSectionChange={vi.fn()}
+        onOpenCanvas={onOpenCanvas}
       />
     );
   }
 
   render(<Harness />);
-  return { onProjectChange, onResultSelect, onSearchSubmit };
+  return { onProjectChange, onResultSelect, onSearchSubmit, onOpenCanvas };
 }
 
 async function openSearchResults() {
@@ -82,6 +84,15 @@ async function openSearchResults() {
 describe("Topbar search", () => {
   beforeEach(() => {
     vi.mocked(listAssets).mockResolvedValue({ items: assets, total: assets.length, limit: 20, offset: 0 });
+  });
+
+  it("keeps the Open Canvas action in the topbar", () => {
+    const { onOpenCanvas } = renderTopbar();
+    const button = screen.getByRole("button", { name: "Open Canvas" });
+
+    expect(button.closest(".topbar-actions")).not.toBeNull();
+    fireEvent.click(button);
+    expect(onOpenCanvas).toHaveBeenCalledOnce();
   });
 
   it("exposes a combobox and selects the active result with the keyboard", async () => {

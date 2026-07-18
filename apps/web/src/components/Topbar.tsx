@@ -22,11 +22,12 @@ interface TopbarProps {
   onProjectChange: (projectId: string) => void;
   onRetry: () => void;
   onSectionChange: (section: NavigationLabel) => void;
+  onOpenCanvas: () => void;
 }
 
 type SearchState = "idle" | "loading" | "ready" | "degraded" | "unauthorized" | "forbidden" | "error";
 
-export function Topbar({ query, onQueryChange, onResultSelect, onSearchSubmit, apiOnline, platformContext, tenants, projects, selectedTenantId, platformState, activeSection, onTenantChange, onProjectChange, onRetry, onSectionChange }: TopbarProps) {
+export function Topbar({ query, onQueryChange, onResultSelect, onSearchSubmit, apiOnline, platformContext, tenants, projects, selectedTenantId, platformState, activeSection, onTenantChange, onProjectChange, onRetry, onSectionChange, onOpenCanvas }: TopbarProps) {
   const deferredQuery = useDeferredValue(query.trim());
   const [matches, setMatches] = useState<PlatformSearchResult[]>([]);
   const [searchState, setSearchState] = useState<SearchState>("idle");
@@ -264,6 +265,7 @@ export function Topbar({ query, onQueryChange, onResultSelect, onSearchSubmit, a
       <div className="topbar-actions">
         <ProjectSwitcher context={platformContext} tenants={tenants} projects={projects} selectedTenantId={selectedTenantId} state={platformState} onTenantChange={onTenantChange} onProjectChange={onProjectChange} onRetry={onRetry} />
         <label className="mobile-section-nav"><span className="sr-only">Workspace section</span><select aria-label="Workspace section" value={activeSection} onChange={(event) => onSectionChange(event.target.value as NavigationLabel)}>{navigationLabels.map((section) => <option key={section} value={section}>{section}</option>)}</select></label>
+        <button className="switch-canvas-button" type="button" onClick={onOpenCanvas}>Open Canvas</button>
         <div className="environment" role="status" aria-label={`Environment: Local, API ${apiOnline ? "online" : apiOnline === false ? "offline" : "checking"}`}>
           <span className={`status-dot ${apiOnline ? "online" : apiOnline === false ? "offline" : "checking"}`} />
           Local

@@ -612,6 +612,7 @@ export default function App() {
         onProjectChange={selectPlatformProject}
         onRetry={() => void retryPlatformBootstrap()}
         onSectionChange={navigate}
+        onOpenCanvas={() => showView("canvas")}
       />
       {sectionView ? <PlatformContextBar tenants={platformTenants} projects={platformProjects} selectedTenantId={selectedTenantId} context={platformContext} state={platformBootstrap} onTenantChange={selectPlatformTenant} onProjectChange={selectPlatformProject} onRetry={() => void retryPlatformBootstrap()} /> : null}
       {viewMode === "explorer" ? (
@@ -644,7 +645,6 @@ export default function App() {
       {viewMode === "matching" ? <MatchingWorkspace context={platformContext} /> : null}
       {viewMode === "spatial" ? <SpatialWorkspace context={platformContext} /> : null}
       {viewMode === "writeback" ? <WritebackWorkspace context={platformContext} /> : null}
-      <button className="switch-canvas-button" type="button" onClick={() => showView("canvas")}>Open Canvas</button>
       <IngestModal context={platformContext} open={ingestOpen} onClose={() => setIngestOpen(false)} onComplete={(message) => { notify(message); void reloadAssets(); }} />
       {toast ? <div className="toast" role="status">{toast}</div> : null}
     </div>
