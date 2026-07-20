@@ -73,6 +73,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: "include",
     headers,
   });
 
@@ -632,14 +633,14 @@ async function runAuthenticatedEventStream(
   while (!signal.aborted) {
     try {
       const accessToken = await getAccessToken();
-      if (!accessToken) throw new Error("No active OIDC access token");
       const response = await fetch(url, {
         headers: {
           Accept: "text/event-stream",
-          Authorization: `Bearer ${accessToken}`,
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
           ...platformHeaders(context),
         },
         cache: "no-store",
+        credentials: "include",
         signal,
       });
       if (response.status === 401 || response.status === 403) {

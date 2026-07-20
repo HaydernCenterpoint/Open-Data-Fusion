@@ -38,6 +38,7 @@ coverage/
 .vite/
 **/.vite/
 *.tsbuildinfo
+**/*.tsbuildinfo
 *.log
 
 # Local serving state and untrusted/raw landed data must not enter a build

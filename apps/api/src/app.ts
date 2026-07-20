@@ -343,6 +343,18 @@ export function createApp(
   };
   app.get('/health', healthHandler);
   app.get('/api/health', healthHandler);
+  app.get('/api/v1/auth/session', async (request, response) => {
+    const identity = await identityProvider.authenticate(request);
+    response.json({
+      authenticated: true,
+      identity: {
+        userId: identity.userId,
+        displayName: identity.displayName ?? identity.userId,
+        role: identity.role ?? null,
+      },
+      expiresAt: typeof identity.claims?.exp === 'number' ? identity.claims.exp : null,
+    });
+  });
   app.get('/ready', async (_request, response) => {
     const health = database.health();
     const workspaceHealth = workspacePersistence ? await workspacePersistence.health() : null;

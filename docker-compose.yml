@@ -85,8 +85,11 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
-      ODF_AUTH_MODE: development
+      ODF_AUTH_MODE: "${ODF_AUTH_MODE:-development}"
       ODF_DEV_USER: local-user
+      FII_JWT_SECRET: "${FII_JWT_SECRET:-}"
+      FII_JWT_ISSUER: "${FII_JWT_ISSUER:-MKZ_PLC_Server}"
+      FII_JWT_AUDIENCE: "${FII_JWT_AUDIENCE:-MKZ_PLC_Client}"
       # The preview profile deliberately uses the real single-instance SQLite
       # data profile. PostgreSQL multi-replica validation uses the overlay.
       ODF_WORKSPACE_PERSISTENCE: sqlite
@@ -123,6 +126,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
+      args:
+        VITE_FII_SSO: "${VITE_FII_SSO:-false}"
+        VITE_FII_LOGIN_URL: "${FII_MAIN_LOGIN_URL:-http://localhost:3001/login}"
     restart: unless-stopped
     ports:
       - "127.0.0.1:${ODF_WEB_PORT:-8088}:8080"

@@ -9,6 +9,7 @@ import {
 export interface AuthenticatedIdentity {
   userId: string;
   displayName?: string;
+  role?: FactoryRole;
   claims?: JWTPayload;
   permissions: ReadonlySet<DataPlanePermission>;
 }
@@ -25,6 +26,7 @@ export const DATA_PLANE_PERMISSIONS = [
 ] as const;
 
 export type DataPlanePermission = (typeof DATA_PLANE_PERMISSIONS)[number];
+export type FactoryRole = 'ADMIN' | 'ENGINEER' | 'GUEST';
 
 const allDataPlanePermissions: ReadonlySet<DataPlanePermission> = new Set(DATA_PLANE_PERMISSIONS);
 
@@ -37,7 +39,7 @@ export interface AuthenticationContext {
 }
 
 export interface IdentityProvider {
-  readonly mode: 'development' | 'oidc';
+  readonly mode: 'development' | 'oidc' | 'factory';
   authenticate(request: Request, context?: AuthenticationContext): Promise<AuthenticatedIdentity>;
 }
 
@@ -76,6 +78,64 @@ export interface OidcIdentityProviderConfig {
   userClaim?: string;
   permissionClaim?: string;
   algorithms?: string[];
+}
+
+export interface FactoryIdentityProviderConfig {
+  secret: string;
+  issuer: string;
+  audience: string;
+}
+
+const factoryPermissions: Record<FactoryRole, readonly DataPlanePermission[]> = {
+  ADMIN: DATA_PLANE_PERMISSIONS,
+  ENGINEER: ['data:read', 'data:ingest', 'relations:review', 'writeback:request'],
+  GUEST: ['data:read'],
+};
+
+function cookie(request: Request, name: string): string | undefined {
+  for (const part of (request.headers.cookie ?? '').split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    return part.slice(separator + 1).trim();
+  }
+  return undefined;
+}
+
+export class FactoryIdentityProvider implements IdentityProvider {
+  readonly mode = 'factory' as const;
+  private readonly key: Uint8Array;
+
+  constructor(private readonly config: FactoryIdentityProviderConfig) {
+    this.key = new TextEncoder().encode(config.secret);
+    if (this.key.byteLength < 32) throw new Error('FII_JWT_SECRET must be at least 32 bytes');
+  }
+
+  async authenticate(request: Request): Promise<AuthenticatedIdentity> {
+    const token = cookie(request, 'fii_sso');
+    if (!token) throw new AuthenticationError('A valid FII session cookie is required');
+    try {
+      const { payload } = await jwtVerify(token, this.key, {
+        issuer: this.config.issuer,
+        audience: this.config.audience,
+        algorithms: ['HS256'],
+      });
+      const userId = normalizedUserId(payload.sub);
+      const role = payload.role;
+      if (role !== 'ADMIN' && role !== 'ENGINEER' && role !== 'GUEST') {
+        throw new AuthenticationError('The FII session has no supported role');
+      }
+      return {
+        userId,
+        displayName: userId,
+        role,
+        claims: payload,
+        permissions: new Set(factoryPermissions[role]),
+      };
+    } catch (error) {
+      if (error instanceof AuthenticationError) throw error;
+      throw new AuthenticationError('A valid FII session cookie is required');
+    }
+  }
 }
 
 function addPermissionValues(target: Set<string>, value: unknown): void {
@@ -164,7 +224,7 @@ export type IdentityEnvironment = Record<string, string | undefined>;
 
 function requiredEnvironmentValue(environment: IdentityEnvironment, name: string): string {
   const value = environment[name]?.trim();
-  if (!value) throw new Error(`${name} is required when ODF_AUTH_MODE=oidc`);
+  if (!value) throw new Error(`${name} is required for the selected authentication mode`);
   return value;
 }
 
@@ -176,6 +236,13 @@ export function createIdentityProviderFromEnvironment(
 
   if (mode === 'development') {
     return new DevelopmentIdentityProvider(environment.ODF_DEV_USER?.trim() || 'local-user');
+  }
+  if (mode === 'factory') {
+    return new FactoryIdentityProvider({
+      secret: requiredEnvironmentValue(environment, 'FII_JWT_SECRET'),
+      issuer: environment.FII_JWT_ISSUER?.trim() || 'MKZ_PLC_Server',
+      audience: environment.FII_JWT_AUDIENCE?.trim() || 'MKZ_PLC_Client',
+    });
   }
   if (mode !== 'oidc') {
     throw new Error(`Unsupported ODF_AUTH_MODE '${mode}'`);
