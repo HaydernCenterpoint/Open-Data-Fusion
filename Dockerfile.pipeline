@@ -16,6 +16,8 @@ COPY packages/postgres-runtime/package.json packages/postgres-runtime/package.js
 RUN npm ci --workspace @open-data-fusion/pipeline-worker --include-workspace-root
 
 COPY tsconfig.base.json ./
+COPY packages/contracts ./packages/contracts
+COPY packages/platform-core ./packages/platform-core
 COPY packages/postgres-runtime ./packages/postgres-runtime
 COPY apps/pipeline-worker ./apps/pipeline-worker
 RUN npm run build --workspace @open-data-fusion/pipeline-worker
@@ -27,6 +29,8 @@ ENV NODE_ENV=production
 WORKDIR /workspace
 
 COPY --from=build --chown=node:node /workspace/node_modules ./node_modules
+COPY --from=build --chown=node:node /workspace/packages/platform-core/package.json ./packages/platform-core/package.json
+COPY --from=build --chown=node:node /workspace/packages/platform-core/dist ./packages/platform-core/dist
 COPY --from=build --chown=node:node /workspace/packages/postgres-runtime/package.json ./packages/postgres-runtime/package.json
 COPY --from=build --chown=node:node /workspace/packages/postgres-runtime/dist ./packages/postgres-runtime/dist
 COPY --from=build --chown=node:node /workspace/apps/pipeline-worker/package.json ./apps/pipeline-worker/package.json

@@ -443,6 +443,28 @@ describe('factory cookie authentication', () => {
     expect(JSON.stringify(response.body)).not.toContain(token);
   });
 
+  it('rate-limits repeated authentication session requests', async () => {
+    app = createApp(database, new WorkspaceEventHub(), {
+      identityProvider: new FactoryIdentityProvider({
+        secret: factorySecret,
+        issuer: 'MKZ_PLC_Server',
+        audience: 'MKZ_PLC_Client',
+      }),
+      authSessionRateLimit: { windowMs: 60_000, limit: 2 },
+      defaultPlatformContext: { tenantId: 'demo', projectId: 'north-plant' },
+      industrialPersistence: new LegacySqliteIndustrialPersistence(database),
+    });
+    const token = await signFactoryToken('factory.user', 'GUEST');
+
+    expect((await request(app).get('/api/v1/auth/session').set('cookie', `fii_sso=${token}`)).status).toBe(200);
+    expect((await request(app).get('/api/v1/auth/session').set('cookie', `fii_sso=${token}`)).status).toBe(200);
+    const blocked = await request(app).get('/api/v1/auth/session').set('cookie', `fii_sso=${token}`);
+
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error.code).toBe('rate_limited');
+    expect(blocked.headers['ratelimit']).toBeDefined();
+  });
+
   it('accepts a verified factory bearer token for service ingestion', async () => {
     const token = await signFactoryToken('service-account-open-data-fusion-connector', 'ENGINEER');
     const response = await request(app)

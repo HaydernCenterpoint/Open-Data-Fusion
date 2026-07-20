@@ -13,8 +13,11 @@
     }
   },
   "scripts": {
+    "prebuild": "npm --prefix ../.. run build --workspace @open-data-fusion/platform-core",
     "build": "tsc -p tsconfig.json",
+    "pretest": "npm --prefix ../.. run build --workspace @open-data-fusion/platform-core",
     "test": "vitest run",
+    "pretypecheck": "npm --prefix ../.. run build --workspace @open-data-fusion/platform-core",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
