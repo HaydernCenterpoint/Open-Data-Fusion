@@ -34,6 +34,7 @@
     "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
     "@opentelemetry/sdk-node": "^0.220.0",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.6.0",
     "jose": "^6.2.3",
     "pino": "^10.3.1",
     "prom-client": "^15.1.3",

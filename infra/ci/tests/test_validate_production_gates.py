@@ -70,6 +70,30 @@ class WorkerOtlpWiringTests(unittest.TestCase):
                     self.assertIn(expected, block.group("body"))
 
 
+class PipelineContainerDependencyTests(unittest.TestCase):
+    def test_postgres_runtime_builds_its_platform_core_dependency(self) -> None:
+        root = VALIDATOR_PATH.parents[2]
+        package = json.loads((root / "packages/postgres-runtime/package.json").read_text(encoding="utf-8"))
+
+        for lifecycle in ("prebuild", "pretest", "pretypecheck"):
+            with self.subTest(lifecycle=lifecycle):
+                self.assertIn("@open-data-fusion/platform-core", package["scripts"][lifecycle])
+
+    def test_pipeline_image_contains_platform_core_at_build_and_runtime(self) -> None:
+        dockerfile = (VALIDATOR_PATH.parents[2] / "Dockerfile.pipeline").read_text(encoding="utf-8")
+
+        self.assertIn("COPY packages/contracts ./packages/contracts", dockerfile)
+        self.assertIn("COPY packages/platform-core ./packages/platform-core", dockerfile)
+        self.assertIn(
+            "/workspace/packages/platform-core/package.json ./packages/platform-core/package.json",
+            dockerfile,
+        )
+        self.assertIn(
+            "/workspace/packages/platform-core/dist ./packages/platform-core/dist",
+            dockerfile,
+        )
+
+
 class ComposeVolumeSyntaxTests(unittest.TestCase):
     def test_edge_config_bind_mount_uses_long_syntax(self) -> None:
         compose = (VALIDATOR_PATH.parents[2] / "docker-compose.yml").read_text(encoding="utf-8")

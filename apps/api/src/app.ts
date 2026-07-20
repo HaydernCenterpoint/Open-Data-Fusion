@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import express, { type ErrorRequestHandler, type Express, type Request, type RequestHandler } from 'express';
+import { rateLimit } from 'express-rate-limit';
 import type { WritebackSafetyPolicy } from '@open-data-fusion/platform-core';
 import {
   ConflictError as RuntimeConflictError,
@@ -248,6 +249,8 @@ function correlationMiddleware(requireUuid: boolean): RequestHandler {
 
 export interface CreateAppOptions {
   identityProvider?: IdentityProvider;
+  /** Authentication-session request budget; production defaults to 120 requests per minute per client IP. */
+  authSessionRateLimit?: { windowMs: number; limit: number };
   metricsToken?: string;
   rawLandingDirectory?: string;
   writebackPolicy?: WritebackSafetyPolicy;
@@ -346,6 +349,32 @@ export function createApp(
   };
   app.get('/health', healthHandler);
   app.get('/api/health', healthHandler);
+  const authSessionRateLimiter = rateLimit({
+    windowMs: options.authSessionRateLimit?.windowMs ?? 60_000,
+    limit: options.authSessionRateLimit?.limit ?? 120,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    handler: (_request, response) => {
+      response.status(429).json({
+        error: {
+          code: 'rate_limited',
+          message: 'Too many authentication requests. Try again later.',
+        },
+      });
+    },
+  });
+  app.get('/api/v1/auth/session', authSessionRateLimiter, async (request, response) => {
+    const identity = await identityProvider.authenticate(request);
+    response.json({
+      authenticated: true,
+      identity: {
+        userId: identity.userId,
+        displayName: identity.displayName ?? identity.userId,
+        role: identity.role ?? null,
+      },
+      expiresAt: typeof identity.claims?.exp === 'number' ? identity.claims.exp : null,
+    });
+  });
   app.get('/ready', async (_request, response) => {
     const health = database.health();
     const workspaceHealth = workspacePersistence ? await workspacePersistence.health() : null;

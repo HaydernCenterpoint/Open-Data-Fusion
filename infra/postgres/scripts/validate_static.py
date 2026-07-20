@@ -445,6 +445,26 @@ def validate_migrations(migration_paths: list[Path]) -> None:
         "model graph tables must not grant DELETE or ALL privileges to odf_app",
     )
 
+    legacy_model_sync = read(MIGRATIONS / "016_legacy_model_normalized_sync.sql")
+    for guardrail in [
+        "SET LOCAL lock_timeout = '10s';",
+        "SET LOCAL statement_timeout = '120s';",
+        "SELECT pg_advisory_xact_lock(hashtextextended('odf:postgres:migrations', 0));",
+        "INSERT INTO odf.data_models",
+        "FROM odf.platform_legacy_model_versions legacy",
+        "CROSS JOIN LATERAL",
+        "ORDER BY model_spaces.created_at, model_spaces.space_id",
+        "CASE WHEN legacy.status = 'published' THEN legacy.created_at ELSE NULL END",
+        "ON CONFLICT (space_id, external_id, version) DO NOTHING",
+        "legacy model version has no provisioned model space",
+    ]:
+        require(guardrail in legacy_model_sync, f"missing legacy model normalized-sync guardrail: {guardrail}")
+    require(
+        "CREATE TRIGGER platform_legacy_model_versions_search_projection" not in legacy_model_sync
+        and "DELETE FROM odf.platform_search_index" not in legacy_model_sync,
+        "legacy model sync must preserve the normalized data-model projection as the single search source",
+    )
+
 
 def validate_tenant_foreign_keys(sql: str) -> None:
     """Catch scope-breaking composite FKs before a migration reaches PostgreSQL.

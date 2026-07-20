@@ -67,6 +67,8 @@ const ENVIRONMENT_KEYS = [
   "VITE_OIDC_REDIRECT_URI",
   "VITE_OIDC_POST_LOGOUT_REDIRECT_URI",
   "VITE_OIDC_USER_CLAIM",
+  "VITE_FII_SSO",
+  "VITE_FII_LOGIN_URL",
 ] as const;
 
 function configureOidc(): void {
@@ -95,6 +97,7 @@ describe("OIDC browser session", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     for (const key of ENVIRONMENT_KEYS) vi.stubEnv(key, "");
     oidcMocks.managerSettings.length = 0;
     oidcMocks.storageOptions.length = 0;
@@ -275,5 +278,42 @@ describe("OIDC browser session", () => {
     expect(oidcMocks.signoutRedirectCallback).toHaveBeenCalledTimes(1);
     expect(window.location.pathname).toBe("/signed-out");
     expect(window.location.search).toBe("?complete=yes");
+  });
+
+  it("initializes directly from the verified factory session without exposing a token", async () => {
+    vi.stubEnv("VITE_FII_SSO", "true");
+    vi.stubEnv("VITE_FII_LOGIN_URL", "http://localhost:3001/login");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      authenticated: true,
+      identity: { userId: "factory.user", displayName: "factory.user", role: "GUEST" },
+      expiresAt: 1_900_000_000,
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const auth = await import("./auth");
+
+    await expect(auth.initialize()).resolves.toEqual({
+      enabled: true,
+      authenticated: true,
+      identity: { userId: "factory.user", displayName: "factory.user" },
+      expiresAt: 1_900_000_000,
+    });
+    await expect(auth.getAccessToken()).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/auth/session",
+      expect.objectContaining({ credentials: "include" }),
+    );
+  });
+
+  it("returns an unauthenticated factory session on 401", async () => {
+    vi.stubEnv("VITE_FII_SSO", "true");
+    vi.stubEnv("VITE_FII_LOGIN_URL", "http://localhost:3001/login");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 401 })));
+    const auth = await import("./auth");
+
+    await expect(auth.initialize()).resolves.toEqual({
+      enabled: true,
+      authenticated: false,
+      identity: null,
+    });
   });
 });

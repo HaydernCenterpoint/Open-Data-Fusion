@@ -82,6 +82,8 @@ describe('PostgresPlatformCompatibilityStore', () => {
     expect(readiness?.text).toContain("odf.platform_legacy_writeback_events");
     expect(readiness?.text).toContain("odf.platform_legacy_quality_results', 'INSERT'");
     expect(readiness?.text).toContain("odf.platform_legacy_context_candidates', 'UPDATE'");
+    expect(readiness?.text).toContain("odf.model_spaces', 'SELECT'");
+    expect(readiness?.text).toContain("odf.data_models', 'INSERT'");
   });
 
   it('uses a scoped PostgreSQL transaction for model versions and preserves the legacy cursor shape', async () => {
@@ -119,6 +121,59 @@ describe('PostgresPlatformCompatibilityStore', () => {
     expect(modelQuery?.values).toEqual([scope.tenantId, scope.projectId, '', 0, 51]);
     expect(modelQuery?.text).toContain('tenant_id = $1::uuid AND project_id = $2::uuid');
     expect(modelQuery?.text).not.toContain(scope.tenantId);
+  });
+
+  it('writes new compatibility model versions into the normalized model graph in the same transaction', async () => {
+    const createdAt = '2026-07-12T00:00:00.000Z';
+    const spaceId = '44444444-4444-4444-8444-444444444444';
+    const modelRow = {
+      tenant_id: scope.tenantId,
+      project_id: scope.projectId,
+      model_id: 'pump-model',
+      version: 2,
+      name: 'Pump model',
+      schema_json: { type: 'object' },
+      status: 'published',
+      created_by: scope.userId,
+      created_at: createdAt,
+    };
+    const { store, client } = compatibility((query) => {
+      if (query.text.includes('FROM odf.model_spaces')) return result([{ space_id: spaceId }]);
+      if (query.text.includes('SELECT COALESCE(max(version), 0) + 1')) return result([{ version: 2 }]);
+      if (query.text.includes('INSERT INTO odf.platform_legacy_model_versions')) return result([modelRow]);
+      if (query.text.includes('INSERT INTO odf.data_models')) return result([{ data_model_id: '55555555-5555-4555-8555-555555555555' }]);
+      return result();
+    });
+
+    await expect(store.createDataModelVersion(
+      scope,
+      scope.userId,
+      'pump-model',
+      { name: 'Pump model', schema: { type: 'object' }, status: 'published' },
+      correlationId,
+    )).resolves.toMatchObject({
+      id: 'pump-model',
+      version: 2,
+      status: 'published',
+    });
+
+    const legacyIndex = client.queries.findIndex((query) => query.text.includes('INSERT INTO odf.platform_legacy_model_versions'));
+    const normalizedIndex = client.queries.findIndex((query) => query.text.includes('INSERT INTO odf.data_models'));
+    expect(legacyIndex).toBeGreaterThan(-1);
+    expect(normalizedIndex).toBeGreaterThan(legacyIndex);
+    expect(client.queries[normalizedIndex]?.values).toEqual([
+      scope.tenantId,
+      scope.projectId,
+      spaceId,
+      'pump-model',
+      '2',
+      'Pump model',
+      '{"type":"object"}',
+      'published',
+      scope.userId,
+      createdAt,
+    ]);
+    expect(client.queries.map((query) => query.text)).toContain('COMMIT');
   });
 
   it('records a pipeline run as processing before atomically completing it with quality results', async () => {

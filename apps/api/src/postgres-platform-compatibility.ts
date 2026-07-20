@@ -199,8 +199,12 @@ export class PostgresPlatformCompatibilityStore implements PostgresPlatformCompa
           "  AND to_regclass('odf.platform_legacy_writeback_requests') IS NOT NULL",
           "  AND to_regclass('odf.platform_legacy_writeback_approvals') IS NOT NULL",
           "  AND to_regclass('odf.platform_legacy_writeback_events') IS NOT NULL",
+          "  AND to_regclass('odf.model_spaces') IS NOT NULL",
+          "  AND to_regclass('odf.data_models') IS NOT NULL",
           "  AND has_table_privilege(current_user, 'odf.platform_legacy_model_versions', 'SELECT')",
           "  AND has_table_privilege(current_user, 'odf.platform_legacy_model_versions', 'INSERT')",
+          "  AND has_table_privilege(current_user, 'odf.model_spaces', 'SELECT')",
+          "  AND has_table_privilege(current_user, 'odf.data_models', 'INSERT')",
           "  AND has_table_privilege(current_user, 'odf.platform_legacy_pipelines', 'SELECT')",
           "  AND has_table_privilege(current_user, 'odf.platform_legacy_pipelines', 'INSERT')",
           "  AND has_table_privilege(current_user, 'odf.platform_legacy_pipeline_runs', 'SELECT')",
@@ -247,6 +251,16 @@ export class PostgresPlatformCompatibilityStore implements PostgresPlatformCompa
     const requestScope = scope(context, userId);
     return this.write(requestScope, writeRoles, async (transaction) => {
       await transaction.query({ text: 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', values: [`odf:legacy-model:${requestScope.tenantId}:${requestScope.projectId}:${modelId}`] });
+      const selectedSpace = await transaction.query<Row>({
+        text: `SELECT space_id::text
+          FROM odf.model_spaces
+          WHERE tenant_id = $1::uuid AND project_id = $2::uuid
+          ORDER BY created_at ASC, space_id ASC LIMIT 1`,
+        values: [requestScope.tenantId, requestScope.projectId],
+      });
+      const spaceRow = selectedSpace.rows[0];
+      if (!spaceRow) throw new NotFoundError('Project model space was not found');
+      const spaceId = text(spaceRow, 'space_id');
       const next = await transaction.query<Row>({
         text: 'SELECT COALESCE(max(version), 0) + 1 AS version FROM odf.platform_legacy_model_versions WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND model_id = $3',
         values: [requestScope.tenantId, requestScope.projectId, modelId],
@@ -261,6 +275,28 @@ export class PostgresPlatformCompatibilityStore implements PostgresPlatformCompa
       });
       const row = inserted.rows[0];
       if (!row) throw new ConflictError('Data-model version could not be created');
+      const createdAt = timestamp(row, 'created_at');
+      const normalized = await transaction.query<Row>({
+        text: `INSERT INTO odf.data_models
+          (tenant_id, project_id, space_id, external_id, version, name, definition, state, created_by, created_at, published_at)
+          VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::jsonb, $8, $9, $10::timestamptz,
+            CASE WHEN $8 = 'published' THEN $10::timestamptz ELSE NULL END)
+          ON CONFLICT (space_id, external_id, version) DO NOTHING
+          RETURNING data_model_id::text`,
+        values: [
+          requestScope.tenantId,
+          requestScope.projectId,
+          spaceId,
+          modelId,
+          String(version),
+          input.name,
+          JSON.stringify(input.schema),
+          input.status,
+          requestScope.userId,
+          createdAt,
+        ],
+      });
+      if (!normalized.rows[0]) throw new ConflictError(`Data-model '${modelId}@${version}' already exists in normalized storage`);
       const model = this.model(row);
       await this.audit(transaction, requestScope, 'platform.data_model_version_created', 'dataModel', `${modelId}@${version}`, correlationId, { modelId, version, name: input.name, status: input.status });
       return model;

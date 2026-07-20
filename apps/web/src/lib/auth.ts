@@ -27,8 +27,15 @@ export class OidcSessionError extends Error {
   }
 }
 
+interface FactoryConfiguration {
+  enabled: true;
+  mode: "factory";
+  loginUrl: string;
+}
+
 interface EnabledConfiguration {
   enabled: true;
+  mode: "oidc";
   authority: string;
   clientId: string;
   redirectUri: string;
@@ -39,9 +46,10 @@ interface EnabledConfiguration {
 
 interface DisabledConfiguration {
   enabled: false;
+  mode: "disabled";
 }
 
-type BrowserAuthConfiguration = EnabledConfiguration | DisabledConfiguration;
+type BrowserAuthConfiguration = FactoryConfiguration | EnabledConfiguration | DisabledConfiguration;
 
 const DISABLED_SESSION: BrowserAuthSession = {
   enabled: false,
@@ -105,10 +113,30 @@ function localApplicationUrl(value: string, fallbackPath: string, label: string)
   }
 }
 
+function factoryLoginUrl(value: string): string {
+  const currentWindow = browserWindow();
+  const url = new URL(value || "http://localhost:3001/login");
+  if (!["http:", "https:"].includes(url.protocol) || url.hostname !== currentWindow.location.hostname) {
+    throw new OidcConfigurationError("VITE_FII_LOGIN_URL must use the current application hostname");
+  }
+  return url.toString();
+}
+
 function readConfiguration(): BrowserAuthConfiguration {
+  const factoryEnabled = environmentValue("VITE_FII_SSO").toLowerCase() === "true";
+  if (factoryEnabled) {
+    if (environmentValue("VITE_OIDC_AUTHORITY") || environmentValue("VITE_OIDC_CLIENT_ID")) {
+      throw new OidcConfigurationError("Factory SSO and OIDC cannot be enabled together");
+    }
+    return {
+      enabled: true,
+      mode: "factory",
+      loginUrl: factoryLoginUrl(environmentValue("VITE_FII_LOGIN_URL")),
+    };
+  }
   const authority = environmentValue("VITE_OIDC_AUTHORITY");
   const clientId = environmentValue("VITE_OIDC_CLIENT_ID");
-  if (!authority && !clientId) return { enabled: false };
+  if (!authority && !clientId) return { enabled: false, mode: "disabled" };
   if (!authority || !clientId) {
     throw new OidcConfigurationError(
       "OIDC authentication requires both VITE_OIDC_AUTHORITY and VITE_OIDC_CLIENT_ID",
@@ -126,6 +154,7 @@ function readConfiguration(): BrowserAuthConfiguration {
 
   return {
     enabled: true,
+    mode: "oidc",
     authority: validatedAuthority(authority),
     clientId,
     redirectUri: localApplicationUrl(
@@ -301,6 +330,27 @@ async function processSignoutCallback(manager: UserManager, url: string): Promis
 async function initializeOnce(): Promise<BrowserAuthSession> {
   const config = getConfiguration();
   if (!config.enabled) return DISABLED_SESSION;
+  if (config.mode === "factory") {
+    const response = await fetch("/api/v1/auth/session", {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    if (response.status === 401) return { enabled: true, authenticated: false, identity: null };
+    if (!response.ok) throw new OidcSessionError(`Factory session check failed (${response.status})`);
+    const result = await response.json() as {
+      identity?: { userId?: unknown; displayName?: unknown };
+      expiresAt?: unknown;
+    };
+    if (typeof result.identity?.userId !== "string" || typeof result.identity.displayName !== "string") {
+      throw new OidcSessionError("Factory session returned an invalid identity");
+    }
+    return {
+      enabled: true,
+      authenticated: true,
+      identity: { userId: result.identity.userId, displayName: result.identity.displayName },
+      ...(typeof result.expiresAt === "number" ? { expiresAt: result.expiresAt } : {}),
+    };
+  }
 
   try {
     const manager = await getManager(config);
@@ -351,6 +401,10 @@ async function signInOnce(): Promise<void> {
   const config = getConfiguration();
   if (!config.enabled) throw new OidcConfigurationError("OIDC authentication is not configured");
   if (session.authenticated) return;
+  if (config.mode === "factory") {
+    browserWindow().location.assign(config.loginUrl);
+    return;
+  }
   const manager = await getManager(config);
   await manager.signinRedirect({ state: { returnUrl: currentRoute() } });
 }
@@ -367,6 +421,10 @@ async function signOutOnce(): Promise<void> {
   await initialize();
   const config = getConfiguration();
   if (!config.enabled) throw new OidcConfigurationError("OIDC authentication is not configured");
+  if (config.mode === "factory") {
+    browserWindow().location.assign(config.loginUrl);
+    return;
+  }
   const manager = await getManager(config);
   await manager.signoutRedirect({
     state: { returnUrl: currentRoute() },

@@ -37,6 +37,7 @@ describe("authenticated API transport", () => {
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer verified-access-token");
     expect(headers["x-odf-user"]).toBeUndefined();
+    expect(init.credentials).toBe("include");
     expect(headers["x-odf-tenant-id"]).toBe(workspaceContext.tenantId);
     expect(headers["x-odf-project-id"]).toBe(workspaceContext.projectId);
   });
@@ -83,6 +84,7 @@ describe("authenticated API transport", () => {
     expect(url).toBe("/api/v1/workspaces/workspace-1/events");
     expect(url).not.toContain("user=");
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer verified-access-token");
+    expect(init.credentials).toBe("include");
     expect((init.headers as Record<string, string>)["x-odf-tenant-id"]).toBe(workspaceContext.tenantId);
     expect((init.headers as Record<string, string>)["x-odf-project-id"]).toBe(workspaceContext.projectId);
     unsubscribe();

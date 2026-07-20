@@ -8,13 +8,29 @@ import request from 'supertest';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../src/app.js';
-import { createIdentityProviderFromEnvironment, OidcIdentityProvider } from '../src/auth.js';
+import { createIdentityProviderFromEnvironment, FactoryIdentityProvider, OidcIdentityProvider } from '../src/auth.js';
 import { WorkspaceEventHub } from '../src/collaboration.js';
 import { FusionDatabase } from '../src/database.js';
 import { LegacySqliteIndustrialPersistence } from '../src/industrial-persistence.js';
 
 const issuer = 'https://identity.example.test/realms/open-data-fusion';
 const audience = 'open-data-fusion-api';
+const factorySecret = 'test-fii-secret-that-is-at-least-32-bytes-long';
+
+function signFactoryToken(
+  userId: string,
+  role: string,
+  overrides: { issuer?: string; audience?: string; expiration?: string } = {},
+): Promise<string> {
+  return new SignJWT({ role })
+    .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+    .setSubject(userId)
+    .setIssuer(overrides.issuer ?? 'MKZ_PLC_Server')
+    .setAudience(overrides.audience ?? 'MKZ_PLC_Client')
+    .setIssuedAt()
+    .setExpirationTime(overrides.expiration ?? '5m')
+    .sign(new TextEncoder().encode(factorySecret));
+}
 
 interface TokenOptions {
   audience?: string;
@@ -371,6 +387,146 @@ describe('OIDC workspace authentication', () => {
   });
 });
 
+describe('factory cookie authentication', () => {
+  let tempDirectory: string;
+  let database: FusionDatabase;
+  let app: Express;
+
+  beforeEach(() => {
+    tempDirectory = mkdtempSync(join(tmpdir(), 'open-data-fusion-factory-auth-'));
+    database = new FusionDatabase({ path: join(tempDirectory, 'test.db') });
+    app = createApp(database, new WorkspaceEventHub(), {
+      identityProvider: new FactoryIdentityProvider({
+        secret: factorySecret,
+        issuer: 'MKZ_PLC_Server',
+        audience: 'MKZ_PLC_Client',
+      }),
+      defaultPlatformContext: { tenantId: 'demo', projectId: 'north-plant' },
+      industrialPersistence: new LegacySqliteIndustrialPersistence(database),
+    });
+  });
+
+  afterEach(() => {
+    database.close();
+    rmSync(tempDirectory, { recursive: true, force: true });
+  });
+
+  it.each([
+    ['ADMIN', ['data:read', 'data:ingest', 'relations:review', 'audit:read', 'platform:admin', 'writeback:request', 'writeback:approve', 'writeback:execute']],
+    ['ENGINEER', ['data:read', 'data:ingest', 'relations:review', 'writeback:request']],
+    ['GUEST', ['data:read']],
+  ] as const)('maps %s to explicit permissions', async (role, permissions) => {
+    const token = await signFactoryToken('factory.user', role);
+    const provider = new FactoryIdentityProvider({
+      secret: factorySecret,
+      issuer: 'MKZ_PLC_Server',
+      audience: 'MKZ_PLC_Client',
+    });
+    const requestLike = { headers: { cookie: `fii_sso=${token}` } } as unknown as import('express').Request;
+
+    const identity = await provider.authenticate(requestLike);
+
+    expect(identity.userId).toBe('factory.user');
+    expect(identity.role).toBe(role);
+    expect([...identity.permissions]).toEqual(permissions);
+  });
+
+  it('returns verified session metadata without the token', async () => {
+    const token = await signFactoryToken('factory.user', 'GUEST');
+    const response = await request(app).get('/api/v1/auth/session').set('cookie', `fii_sso=${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      authenticated: true,
+      identity: { userId: 'factory.user', displayName: 'factory.user', role: 'GUEST' },
+    });
+    expect(JSON.stringify(response.body)).not.toContain(token);
+  });
+
+  it('rate-limits repeated authentication session requests', async () => {
+    app = createApp(database, new WorkspaceEventHub(), {
+      identityProvider: new FactoryIdentityProvider({
+        secret: factorySecret,
+        issuer: 'MKZ_PLC_Server',
+        audience: 'MKZ_PLC_Client',
+      }),
+      authSessionRateLimit: { windowMs: 60_000, limit: 2 },
+      defaultPlatformContext: { tenantId: 'demo', projectId: 'north-plant' },
+      industrialPersistence: new LegacySqliteIndustrialPersistence(database),
+    });
+    const token = await signFactoryToken('factory.user', 'GUEST');
+
+    expect((await request(app).get('/api/v1/auth/session').set('cookie', `fii_sso=${token}`)).status).toBe(200);
+    expect((await request(app).get('/api/v1/auth/session').set('cookie', `fii_sso=${token}`)).status).toBe(200);
+    const blocked = await request(app).get('/api/v1/auth/session').set('cookie', `fii_sso=${token}`);
+
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error.code).toBe('rate_limited');
+    expect(blocked.headers['ratelimit']).toBeDefined();
+  });
+
+  it('accepts a verified factory bearer token for service ingestion', async () => {
+    const token = await signFactoryToken('service-account-open-data-fusion-connector', 'ENGINEER');
+    const response = await request(app)
+      .post('/api/v1/ingest/bundle')
+      .set('authorization', `Bearer ${token}`)
+      .send({
+        source: { system: 'factory-adapter', runId: 'factory-service-token' },
+        assets: [{ externalId: 'FACTORY-1', name: 'Factory asset', type: 'Test' }],
+      });
+
+    expect(response.status).toBe(201);
+  });
+
+  it('does not fall back to a cookie when an explicit bearer token is invalid', async () => {
+    const cookieToken = await signFactoryToken('harper.dennis', 'ADMIN');
+    const bearerToken = await signFactoryToken('harper.dennis', 'ADMIN', { issuer: 'wrong' });
+    const response = await request(app)
+      .get('/api/v1/assets')
+      .set('authorization', `Bearer ${bearerToken}`)
+      .set('cookie', `fii_sso=${cookieToken}`);
+
+    expect(response.status).toBe(401);
+  });
+
+  it.each([
+    () => signFactoryToken('factory.user', 'GUEST', { issuer: 'wrong' }),
+    () => signFactoryToken('factory.user', 'GUEST', { audience: 'wrong' }),
+    () => signFactoryToken('factory.user', 'GUEST', { expiration: '0s' }),
+  ])('rejects an invalid shared token', async (makeToken) => {
+    const token = await makeToken();
+    const response = await request(app).get('/api/v1/auth/session').set('cookie', `fii_sso=${token}`);
+    expect(response.status).toBe(401);
+  });
+
+  it('rejects missing, tampered, unsupported-role, and missing-subject cookies', async () => {
+    const valid = await signFactoryToken('factory.user', 'GUEST');
+    const [head, body, signature] = valid.split('.') as [string, string, string];
+    const tamperedSignature = `${signature[0] === 'a' ? 'b' : 'a'}${signature.slice(1)}`;
+    const tampered = `${head}.${body}.${tamperedSignature}`;
+    const unsupportedRole = await signFactoryToken('factory.user', 'OWNER');
+    const missingSubject = await new SignJWT({ role: 'GUEST' })
+      .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+      .setIssuer('MKZ_PLC_Server')
+      .setAudience('MKZ_PLC_Client')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(new TextEncoder().encode(factorySecret));
+
+    for (const cookieValue of [undefined, tampered, unsupportedRole, missingSubject]) {
+      const pending = request(app).get('/api/v1/auth/session');
+      const response = await (cookieValue ? pending.set('cookie', `fii_sso=${cookieValue}`) : pending);
+      expect(response.status).toBe(401);
+    }
+  });
+
+  it('keeps project membership enforcement after authentication', async () => {
+    const token = await signFactoryToken('not-a-member', 'GUEST');
+    const response = await request(app).get('/api/v1/assets').set('cookie', `fii_sso=${token}`);
+    expect(response.status).toBe(403);
+  });
+});
+
 describe('identity environment configuration', () => {
   it('fails closed when a production process has no OIDC configuration', () => {
     expect(() => createIdentityProviderFromEnvironment({ NODE_ENV: 'production' })).toThrow(
@@ -386,5 +542,22 @@ describe('identity environment configuration', () => {
     });
 
     expect(identityProvider.mode).toBe('development');
+  });
+
+  it('requires an explicit secret for factory authentication', () => {
+    expect(() => createIdentityProviderFromEnvironment({ ODF_AUTH_MODE: 'factory' })).toThrow(
+      'FII_JWT_SECRET is required for the selected authentication mode',
+    );
+  });
+
+  it('creates the factory provider only when explicitly selected', () => {
+    const provider = createIdentityProviderFromEnvironment({
+      ODF_AUTH_MODE: 'factory',
+      FII_JWT_SECRET: factorySecret,
+      FII_JWT_ISSUER: 'MKZ_PLC_Server',
+      FII_JWT_AUDIENCE: 'MKZ_PLC_Client',
+    });
+
+    expect(provider.mode).toBe('factory');
   });
 });

@@ -279,6 +279,9 @@ export class PlatformCatalog {
       member.run('alex.morgan', 'reviewer', timestamp);
       member.run('samantha.lee', 'viewer', timestamp);
       member.run('service-account-open-data-fusion-connector', 'editor', timestamp);
+      member.run('admin', 'owner', timestamp);
+      member.run('engineer', 'editor', timestamp);
+      member.run('guest', 'viewer', timestamp);
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
