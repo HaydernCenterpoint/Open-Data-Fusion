@@ -111,8 +111,11 @@ export class FactoryIdentityProvider implements IdentityProvider {
   }
 
   async authenticate(request: Request): Promise<AuthenticatedIdentity> {
-    const token = cookie(request, 'fii_sso');
-    if (!token) throw new AuthenticationError('A valid FII session cookie is required');
+    const authorization = request.headers.authorization;
+    const bearer = typeof authorization === 'string' ? /^Bearer\s+(\S+)$/iu.exec(authorization)?.[1] : undefined;
+    if (authorization && !bearer) throw new AuthenticationError('A valid FII token is required');
+    const token = bearer ?? cookie(request, 'fii_sso');
+    if (!token) throw new AuthenticationError('A valid FII token is required');
     try {
       const { payload } = await jwtVerify(token, this.key, {
         issuer: this.config.issuer,
@@ -133,7 +136,7 @@ export class FactoryIdentityProvider implements IdentityProvider {
       };
     } catch (error) {
       if (error instanceof AuthenticationError) throw error;
-      throw new AuthenticationError('A valid FII session cookie is required');
+      throw new AuthenticationError('A valid FII token is required');
     }
   }
 }

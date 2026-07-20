@@ -419,6 +419,13 @@ describe('advanced project platform API', () => {
     ).send({ role: 'viewer' });
     expect(editorDenied.status).toBe(403);
 
+    const additionalOwner = await authorize(
+      request(app).put('/api/v1/platform/project/members/admin'),
+      'harper.dennis',
+      ['platform:admin'],
+    ).send({ role: 'viewer' });
+    expect(additionalOwner.status).toBe(200);
+
     const lastOwner = await authorize(
       request(app).put('/api/v1/platform/project/members/harper.dennis'),
       'harper.dennis',

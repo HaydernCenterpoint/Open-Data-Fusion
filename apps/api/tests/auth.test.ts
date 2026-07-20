@@ -443,6 +443,30 @@ describe('factory cookie authentication', () => {
     expect(JSON.stringify(response.body)).not.toContain(token);
   });
 
+  it('accepts a verified factory bearer token for service ingestion', async () => {
+    const token = await signFactoryToken('service-account-open-data-fusion-connector', 'ENGINEER');
+    const response = await request(app)
+      .post('/api/v1/ingest/bundle')
+      .set('authorization', `Bearer ${token}`)
+      .send({
+        source: { system: 'factory-adapter', runId: 'factory-service-token' },
+        assets: [{ externalId: 'FACTORY-1', name: 'Factory asset', type: 'Test' }],
+      });
+
+    expect(response.status).toBe(201);
+  });
+
+  it('does not fall back to a cookie when an explicit bearer token is invalid', async () => {
+    const cookieToken = await signFactoryToken('harper.dennis', 'ADMIN');
+    const bearerToken = await signFactoryToken('harper.dennis', 'ADMIN', { issuer: 'wrong' });
+    const response = await request(app)
+      .get('/api/v1/assets')
+      .set('authorization', `Bearer ${bearerToken}`)
+      .set('cookie', `fii_sso=${cookieToken}`);
+
+    expect(response.status).toBe(401);
+  });
+
   it.each([
     () => signFactoryToken('factory.user', 'GUEST', { issuer: 'wrong' }),
     () => signFactoryToken('factory.user', 'GUEST', { audience: 'wrong' }),
