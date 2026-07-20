@@ -102,7 +102,7 @@ jobs:
           psql --no-psqlrc --set=ON_ERROR_STOP=1
           --username odf_migrator --dbname odf
           --command "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'odf_validation_api') THEN CREATE ROLE odf_validation_api LOGIN PASSWORD 'validation-only-api-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT NOBYPASSRLS; END IF; END \$\$; GRANT odf_app TO odf_validation_api;"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
