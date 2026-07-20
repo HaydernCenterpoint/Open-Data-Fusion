@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1085.0",
-    "@aws-sdk/lib-storage": "^3.1085.0",
+    "@aws-sdk/lib-storage": "^3.1090.0",
     "@open-data-fusion/contracts": "0.1.0",
     "@open-data-fusion/platform-core": "0.1.0",
     "@open-data-fusion/postgres-runtime": "0.1.0",
