@@ -6,8 +6,10 @@ import { PostgresRuntime } from "@open-data-fusion/postgres-runtime";
 
 import { loadPipelineWorkerConfig } from "./config.js";
 import { BuiltinDagExecutor } from "./executor.js";
+import { PipelineHealthFile } from "./health.js";
 import { JsonLogger } from "./logger.js";
 import { ConfiguredScopeAccessResolver, PostgresPipelineWorkerRuntime } from "./postgres.js";
+import { closePipelineTelemetryServer, PipelineTelemetry, startPipelineTelemetryServer } from "./telemetry.js";
 import { PipelineWorker } from "./worker.js";
 
 try {
@@ -25,6 +27,19 @@ if (config.executor === "disabled") {
 
 const workerId = `${hostname()}:${process.pid}:${randomUUID()}`;
 const logger = new JsonLogger("pipeline-worker", workerId);
+const healthFile = new PipelineHealthFile(config.healthFile);
+await healthFile.reset();
+const telemetry = new PipelineTelemetry();
+const telemetryServer = await startPipelineTelemetryServer(
+  config.metricsPort,
+  telemetry,
+  () => healthFile.isFresh(config.healthMaximumAgeMilliseconds),
+  (probeId) => logger.log("info", "observability_probe", { probeId }),
+);
+logger.log("info", "observability_started", {
+  metricsPort: config.metricsPort,
+  healthMaximumAgeMilliseconds: config.healthMaximumAgeMilliseconds,
+});
 const policy = new ConfiguredScopeAccessResolver(config.scopes, config.actorId);
 const postgres = PostgresRuntime.connect({
   connectionString: config.postgresUrl,
@@ -45,6 +60,9 @@ const worker = new PipelineWorker(runtime, new BuiltinDagExecutor(), logger, {
   retryBaseMilliseconds: config.retryBaseMilliseconds,
   retryMaxMilliseconds: config.retryMaxMilliseconds,
   shutdownGraceMilliseconds: config.shutdownGraceMilliseconds,
+  onCycleCompleted: async (result, durationMilliseconds) => {
+    if (telemetry.observeCycle(result, durationMilliseconds)) await healthFile.markSuccess();
+  },
 });
 
 let shutdownPromise: Promise<void> | null = null;
@@ -59,5 +77,5 @@ try {
   await worker.run();
   await shutdownPromise;
 } finally {
-  await runtime.close();
+  await Promise.allSettled([closePipelineTelemetryServer(telemetryServer), runtime.close(), logger.shutdown()]);
 }

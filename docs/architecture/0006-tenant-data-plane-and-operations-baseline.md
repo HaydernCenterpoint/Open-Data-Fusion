@@ -104,11 +104,20 @@ environment; production must map an equivalent file from its secret manager.
 The same secret is mounted into the API container and loaded at startup, rather
 than being embedded in the Compose file.
 
-The current API is not yet exporting OTLP spans/logs, so traces/logs exported
-to the collector debug exporter are only a bootstrap signal. Before production
-promotion, application and worker code must emit OTLP metrics, traces and
-redacted structured logs; the operator must replace local Grafana credentials
-and configure durable external trace/log storage or a managed collector backend.
+When `ODF_OTEL_ENABLED` and an OTLP endpoint are configured, the API exports
+auto-instrumented OTLP traces and redacted Pino request logs; the
+production-like Compose overlay explicitly selects the Collector's HTTP/protobuf log
+export for both API replicas and the outbox/pipeline workers. The API disables
+automatic resource detection so logs and traces do not carry command arguments,
+host data, or process-owner metadata; the explicit service name remains
+available for correlation. The workers emit bounded redacted JSON logs through
+process-local OTLP log emitters and expose Prometheus metrics plus
+heartbeat-backed health checks. The production-like rehearsal sends a UUID
+probe to each worker's internal health endpoint and requires that exact probe
+to appear in the Collector's durable log buffer; it does not create business
+data. Before production promotion, complete worker trace coverage, replace
+local Grafana credentials, and configure durable external trace/log storage or
+a managed collector backend.
 
 `application-preview` is intentionally not a production profile. It builds
 API/web containers to prove build contexts, but the API continues to use its

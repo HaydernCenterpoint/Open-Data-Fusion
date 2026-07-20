@@ -2,6 +2,7 @@ export * from "./contextualization.js";
 export * from "./diagram.js";
 export * from "./merge.js";
 export * from "./matching.js";
+export * from "./modeling.js";
 export * from "./quality.js";
 export * from "./spatial.js";
 export * from "./workflow.js";

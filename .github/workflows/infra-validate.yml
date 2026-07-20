@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "infra/**"
+      - "apps/edge-agent/**"
+      - "apps/pipeline-worker/**"
       - "docker-compose*.yml"
       - "Dockerfile*"
       - ".dockerignore"
@@ -12,6 +14,8 @@ on:
   pull_request:
     paths:
       - "infra/**"
+      - "apps/edge-agent/**"
+      - "apps/pipeline-worker/**"
       - "docker-compose*.yml"
       - "Dockerfile*"
       - ".dockerignore"
@@ -41,18 +45,30 @@ jobs:
           python3 infra/postgres/scripts/validate_static.py
           python3 infra/ci/validate-production-gates.py
           bash -n infra/ci/postgres-backup-restore-rehearsal.sh
+          bash -n infra/ci/outbox-broker-rehearsal.sh
+          bash -n infra/ci/production-like-observability-smoke.sh
+          bash -n infra/ci/security-ingress-smoke.sh
+          bash -n infra/ci/edge-agent-mtls-rehearsal.sh
           bash -n infra/security/generate-rehearsal-pki.sh
           bash infra/security/generate-rehearsal-pki.sh "$RUNNER_TEMP/odf-rehearsal-pki"
       - name: Validate production compose syntax
         run: docker compose -f docker-compose.yml config --quiet
       - name: Validate Prometheus and OpenTelemetry configuration
         run: |
+          printf '%s' "$ODF_METRICS_TOKEN" > "$RUNNER_TEMP/odf_metrics_token"
           docker run --rm --entrypoint promtool \
             -v "$PWD/infra/observability:/etc/prometheus:ro" \
+            -v "$RUNNER_TEMP/odf_metrics_token:/run/secrets/odf_metrics_token:ro" \
             prom/prometheus:v3.3.0 check config /etc/prometheus/prometheus.yml
           docker run --rm \
             -v "$PWD/infra/observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro" \
             otel/opentelemetry-collector-contrib:0.121.0 validate --config=/etc/otelcol-contrib/config.yaml
+      - name: Validate mTLS edge rehearsal Compose shape without deployment secrets
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.production-like.yml
+          -f docker-compose.security-rehearsal.yml --profile production-like
+          --profile security-rehearsal --profile edge config --no-interpolate
+          --no-env-resolution --no-path-resolution --quiet
       - name: Validate local identity compose syntax
         run: docker compose -f docker-compose.identity.yml config --quiet
 
@@ -111,4 +127,4 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build application and worker images
-        run: docker compose --profile application-preview --profile workers --profile edge build api web outbox-worker edge-agent
+        run: docker compose --profile application-preview --profile workers --profile edge build api web outbox-worker pipeline-worker edge-agent

@@ -190,6 +190,34 @@ export interface PlatformConnector {
   createdAt: string;
 }
 
+export type PlatformRawIngestionState = "received" | "accepted" | "failed" | "quarantined";
+
+export interface PlatformRawIngestionRecord {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  sourceSystem: string;
+  runId: string;
+  rawObjectUri: string;
+  sha256: string;
+  byteSize: number;
+  state: PlatformRawIngestionState;
+  actor: string;
+  correlationId: string;
+  errorSummary: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  lastReplayedAt: string | null;
+  lastReplayRunId: string | null;
+}
+
+export interface PlatformRawIngestionReplayResult extends IngestResult {
+  counts?: Record<string, number>;
+  completedAt?: string;
+  replayedFromRawObjectId: string;
+  rawObject: PlatformRawIngestionRecord;
+}
+
 export interface PlatformDataModel {
   tenantId: string;
   projectId: string;
@@ -229,6 +257,25 @@ export interface PlatformPipelineRun {
   startedAt: string;
   completedAt: string | null;
   replayed?: boolean;
+}
+
+export type PlatformQualityCheck =
+  | { operator: "required"; field: string }
+  | { operator: "equals"; field: string; value: unknown }
+  | { operator: "gte"; field: string; value: number }
+  | { operator: "lte"; field: string; value: number };
+
+export interface PlatformQualityRule {
+  tenantId: string;
+  projectId: string;
+  id: string;
+  name: string;
+  targetType: string;
+  check: PlatformQualityCheck;
+  severity: "info" | "warning" | "error";
+  enabled: boolean;
+  createdBy: string;
+  createdAt: string;
 }
 
 export interface PlatformQualityResult {

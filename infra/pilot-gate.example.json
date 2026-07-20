@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "pilotRunId": "pilot-managed-20260716-001",
+  "predecessorPilotRunId": null,
+  "operatorId": "operator@example.test",
+  "incidentContactId": "incident@example.test",
+  "scope": {
+    "pilotProjectExternalId": "design-partner-pilot",
+    "syntheticProjectExternalId": "synthetic-isolation",
+    "readOnly": true,
+    "writebackAuthorized": false
+  },
+  "environment": {
+    "id": "managed-staging",
+    "kind": "managed-staging",
+    "applicationCommit": "1111111111111111111111111111111111111111",
+    "reviewerKeySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "migrations": [
+      {
+        "version": "202607160001",
+        "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    ],
+    "migrationSetSha256": "ac0f8176205045a99e50d679600d4a192b6e57cb29eb4f6d4e92a4212cce90ed",
+    "imageDigests": {
+      "api": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "outbox-worker": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pipeline-worker": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "edge-agent": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "targets": {
+    "rpoMinutes": 15,
+    "rtoMinutes": 240,
+    "availabilityPercent": 99.9,
+    "latencyP95Seconds": 1.0,
+    "outboxFreshnessSeconds": 300,
+    "observationDays": 30,
+    "loadMultiplier": 2.0,
+    "evidenceRetentionDays": 90
+  },
+  "connectors": [
+    {
+      "kind": "csv",
+      "externalId": "pilot-csv",
+      "requiredAverageRate": 100.0,
+      "sourceSafetyCeilingRate": 180.0,
+      "approvedBackfillWindowMinutes": 120,
+      "entityCount": 500,
+      "timeSeriesCount": 0,
+      "averageRecordBytes": 512,
+      "retentionDays": 90,
+      "schemaFingerprintSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "kind": "postgres",
+      "externalId": "pilot-postgres",
+      "measuredPeakRate": 50.0,
+      "approvedBackfillWindowMinutes": 180,
+      "entityCount": 1000,
+      "timeSeriesCount": 50,
+      "averageRecordBytes": 1024,
+      "retentionDays": 365,
+      "schemaFingerprintSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    {
+      "kind": "opcua",
+      "externalId": "pilot-opcua",
+      "measuredPeakRate": 200.0,
+      "approvedBackfillWindowMinutes": 60,
+      "entityCount": 200,
+      "timeSeriesCount": 200,
+      "averageRecordBytes": 256,
+      "retentionDays": 30,
+      "schemaFingerprintSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ]
+}

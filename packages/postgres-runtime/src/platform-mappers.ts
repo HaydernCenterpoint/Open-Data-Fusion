@@ -6,6 +6,7 @@ import type {
   DocumentRecord,
   GraphInstanceRecord,
   ModelSpaceRecord,
+  PublicModelVersion,
   ModelViewRecord,
   PipelineRecord,
   PipelineRunRecordV2,
@@ -169,11 +170,30 @@ export function modelViewFromRow(row: Row): ModelViewRecord {
   };
 }
 
+export function publicModelVersionFromRow(row: Row): PublicModelVersion {
+  const status = oneOf(requiredRowString(row, "state"), ["draft", "published"], "public model state");
+  const version = requiredRowNumber(row, "version");
+  if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("Expected positive model version from PostgreSQL");
+  return {
+    tenantId: requiredRowString(row, "tenant_id"),
+    projectId: requiredRowString(row, "project_id"),
+    id: requiredRowString(row, "external_id"),
+    version,
+    name: requiredRowString(row, "name"),
+    schema: rowJsonObject(row, "definition"),
+    status,
+    createdBy: requiredRowString(row, "created_by"),
+    createdAt: requiredRowString(row, "created_at"),
+    publishedAt: optionalRowString(row, "published_at"),
+  };
+}
+
 export function graphInstanceFromRow(row: Row): GraphInstanceRecord {
   return {
     instanceId: requiredRowString(row, "instance_id"), tenantId: requiredRowString(row, "tenant_id"), projectId: requiredRowString(row, "project_id"),
     datasetId: optionalRowString(row, "dataset_id"), spaceId: requiredRowString(row, "space_id"), externalId: requiredRowString(row, "external_id"),
     instanceKind: oneOf(requiredRowString(row, "instance_kind"), ["node", "edge"], "instance kind"), dataModelId: optionalRowString(row, "data_model_id"),
+    modelViewId: optionalRowString(row, "model_view_id"), sourceInstanceId: optionalRowString(row, "source_instance_id"), targetInstanceId: optionalRowString(row, "target_instance_id"),
     properties: rowJsonObject(row, "properties"), validFrom: optionalRowString(row, "valid_from"), validTo: optionalRowString(row, "valid_to"),
     createdAt: requiredRowString(row, "created_at"), updatedAt: requiredRowString(row, "updated_at"),
   };

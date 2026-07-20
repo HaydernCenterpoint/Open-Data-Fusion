@@ -25,3 +25,7 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: [outbox-worker:9465]
+  - job_name: open-data-fusion-pipeline
+    metrics_path: /metrics
+    static_configs:
+      - targets: [pipeline-worker:9466]

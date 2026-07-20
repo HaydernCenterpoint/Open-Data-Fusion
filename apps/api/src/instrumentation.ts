@@ -26,6 +26,9 @@ const endpoint = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT?.trim()
 export const telemetrySdk = endpoint && process.env.ODF_OTEL_ENABLED !== "false"
   ? new NodeSDK({
       serviceName: "open-data-fusion-api",
+      // Logs and traces share this resource. Avoid exporting command arguments,
+      // host data, or process-owner metadata that could contain credentials.
+      autoDetectResources: false,
       traceExporter: new OTLPTraceExporter({
         url: endpoint.endsWith("/v1/traces") ? endpoint : `${endpoint.replace(/\/$/u, "")}/v1/traces`,
       }),

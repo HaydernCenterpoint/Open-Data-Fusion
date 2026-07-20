@@ -16,11 +16,13 @@
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "check": "npm run typecheck && npm run test && npm run build && npm run infra:validate",
+    "check:lockfile": "npm ci --dry-run --ignore-scripts",
+    "check": "npm run check:lockfile && npm run typecheck && npm run test && npm run build && npm run infra:validate",
     "check:release": "npm run check && npm audit --audit-level=high && npm ls --all",
     "sbom": "npm sbom --sbom-format spdx",
-    "infra:validate": "python infra/postgres/scripts/validate_static.py && python infra/ci/validate-production-gates.py",
+    "infra:validate": "python infra/postgres/scripts/validate_static.py && python -m unittest discover -s infra/ci/tests -p \"test_*.py\" && python infra/ci/validate-production-gates.py",
     "infra:operations:validate": "python infra/ci/validate-production-gates.py",
+    "pilot:gate": "python -m infra.pilot_gate",
     "infra:postgres": "docker compose up -d odf-postgres",
     "infra:migrate": "docker compose --profile migrate run --rm migrate",
     "infra:production-like:dependencies": "docker compose -f docker-compose.yml -f docker-compose.production-like.yml --profile production-like up -d --wait odf-postgres odf-redis",
@@ -41,6 +43,6 @@
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   }
 }

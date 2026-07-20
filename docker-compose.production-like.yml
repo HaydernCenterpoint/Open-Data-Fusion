@@ -129,7 +129,12 @@ services:
       ODF_OBJECT_STORAGE_TEMP_PATH: /tmp/odf-object-staging
       ODF_SHARED_EVENTS_REQUIRED: "true"
       ODF_REDIS_URL: "redis://:${ODF_REDIS_PASSWORD:?Set ODF_REDIS_PASSWORD via a secret manager or environment variable}@odf-redis:6379/0"
-      ODF_OTEL_ENABLED: "false"
+      # The exporters do not synchronously require the optional Collector, so
+      # dependency/migration bootstrap stays independent of observability.
+      ODF_OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -178,7 +183,12 @@ services:
       ODF_OBJECT_STORAGE_MAX_BYTES: "52428800"
       ODF_SHARED_EVENTS_REQUIRED: "true"
       ODF_REDIS_URL: "redis://:${ODF_REDIS_PASSWORD:?Set ODF_REDIS_PASSWORD via a secret manager or environment variable}@odf-redis:6379/0"
-      ODF_OTEL_ENABLED: "false"
+      # Do not depend_on the optional Collector: bootstrap must remain able to
+      # start durable dependencies before observability is selected.
+      ODF_OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
       PORT: "4310"
     ports:
       - "127.0.0.1:${ODF_API_REPLICA_PORT:-4311}:4310"
@@ -215,6 +225,21 @@ services:
       # The worker's own required() startup check rejects an empty URL.
       ODF_POSTGRES_URL: "${ODF_OUTBOX_POSTGRES_URL:-}"
       ODF_REDIS_URL: "redis://:${ODF_REDIS_PASSWORD:?Set ODF_REDIS_PASSWORD via a secret manager or environment variable}@odf-redis:6379/0"
+      # The worker degrades to stdout if the optional Collector is absent, so
+      # recovery and migration startup remain independent of observability.
+      ODF_OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
+
+  pipeline-worker:
+    environment:
+      # Keep the Collector optional; the process-local emitter must never make
+      # a pipeline polling cycle depend on observability availability.
+      ODF_OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
 
 volumes:
   odf-api-replica-data:

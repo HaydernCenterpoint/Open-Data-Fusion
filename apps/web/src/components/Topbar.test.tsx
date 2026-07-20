@@ -37,7 +37,10 @@ const assets = [
   },
 ];
 
-function renderTopbar(onResultSelect = vi.fn()) {
+function renderTopbar(onResultSelect = vi.fn(), onSearchSubmit = vi.fn()) {
+  const onTenantChange = vi.fn();
+  const onProjectChange = vi.fn();
+  const onRetry = vi.fn();
   function Harness() {
     const [query, setQuery] = useState("");
     return (
@@ -45,17 +48,27 @@ function renderTopbar(onResultSelect = vi.fn()) {
         query={query}
         onQueryChange={setQuery}
         onResultSelect={onResultSelect}
+        onSearchSubmit={onSearchSubmit}
         apiOnline
         platformContext={{ tenantId: "tenant-1", projectId: "project-1" }}
-        platformStatus="ready"
+        tenants={[{ id: "tenant-1", name: "Tenant One", createdBy: "system", createdAt: "2026-01-01T00:00:00.000Z" }]}
+        projects={[
+          { tenantId: "tenant-1", id: "project-1", name: "Project One", description: null, createdBy: "system", createdAt: "2026-01-01T00:00:00.000Z" },
+          { tenantId: "tenant-1", id: "project-2", name: "Project Two", description: null, createdBy: "system", createdAt: "2026-01-01T00:00:00.000Z" },
+        ]}
+        selectedTenantId="tenant-1"
+        platformState={{ status: "ready", message: "tenant-1 / project-1" }}
         activeSection="Explorer"
+        onTenantChange={onTenantChange}
+        onProjectChange={onProjectChange}
+        onRetry={onRetry}
         onSectionChange={vi.fn()}
       />
     );
   }
 
   render(<Harness />);
-  return { onResultSelect };
+  return { onProjectChange, onResultSelect, onSearchSubmit };
 }
 
 async function openSearchResults() {
@@ -94,6 +107,16 @@ describe("Topbar search", () => {
     expect(input).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("submits an unselected query to the full Data Explorer", async () => {
+    const { onSearchSubmit } = renderTopbar();
+    const { input } = await openSearchResults();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSearchSubmit).toHaveBeenCalledWith("pump");
+    expect(screen.queryByRole("listbox", { name: "Search results" })).not.toBeInTheDocument();
+  });
+
   it("closes results on Escape, blur, and an outside pointer event", async () => {
     renderTopbar();
     const { input } = await openSearchResults();
@@ -111,5 +134,21 @@ describe("Topbar search", () => {
     expect(screen.getByRole("listbox", { name: "Search results" })).toBeInTheDocument();
     fireEvent.mouseDown(document.body);
     expect(screen.queryByRole("listbox", { name: "Search results" })).not.toBeInTheDocument();
+  });
+
+  it("opens the active project selector and focuses search with Control+K", async () => {
+    const { onProjectChange } = renderTopbar();
+    const input = screen.getByRole("combobox", { name: "Search project data" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Change project: Project One in Tenant One" }));
+    const switcher = screen.getByRole("dialog", { name: "Project switcher" });
+    const tenantSelector = within(switcher).getByRole("combobox", { name: "Project tenant" });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(tenantSelector).toHaveFocus();
+    fireEvent.change(within(switcher).getByRole("combobox", { name: "Project" }), { target: { value: "project-2" } });
+    expect(onProjectChange).toHaveBeenCalledWith("project-2");
+
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    expect(input).toHaveFocus();
   });
 });

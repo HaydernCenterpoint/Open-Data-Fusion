@@ -108,21 +108,23 @@ export class PostgresConnector implements EdgeConnector {
     }
     if (result.rows.length === 0) return null;
 
-    let previous: unknown;
+    let previous: string | undefined;
     for (const [index, row] of result.rows.entries()) {
       if (!Object.hasOwn(row, this.config.checkpointColumn)) {
         throw new Error(`PostgreSQL row ${index + 1} does not contain checkpoint column '${this.config.checkpointColumn}'`);
       }
-      const current = row[this.config.checkpointColumn];
-      checkpointValue(current, this.config.checkpointColumn);
-      if (index > 0 && compareCheckpointValues(previous, current) >= 0) {
+      const current = checkpointValue(row[this.config.checkpointColumn], this.config.checkpointColumn);
+      if (index === 0 && compareCheckpointValues(current, effectiveCheckpoint) <= 0) {
+        throw new Error(`PostgreSQL first checkpoint column '${this.config.checkpointColumn}' must be strictly greater than the stored checkpoint`);
+      }
+      if (previous !== undefined && compareCheckpointValues(previous, current) >= 0) {
         throw new Error(`PostgreSQL checkpoint column '${this.config.checkpointColumn}' must be strictly increasing`);
       }
       previous = current;
     }
 
-    const checkpointAfter = checkpointValue(previous, this.config.checkpointColumn);
-    if (checkpointAfter === effectiveCheckpoint) {
+    const checkpointAfter = previous!;
+    if (compareCheckpointValues(checkpointAfter, effectiveCheckpoint) <= 0) {
       throw new Error(`PostgreSQL query did not advance checkpoint '${this.config.checkpointColumn}'`);
     }
 

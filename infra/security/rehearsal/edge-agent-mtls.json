@@ -1,0 +1,71 @@
+{
+  "agent": {
+    "archiveDirectory": "/workspace/data/edge/raw",
+    "queuePath": "/workspace/data/edge/queue.db",
+    "actor": "edge-agent-mtls-rehearsal",
+    "pollIntervalMs": 60000,
+    "deliveryIntervalMs": 100,
+    "deliveryLeaseMs": 30000,
+    "shutdownDrainTimeoutMs": 1000,
+    "maxDrainBatch": 1,
+    "retry": {
+      "baseDelayMs": 1000,
+      "maxDelayMs": 30000,
+      "jitterRatio": 0
+    }
+  },
+  "delivery": {
+    "apiBaseUrl": "https://odf-mtls-gateway:9443",
+    "tenantId": "11111111-1111-4111-8111-111111111111",
+    "projectId": "22222222-2222-4222-8222-222222222222",
+    "requestTimeoutMs": 15000,
+    "mtls": {
+      "certificateFile": "/run/secrets/odf_edge_ingest_client_cert",
+      "privateKeyFile": "/run/secrets/odf_edge_ingest_client_key",
+      "caFile": "/run/secrets/odf_ingress_client_ca"
+    },
+    "token": {
+      "tokenUrl": "http://keycloak:8080/realms/open-data-fusion/protocol/openid-connect/token",
+      "clientIdEnv": "ODF_EDGE_CLIENT_ID",
+      "clientSecretEnv": "ODF_EDGE_CLIENT_SECRET",
+      "expirySkewSeconds": 30,
+      "requestTimeoutMs": 15000
+    }
+  },
+  "connectors": [
+    {
+      "type": "csv",
+      "sourceSystem": "ci-edge-mtls",
+      "filePath": "/workspace/rehearsal/edge-agent-mtls.csv",
+      "delimiter": ",",
+      "batchSize": 1,
+      "trim": true,
+      "mapping": {
+        "timestampColumn": "timestamp",
+        "assets": [
+          {
+            "externalId": "CI-MTLS-EDGE-PUMP-001",
+            "name": "CI mTLS edge rehearsal pump",
+            "type": "pump",
+            "metadata": {
+              "fixture": "edge-mtls-rehearsal"
+            }
+          }
+        ],
+        "timeSeries": [
+          {
+            "externalId": "CI-MTLS-EDGE-PUMP-001-PRESSURE",
+            "assetExternalId": "CI-MTLS-EDGE-PUMP-001",
+            "name": "CI mTLS discharge pressure",
+            "unit": "bar",
+            "metadata": {
+              "fixture": "edge-mtls-rehearsal"
+            },
+            "valueColumn": "pressure_bar",
+            "qualityColumn": "quality"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -279,7 +279,6 @@ export class PlatformCatalog {
       member.run('alex.morgan', 'reviewer', timestamp);
       member.run('samantha.lee', 'viewer', timestamp);
       member.run('service-account-open-data-fusion-connector', 'editor', timestamp);
-      this.refreshAssetSearchProjection({ tenantId: 'demo', projectId: 'north-plant' }, timestamp);
       this.database.exec('COMMIT');
     } catch (error) {
       this.database.exec('ROLLBACK');
@@ -297,19 +296,6 @@ export class PlatformCatalog {
       throw new ForbiddenError(`Role '${role}' cannot perform this project operation`);
     }
     return role;
-  }
-
-  assertAssetVisible(context: PlatformContext, assetExternalId: string): void {
-    const statement = this.database.prepare(`
-      SELECT 1 FROM platform_search_index
-      WHERE tenant_id=? AND project_id=? AND entity_type='asset' AND entity_id=?
-    `);
-    let visible = statement.get(context.tenantId, context.projectId, assetExternalId);
-    if (!visible && context.tenantId === 'demo' && context.projectId === 'north-plant') {
-      this.refreshAssetSearchProjection(context, nowIso());
-      visible = statement.get(context.tenantId, context.projectId, assetExternalId);
-    }
-    if (!visible) throw new NotFoundError(`Asset '${assetExternalId}' was not found in project '${context.tenantId}/${context.projectId}'`);
   }
 
   listTenants(userId: string, includeAll: boolean, query: CursorListQuery): Record<string, unknown> {
@@ -492,7 +478,6 @@ export class PlatformCatalog {
   }
 
   search(context: PlatformContext, query: PlatformSearchQuery): Record<string, unknown> {
-    if (context.tenantId === 'demo' && context.projectId === 'north-plant') this.refreshAssetSearchProjection(context, nowIso());
     const cursor = decodeCursor(query.cursor, searchCursorSchema, { type: '', id: '' });
     if (this.searchFtsAvailable) {
       const terms = query.q.normalize('NFKC').match(/[\p{L}\p{N}_]+/gu) ?? [];
@@ -543,6 +528,32 @@ export class PlatformCatalog {
     timestamp = nowIso(),
   ): void {
     this.upsertSearch(context, entityType, entityId, title, body, timestamp);
+  }
+
+  rebuildSqliteAssetSearchIndex(): void {
+    this.transaction(() => {
+      this.database.prepare(`DELETE FROM platform_search_index WHERE entity_type='asset'`).run();
+      this.database.prepare(`
+        INSERT INTO platform_search_index(tenant_id,project_id,entity_type,entity_id,title,body,updated_at)
+        SELECT asset.tenant_id,asset.project_id,'asset',asset.external_id,asset.name,
+          COALESCE(asset.description,'') || ' ' || asset.type,asset.updated_at
+        FROM industrial_assets AS asset
+        JOIN platform_projects AS project
+          ON project.tenant_id=asset.tenant_id AND project.id=asset.project_id
+      `).run();
+      if (this.searchFtsAvailable) {
+        try {
+          this.database.prepare(`DELETE FROM platform_search_fts WHERE entity_type='asset'`).run();
+          this.database.prepare(`
+            INSERT INTO platform_search_fts(tenant_id,project_id,entity_type,entity_id,title,body)
+            SELECT tenant_id,project_id,entity_type,entity_id,title,body FROM platform_search_index
+            WHERE entity_type='asset'
+          `).run();
+        } catch {
+          this.searchFtsAvailable = false;
+        }
+      }
+    });
   }
 
   private listScoped(
@@ -615,28 +626,6 @@ export class PlatformCatalog {
       current = (current as Record<string, unknown>)[segment];
     }
     return current;
-  }
-
-  private refreshAssetSearchProjection(context: PlatformContext, timestamp: string): void {
-    this.database.prepare(`
-      INSERT INTO platform_search_index(tenant_id,project_id,entity_type,entity_id,title,body,updated_at)
-      SELECT ?,?,'asset',external_id,name,COALESCE(description,'') || ' ' || type,? FROM assets WHERE 1
-      ON CONFLICT(tenant_id,project_id,entity_type,entity_id) DO UPDATE SET
-        title=excluded.title,body=excluded.body,updated_at=excluded.updated_at
-    `).run(context.tenantId, context.projectId, timestamp);
-    if (this.searchFtsAvailable) {
-      try {
-        this.database.prepare(`DELETE FROM platform_search_fts WHERE tenant_id=? AND project_id=? AND entity_type='asset'`)
-          .run(context.tenantId, context.projectId);
-        this.database.prepare(`
-          INSERT INTO platform_search_fts(tenant_id,project_id,entity_type,entity_id,title,body)
-          SELECT tenant_id,project_id,entity_type,entity_id,title,body FROM platform_search_index
-          WHERE tenant_id=? AND project_id=? AND entity_type='asset'
-        `).run(context.tenantId, context.projectId);
-      } catch {
-        this.searchFtsAvailable = false;
-      }
-    }
   }
 
   private upsertSearch(context: PlatformContext, entityType: string, entityId: string, title: string, body: string, timestamp: string): void {

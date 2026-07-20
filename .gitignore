@@ -4,6 +4,7 @@ coverage/
 .vite/
 *.log
 *.tsbuildinfo
+__pycache__/
 .DS_Store
 Thumbs.db
 .env
@@ -15,6 +16,7 @@ data/*.db-wal
 apps/api/data/
 .serena/
 docs/superpowers/
+.worktrees/
 
 # Clean-room research captures are local evidence, not redistributable product assets.
 docs/design/cognite-demo-reference.png

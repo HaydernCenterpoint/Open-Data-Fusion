@@ -18,12 +18,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@open-data-fusion/platform-core": "0.1.0",
     "pg": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.10",
     "@types/pg": "^8.20.0",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitest": "4.1.10"
   }
 }

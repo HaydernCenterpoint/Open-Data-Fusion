@@ -24,6 +24,21 @@ const httpUrlSchema = z.string().url().superRefine((value, context) => {
   }
 });
 
+const secretFilePathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(4_096)
+  .refine((value) => !/[\r\n]/u.test(value), "Expected a single-line file path")
+  .refine((value) => !/-----BEGIN [A-Z0-9 ]+-----/u.test(value), "Expected a file path, not inline PEM material");
+
+const serverNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(253)
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/u, "Expected a DNS server name");
+
 export const mappedAssetSchema = z
   .object({
     externalId: externalIdSchema,
@@ -225,6 +240,45 @@ const retrySchema = z
   .strict()
   .refine((retry) => retry.maxDelayMs >= retry.baseDelayMs, "maxDelayMs must be greater than or equal to baseDelayMs");
 
+const deliveryMtlsSchema = z
+  .object({
+    certificateFile: secretFilePathSchema,
+    privateKeyFile: secretFilePathSchema,
+    caFile: secretFilePathSchema.optional(),
+    serverName: serverNameSchema.optional(),
+  })
+  .strict();
+
+const deliveryConfigSchema = z
+  .object({
+    apiBaseUrl: httpUrlSchema,
+    tenantId: externalIdSchema,
+    projectId: externalIdSchema,
+    requestTimeoutMs: z.number().int().min(100).max(300_000).default(30_000),
+    mtls: deliveryMtlsSchema.optional(),
+    token: z
+      .object({
+        tokenUrl: httpUrlSchema,
+        clientIdEnv: environmentReferenceSchema,
+        clientSecretEnv: environmentReferenceSchema,
+        scope: z.string().trim().min(1).max(2_000).optional(),
+        audience: z.string().trim().min(1).max(2_000).optional(),
+        expirySkewSeconds: z.number().int().min(0).max(300).default(30),
+        requestTimeoutMs: z.number().int().min(100).max(300_000).default(15_000),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((delivery, context) => {
+    if (delivery.mtls && new URL(delivery.apiBaseUrl).protocol !== "https:") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["apiBaseUrl"],
+        message: "delivery.apiBaseUrl must use HTTPS when delivery.mtls is configured",
+      });
+    }
+  });
+
 export const edgeAgentConfigSchema = z
   .object({
     agent: z
@@ -240,25 +294,7 @@ export const edgeAgentConfigSchema = z
         retry: retrySchema.default({}),
       })
       .strict(),
-    delivery: z
-      .object({
-        apiBaseUrl: httpUrlSchema,
-        tenantId: externalIdSchema,
-        projectId: externalIdSchema,
-        requestTimeoutMs: z.number().int().min(100).max(300_000).default(30_000),
-        token: z
-          .object({
-            tokenUrl: httpUrlSchema,
-            clientIdEnv: environmentReferenceSchema,
-            clientSecretEnv: environmentReferenceSchema,
-            scope: z.string().trim().min(1).max(2_000).optional(),
-            audience: z.string().trim().min(1).max(2_000).optional(),
-            expirySkewSeconds: z.number().int().min(0).max(300).default(30),
-            requestTimeoutMs: z.number().int().min(100).max(300_000).default(15_000),
-          })
-          .strict(),
-      })
-      .strict(),
+    delivery: deliveryConfigSchema,
     connectors: z.array(connectorConfigSchema).min(1).max(100),
   })
   .strict()
@@ -277,6 +313,7 @@ export const edgeAgentConfigSchema = z
   });
 
 export type EdgeAgentConfig = z.infer<typeof edgeAgentConfigSchema>;
+export type DeliveryMtlsConfig = z.infer<typeof deliveryMtlsSchema>;
 export type ConnectorConfig = z.infer<typeof connectorConfigSchema>;
 export type CsvConnectorConfig = z.infer<typeof csvConnectorSchema>;
 export type PostgresConnectorConfig = z.infer<typeof postgresConnectorSchema>;

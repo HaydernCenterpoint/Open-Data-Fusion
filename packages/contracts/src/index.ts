@@ -247,3 +247,4 @@ export type WorkspaceLiveEvent =
     };
 
 export * from "./platform.js";
+export * from "./model-graph.js";

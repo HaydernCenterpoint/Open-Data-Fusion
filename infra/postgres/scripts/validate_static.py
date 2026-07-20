@@ -297,6 +297,14 @@ def validate_migrations(migration_paths: list[Path]) -> None:
         "shared object metadata must not grant application deletes for immutable evidence",
     )
 
+    advanced_platform = read(MIGRATIONS / "013_platform_advanced_search.sql")
+    for guardrail in [
+        "threshold double precision NOT NULL CHECK (threshold >= 0 AND threshold <= 1)",
+        "confidence double precision NOT NULL CHECK (confidence >= 0 AND confidence <= 1)",
+    ]:
+        require(guardrail in advanced_platform, f"missing finite range guardrail: {guardrail}")
+    require("isfinite(" not in advanced_platform, "advanced platform migration must not call isfinite() for double precision")
+
     legacy_compatibility = read(MIGRATIONS / "014_platform_legacy_compatibility.sql")
     legacy_tables = [
         "platform_legacy_model_versions",
@@ -389,6 +397,52 @@ def validate_migrations(migration_paths: list[Path]) -> None:
         re.search(r"GRANT\s+[^;]*(?:\bDELETE\b|\bALL(?:\s+PRIVILEGES)?\b)[^;]*\s+TO\s+odf_app\s*;", legacy_compatibility, re.DOTALL)
         is None,
         "legacy compatibility tables must not grant DELETE or ALL privileges to odf_app",
+    )
+
+    model_graph = read(MIGRATIONS / "015_model_graph_query.sql")
+    for guardrail in [
+        "SET LOCAL lock_timeout = '10s';",
+        "SET LOCAL statement_timeout = '120s';",
+        "SELECT pg_advisory_xact_lock(hashtextextended('odf:postgres:migrations', 0));",
+        "ADD COLUMN IF NOT EXISTS model_view_id uuid",
+        "ADD COLUMN IF NOT EXISTS source_instance_id uuid",
+        "ADD COLUMN IF NOT EXISTS target_instance_id uuid",
+        "FOREIGN KEY (tenant_id, project_id, source_instance_id)",
+        "FOREIGN KEY (tenant_id, project_id, target_instance_id)",
+        "CREATE TABLE IF NOT EXISTS odf.model_graph_batch_keys",
+        "CHECK (request_hash ~ '^[a-f0-9]{64}$')",
+        "CHECK (jsonb_typeof(summary) = 'object')",
+        "UNIQUE (tenant_id, project_id, data_model_id, idempotency_key)",
+        "CREATE OR REPLACE FUNCTION odf.enforce_data_model_publication()",
+        "OLD.state = 'draft' AND NEW.state = 'published'",
+        "CREATE OR REPLACE FUNCTION odf.validate_model_graph_instance()",
+        "model_graph_instance_view_model",
+        "model_graph_node_endpoints",
+        "model_graph_edge_endpoints",
+        "ALTER TABLE odf.model_graph_batch_keys FORCE ROW LEVEL SECURITY;",
+        "CREATE POLICY data_models_model_graph_scope",
+        "CREATE POLICY model_views_model_graph_scope",
+        "CREATE POLICY graph_instances_model_graph_scope",
+        "CREATE POLICY model_graph_batch_keys_scope",
+        "model_views_model_update_idx",
+        "graph_instances_source_idx",
+        "graph_instances_target_idx",
+        "graph_instances_properties_gin_idx",
+        "FROM odf.platform_legacy_model_versions legacy",
+        "ORDER BY model_spaces.created_at, model_spaces.space_id",
+        "legacy model version has no provisioned model space",
+        "NEW.external_id || '@' || NEW.version",
+        "DROP TRIGGER IF EXISTS platform_legacy_model_versions_search_projection",
+        "DELETE FROM odf.platform_search_index",
+        "GRANT SELECT, INSERT, UPDATE ON odf.data_models, odf.graph_instances TO odf_app;",
+        "GRANT SELECT, INSERT ON odf.model_views, odf.model_graph_batch_keys TO odf_app;",
+        "GRANT SELECT ON odf.data_models, odf.model_views, odf.graph_instances, odf.model_graph_batch_keys TO odf_readonly;",
+    ]:
+        require(guardrail in model_graph, f"missing model graph migration guardrail: {guardrail}")
+    require(
+        re.search(r"GRANT\s+[^;]*(?:\bDELETE\b|\bALL(?:\s+PRIVILEGES)?\b)[^;]*\s+TO\s+odf_app\s*;", model_graph, re.DOTALL)
+        is None,
+        "model graph tables must not grant DELETE or ALL privileges to odf_app",
     )
 
 
@@ -610,6 +664,8 @@ def validate_runtime_artifacts() -> None:
         "odf_validation_api",
         "GRANT odf_app TO odf_validation_api",
         "postgresql://odf_validation_api:",
+        "printf '%s' \"$ODF_METRICS_TOKEN\" > \"$RUNNER_TEMP/odf_metrics_token\"",
+        "-v \"$RUNNER_TEMP/odf_metrics_token:/run/secrets/odf_metrics_token:ro\"",
     ]:
         require(guardrail in infrastructure_workflow, f"infrastructure runtime probe missing guardrail: {guardrail}")
 

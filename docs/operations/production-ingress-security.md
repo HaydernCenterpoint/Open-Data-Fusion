@@ -29,6 +29,14 @@ headers, requires a client certificate, and forwards to the internal API. The
 Compose overlay binds it to loopback and requires an approved Envoy image
 pinned by digest.
 
+For a supported edge-agent deployment, mount the client certificate and private
+key as read-only files and configure `delivery.mtls.certificateFile` and
+`delivery.mtls.privateKeyFile`; configure `delivery.mtls.caFile` when the
+gateway uses a private server CA. The agent rejects inline PEM material,
+unreadable credentials, non-HTTPS destinations, and invalid TLS credentials
+before delivery starts. OAuth remains a separate bearer-authorization layer;
+mTLS alone never grants ingest access.
+
 Generate disposable seven-day rehearsal certificates:
 
 ```bash
@@ -43,10 +51,40 @@ docker compose -f docker-compose.yml \
   --profile production-like --profile security-rehearsal up -d --wait
 ```
 
-Verify a request without a client certificate fails the TLS handshake. Then
-repeat with `client.crt`, `client.key`, and `ca.crt`; an authenticated ingest
-request may proceed to normal OIDC/permission checks. Delete the entire local
-PKI directory after rehearsal. Never import its CA or keys into production.
+Run the automated local/CI proof only after the stack is ready:
+
+```bash
+export ODF_SECURITY_INGRESS_SMOKE_CONFIRM=local-security-ingress
+bash infra/ci/security-ingress-smoke.sh
+```
+
+The smoke requires the approved digest-pinned `ODF_ENVOY_IMAGE` and confirms
+that no client certificate fails TLS, a valid certificate reaches the API but
+unauthenticated ingest is denied, and non-ingest paths receive the gateway's
+404 response. It neither obtains a token nor creates data.
+
+The checked-in `ci-edge-mtls` CSV fixture can additionally prove the supported
+edge-agent path end-to-end. It requires an equivalent ready `ci-edge-mtls`
+source in the selected tenant/project; the production-like CI fixture creates
+that source, while a manual deployment must create it through the governed
+platform API first. With the same disposable PKI values, run:
+
+```bash
+export ODF_INGRESS_CLIENT_CERT_FILE="$PWD/.local/odf-pki/client.crt"
+export ODF_INGRESS_CLIENT_KEY_FILE="$PWD/.local/odf-pki/client.key"
+docker compose -f docker-compose.yml \
+  -f docker-compose.production-like.yml \
+  -f docker-compose.security-rehearsal.yml \
+  --profile production-like --profile security-rehearsal --profile edge \
+  up -d --build --wait odf-mtls-gateway edge-agent
+export ODF_EDGE_MTLS_REHEARSAL_CONFIRM=local-ci-edge-mtls-rehearsal
+bash infra/ci/edge-agent-mtls-rehearsal.sh
+```
+
+This confirms `CSV → archive/queue → OAuth → edge mTLS → gateway → API` for a
+synthetic local record. It does not replace a design-partner connector drill.
+Delete the entire local PKI directory and rehearsal volume after use. Never
+import its CA or keys into production.
 
 ## Network policy
 

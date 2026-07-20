@@ -58,7 +58,7 @@ function hasSensitiveConfigurationKey(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(hasSensitiveConfigurationKey);
   return Object.entries(value).some(([key, nested]) => {
     const isReference = /(?:ref|reference)$/i.test(key);
-    return (!isReference && /password|secret|token|api[-_]?key|private[-_]?key/i.test(key)) || hasSensitiveConfigurationKey(nested);
+    return (!isReference && /password|secret|token|api[-_]?key|private[-_]?key|authorization|credential|cookie|session/i.test(key)) || hasSensitiveConfigurationKey(nested);
   });
 }
 
@@ -92,7 +92,15 @@ export const pipelineCreateSchema = z.object({
   datasetId: platformIdSchema.nullable().optional(),
   definition: jsonObjectSchema.default({}),
   enabled: z.boolean().default(true),
-}).strict();
+}).strict().superRefine((pipeline, context) => {
+  if (hasSensitiveConfigurationKey(pipeline.definition)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['definition'],
+      message: 'Pipeline definition must use configuration references instead of inline credentials',
+    });
+  }
+});
 
 export const pipelineRunTriggerSchema = z.object({
   idempotencyKey: platformIdSchema,

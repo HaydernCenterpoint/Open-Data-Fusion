@@ -17,6 +17,23 @@ groups:
         annotations:
           summary: Open Data Fusion outbox worker metrics endpoint is unreachable
           runbook: docs/operations/outbox-dead-letter-recovery.md
+      - alert: OdfPipelineWorkerDown
+        expr: (up{job="open-data-fusion-pipeline"} == 0) and on (job, instance) (max_over_time(up{job="open-data-fusion-pipeline"}[1h]) == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Open Data Fusion pipeline worker metrics endpoint is unreachable
+          runbook: docs/operations/observability-slos.md
+      - alert: OdfPipelineWorkerStale
+        expr: odf_pipeline_last_successful_cycle_timestamp_seconds > 0 and time() - odf_pipeline_last_successful_cycle_timestamp_seconds > 60
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Open Data Fusion pipeline worker has not completed a healthy cycle for more than one minute
+          runbook: docs/operations/observability-slos.md
+
       - alert: OdfOutboxDeadLettersPresent
         expr: odf_outbox_dead_letter_events > 0
         for: 1m

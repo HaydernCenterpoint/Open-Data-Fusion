@@ -8,6 +8,7 @@ import { createClient } from "redis";
 
 import { OutboxPump } from "./outbox.js";
 import { OutboxHealthFile } from "./health.js";
+import { OutboxLogger } from "./logger.js";
 import { PostgresOutboxRepository } from "./postgres.js";
 import { RedisStreamPublisher } from "./redis.js";
 import { closeTelemetryServer, OutboxTelemetry, startOutboxTelemetryServer } from "./telemetry.js";
@@ -41,6 +42,8 @@ const healthFile = new OutboxHealthFile(optionalPath("ODF_OUTBOX_HEALTH_FILE", "
 const healthMaximumAgeMilliseconds = positiveInteger("ODF_OUTBOX_HEALTH_MAX_AGE_MS", 30_000);
 await healthFile.reset();
 
+const workerId = `${hostname()}:${process.pid}:${randomUUID()}`;
+const logger = new OutboxLogger(workerId);
 const pool = new Pool({
   connectionString: required("ODF_POSTGRES_URL"),
   max: positiveInteger("ODF_OUTBOX_DB_POOL_SIZE", 5),
@@ -50,10 +53,9 @@ const pool = new Pool({
   application_name: "open-data-fusion-outbox",
 });
 const redis = createClient({ url: required("ODF_REDIS_URL") });
-redis.on("error", (error) => console.error(JSON.stringify({ level: "error", component: "redis", message: error.message })));
+redis.on("error", (error) => logger.log("error", "redis_connection_error", { error }));
 await redis.connect();
 
-const workerId = `${hostname()}:${process.pid}:${randomUUID()}`;
 const publisher = new RedisStreamPublisher(redis);
 const repository = new PostgresOutboxRepository(pool);
 const pump = new OutboxPump(repository, publisher, {
@@ -65,7 +67,11 @@ const pump = new OutboxPump(repository, publisher, {
 });
 const pollMilliseconds = positiveInteger("ODF_OUTBOX_POLL_MS", 1_000);
 const telemetry = new OutboxTelemetry();
-const telemetryServer = await startOutboxTelemetryServer(positiveInteger("ODF_OUTBOX_METRICS_PORT", 9_465), telemetry);
+const telemetryServer = await startOutboxTelemetryServer(
+  positiveInteger("ODF_OUTBOX_METRICS_PORT", 9_465),
+  telemetry,
+  (probeId) => logger.log("info", "observability_probe", { probeId }),
+);
 let stopping = false;
 
 function delay(milliseconds: number): Promise<void> {
@@ -75,19 +81,13 @@ function delay(milliseconds: number): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
-  console.log(JSON.stringify({ level: "info", component: "outbox", message: "stopping", signal, workerId }));
-  await Promise.allSettled([closeTelemetryServer(telemetryServer), publisher.close(), pool.end()]);
+  logger.log("info", "stopping", { signal });
+  await Promise.allSettled([closeTelemetryServer(telemetryServer), publisher.close(), pool.end(), logger.shutdown()]);
 }
 
 process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
-console.log(JSON.stringify({
-  level: "info",
-  component: "outbox",
-  message: "started",
-  workerId,
-  healthMaximumAgeMilliseconds,
-}));
+logger.log("info", "started", { healthMaximumAgeMilliseconds });
 
 while (!stopping) {
   try {
@@ -97,23 +97,20 @@ while (!stopping) {
     if (result.failed === 0 && snapshot.deadLetteredEvents === 0 && redis.isReady) {
       await healthFile.markSuccess();
     } else {
-      console.error(JSON.stringify({
-        level: "error",
-        component: "outbox",
-        message: "delivery dependency is unavailable or an event could not be published",
+      logger.log("error", "delivery_dependency_unavailable", {
         failed: result.failed,
         deadLettered: result.deadLettered,
         deadLetteredEvents: snapshot.deadLetteredEvents,
         pendingEvents: snapshot.pendingEvents,
         oldestPendingAgeSeconds: snapshot.oldestPendingAgeSeconds,
         redisReady: redis.isReady,
-      }));
+      });
     }
     if (result.claimed === 0) await delay(pollMilliseconds);
-    else console.log(JSON.stringify({ level: "info", component: "outbox", ...result }));
+    else logger.log("info", "cycle_completed", { ...result });
   } catch (error) {
     telemetry.observeLoopError(redis.isReady);
-    console.error(JSON.stringify({ level: "error", component: "outbox", message: error instanceof Error ? error.message : "unknown error" }));
+    logger.log("error", "loop_error", { error });
     await delay(pollMilliseconds);
   }
 }

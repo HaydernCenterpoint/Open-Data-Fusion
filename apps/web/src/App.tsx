@@ -4,7 +4,9 @@ import { AssetTree } from "./components/AssetTree";
 import { AssetWorkspace } from "./components/AssetWorkspace";
 import { DiagramsWorkspace, MatchingWorkspace, SpatialWorkspace, WritebackWorkspace } from "./components/AdvancedPlatformWorkspaces";
 import { CanvasWorkspace } from "./components/CanvasWorkspace";
+import { DataExplorerWorkspace } from "./components/DataExplorerWorkspace";
 import { IngestModal } from "./components/IngestModal";
+import { ProjectOverviewWorkspace } from "./components/ProjectOverviewWorkspace";
 import { RelatedRail } from "./components/RelatedRail";
 import {
   ModelsWorkspace,
@@ -20,7 +22,7 @@ import { Sidebar, type NavigationLabel } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { getExplorerSnapshot, getHealth, getWorkspace, listAssets, listPlatformProjects, listPlatformTenants } from "./lib/api";
 import { commitAppRoute, readAppRoute, type AppRoute, type AppRouteHistoryMode, type AppViewMode } from "./lib/appRoute";
-import type { ApiAsset, ApiWorkspace, ExplorerSnapshot, PlatformContext, PlatformProject, PlatformSearchResult, PlatformTenant } from "./types";
+import type { ApiAsset, ApiWorkspace, CursorPage, ExplorerSnapshot, PlatformContext, PlatformProject, PlatformSearchResult, PlatformTenant } from "./types";
 
 type ViewMode = AppViewMode;
 
@@ -31,6 +33,7 @@ const CONFIGURED_WORKSPACE_ID = (
 ).trim();
 
 const viewByNavigation: Record<NavigationLabel, Exclude<ViewMode, "canvas">> = {
+  Overview: "overview",
   Explorer: "explorer",
   Sources: "sources",
   Pipelines: "pipelines",
@@ -44,6 +47,7 @@ const viewByNavigation: Record<NavigationLabel, Exclude<ViewMode, "canvas">> = {
 };
 
 const navigationByView: Record<Exclude<ViewMode, "canvas">, NavigationLabel> = {
+  overview: "Overview",
   explorer: "Explorer",
   sources: "Sources",
   pipelines: "Pipelines",
@@ -70,10 +74,31 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+type CursorPageRequest<T> = (
+  query: { limit?: number; cursor?: string },
+  signal?: AbortSignal,
+) => Promise<CursorPage<T>>;
+
+async function collectCursorPages<T>(requestPage: CursorPageRequest<T>, signal?: AbortSignal): Promise<T[]> {
+  const items: T[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  while (true) {
+    const page = await requestPage({ limit: 100, ...(cursor ? { cursor } : {}) }, signal);
+    items.push(...page.items);
+    if (!page.nextCursor) return items;
+    if (seenCursors.has(page.nextCursor)) throw new Error("The platform returned a repeated discovery cursor");
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+}
+
 export default function App() {
   const initialRouteRef = useRef(readAppRoute());
   const routeRef = useRef<AppRoute>(initialRouteRef.current);
-  const [query, setQuery] = useState("");
+  const [route, setRoute] = useState<AppRoute>(initialRouteRef.current);
+  const [query, setQuery] = useState(initialRouteRef.current.searchQuery ?? "");
   const [viewMode, setViewMode] = useState<ViewMode>(initialRouteRef.current.view);
   const [treeVisible, setTreeVisible] = useState(() => typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 791px)").matches);
   const [relatedRailOpen, setRelatedRailOpen] = useState(false);
@@ -105,9 +130,25 @@ export default function App() {
 
   const updateRoute = useCallback((patch: Partial<AppRoute>, mode: AppRouteHistoryMode = "push") => {
     const nextRoute: AppRoute = { ...routeRef.current, ...patch };
-    if (nextRoute.view !== "explorer") delete nextRoute.assetId;
+    if (nextRoute.view !== "explorer") {
+      delete nextRoute.assetId;
+      delete nextRoute.searchQuery;
+      delete nextRoute.resultType;
+      delete nextRoute.resultId;
+    } else if (nextRoute.searchQuery) {
+      delete nextRoute.assetId;
+      if (!nextRoute.resultType || !nextRoute.resultId) {
+        delete nextRoute.resultType;
+        delete nextRoute.resultId;
+      }
+    } else {
+      delete nextRoute.searchQuery;
+      delete nextRoute.resultType;
+      delete nextRoute.resultId;
+    }
     if (!nextRoute.tenantId) delete nextRoute.projectId;
     routeRef.current = nextRoute;
+    setRoute(nextRoute);
     commitAppRoute(nextRoute, mode);
   }, []);
 
@@ -120,6 +161,22 @@ export default function App() {
     setWorkspace((current) => !current || nextWorkspace.version >= current.version ? nextWorkspace : current);
   }, []);
 
+  const invalidateScopedData = useCallback(() => {
+    explorerRequestRef.current?.abort();
+    workspaceRequestRef.current?.abort();
+    setWorkspace(null);
+    setAssets([]);
+    setAssetTotal(0);
+    setAssetsLoading(false);
+    setAssetsLoadingMore(false);
+    setAssetsError("");
+    setSelectedAssetId("");
+    setSnapshot(null);
+    setExplorerLoading(false);
+    setExplorerError("");
+    setRelatedRailOpen(false);
+  }, []);
+
   const loadExplorerAsset = useCallback(async (externalId: string) => {
     if (!workspaceTenantId || !workspaceProjectId) return;
     const context = { tenantId: workspaceTenantId, projectId: workspaceProjectId };
@@ -127,7 +184,7 @@ export default function App() {
     const controller = new AbortController();
     explorerRequestRef.current = controller;
     setSelectedAssetId(externalId);
-    if (routeRef.current.view === "explorer" && routeRef.current.assetId !== externalId) {
+    if (routeRef.current.view === "explorer" && !routeRef.current.searchQuery && routeRef.current.assetId !== externalId) {
       updateRoute({ view: "explorer", assetId: externalId }, "replace");
     }
     setExplorerLoading(true);
@@ -149,7 +206,13 @@ export default function App() {
     setViewMode("explorer");
     setQuery("");
     setRelatedRailOpen(false);
-    updateRoute({ view: "explorer", assetId: externalId }, historyMode);
+    updateRoute({
+      view: "explorer",
+      assetId: externalId,
+      searchQuery: undefined,
+      resultType: undefined,
+      resultId: undefined,
+    }, historyMode);
     void loadExplorerAsset(externalId);
   }, [loadExplorerAsset, updateRoute]);
 
@@ -159,25 +222,31 @@ export default function App() {
     historyMode: AppRouteHistoryMode | null = "replace",
   ) => {
     projectRequestRef.current?.abort();
-    workspaceRequestRef.current?.abort();
     const controller = new AbortController();
     projectRequestRef.current = controller;
+    invalidateScopedData();
     setSelectedTenantId(tenantId);
     setPlatformContext(null);
-    setWorkspace(null);
     setPlatformProjects([]);
     setPlatformBootstrap({ status: "loading", message: `Loading projects for ${tenantId}…` });
     try {
-      const page = await listPlatformProjects(tenantId, { limit: 100 }, controller.signal);
+      const projects = await collectCursorPages((query, signal) => listPlatformProjects(tenantId, query, signal), controller.signal);
       if (controller.signal.aborted) return;
-      setPlatformProjects(page.items);
-      if (page.items.length === 0) {
-        setPlatformBootstrap({ status: "empty", message: "No accessible projects were returned for this tenant." });
-        if (historyMode) updateRoute({ tenantId, projectId: undefined }, historyMode);
+      setPlatformProjects(projects);
+      const requestedProjectId = preferredProjectId?.trim();
+      const project = requestedProjectId
+        ? projects.find((item) => item.id === requestedProjectId)
+        : projects[0];
+      if (!project) {
+        setPlatformBootstrap({
+          status: "empty",
+          message: requestedProjectId
+            ? `Project '${requestedProjectId}' is not accessible for this tenant.`
+            : "No accessible projects were returned for this tenant.",
+        });
+        if (historyMode && !requestedProjectId) updateRoute({ tenantId, projectId: undefined }, historyMode);
         return;
       }
-      const project = page.items.find((item) => item.id === preferredProjectId)
-        ?? page.items[0];
       setPlatformContext({ tenantId, projectId: project.id });
       setPlatformBootstrap({ status: "ready", message: `${tenantId} / ${project.id}` });
       if (historyMode) updateRoute({ tenantId, projectId: project.id }, historyMode);
@@ -186,29 +255,30 @@ export default function App() {
       const issue = platformIssue(error, "Projects could not be loaded");
       setPlatformBootstrap({ status: issue.kind, message: issue.message });
     }
-  }, [updateRoute]);
+  }, [invalidateScopedData, updateRoute]);
 
   const retryPlatformBootstrap = useCallback(async () => {
     setPlatformBootstrap({ status: "loading", message: "Discovering accessible projects…" });
     try {
-      const page = await listPlatformTenants({ limit: 100 });
-      setPlatformTenants(page.items);
-      if (page.items.length === 0) {
+      const tenants = await collectCursorPages((query, signal) => listPlatformTenants(query, signal));
+      setPlatformTenants(tenants);
+      if (tenants.length === 0) {
+        invalidateScopedData();
         setSelectedTenantId("");
         setPlatformProjects([]);
         setPlatformContext(null);
-        setWorkspace(null);
         setPlatformBootstrap({ status: "empty", message: "No accessible tenants were returned for this identity." });
         return;
       }
-      const tenant = page.items.find((item) => item.id === routeRef.current.tenantId)
-        ?? page.items[0];
-      void loadProjectsForTenant(tenant.id, routeRef.current.projectId, "replace");
+      const requestedTenantId = selectedTenantId || routeRef.current.tenantId;
+      const tenant = tenants.find((item) => item.id === requestedTenantId)
+        ?? tenants[0];
+      void loadProjectsForTenant(tenant.id, tenant.id === routeRef.current.tenantId ? routeRef.current.projectId : undefined, "replace");
     } catch (error) {
       const issue = platformIssue(error, "Tenants could not be loaded");
       setPlatformBootstrap({ status: issue.kind, message: issue.message });
     }
-  }, [loadProjectsForTenant]);
+  }, [invalidateScopedData, loadProjectsForTenant, selectedTenantId]);
 
   useEffect(() => {
     workspaceRequestRef.current?.abort();
@@ -239,17 +309,17 @@ export default function App() {
     const controller = new AbortController();
     void Promise.all([
       getHealth(controller.signal),
-      capture(listPlatformTenants({ limit: 100 }, controller.signal)),
+      capture(collectCursorPages((query, signal) => listPlatformTenants(query, signal), controller.signal)),
     ]).then(([online, tenantResult]) => {
       if (controller.signal.aborted) return;
       setApiOnline(online);
       if (tenantResult.ok) {
-        setPlatformTenants(tenantResult.value.items);
-        if (tenantResult.value.items.length === 0) {
+        setPlatformTenants(tenantResult.value);
+        if (tenantResult.value.length === 0) {
           setPlatformBootstrap({ status: "empty", message: "No accessible tenants were returned for this identity." });
         } else {
-          const tenant = tenantResult.value.items.find((item) => item.id === routeRef.current.tenantId)
-            ?? tenantResult.value.items[0];
+          const tenant = tenantResult.value.find((item) => item.id === routeRef.current.tenantId)
+            ?? tenantResult.value[0];
           void loadProjectsForTenant(tenant.id, routeRef.current.projectId, "replace");
         }
       } else {
@@ -267,7 +337,7 @@ export default function App() {
 
   useEffect(() => {
     explorerRequestRef.current?.abort();
-    if (!workspaceTenantId || !workspaceProjectId) {
+    if (viewMode !== "explorer" || !workspaceTenantId || !workspaceProjectId) {
       setAssets([]);
       setAssetTotal(0);
       setAssetsLoading(false);
@@ -284,6 +354,13 @@ export default function App() {
         setAssets(response.items);
         setAssetTotal(response.total);
         setAssetsLoading(false);
+        if (routeRef.current.searchQuery) {
+          setSelectedAssetId("");
+          setSnapshot(null);
+          setExplorerLoading(false);
+          setExplorerError("");
+          return;
+        }
         const routedAssetId = routeRef.current.assetId;
         const initialAssetId = routedAssetId ?? response.items[0]?.externalId;
         if (initialAssetId) void loadExplorerAsset(initialAssetId);
@@ -300,7 +377,7 @@ export default function App() {
         setAssetsError(errorMessage(error, "Assets could not be loaded"));
       });
     return () => controller.abort();
-  }, [loadExplorerAsset, workspaceProjectId, workspaceTenantId]);
+  }, [loadExplorerAsset, viewMode, workspaceProjectId, workspaceTenantId]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return undefined;
@@ -334,10 +411,18 @@ export default function App() {
     const restoreRoute = () => {
       const route = readAppRoute();
       routeRef.current = route;
+      setRoute(route);
       setViewMode(route.view);
-      setQuery("");
+      setQuery(route.searchQuery ?? "");
       setRelatedRailOpen(false);
-      setTreeVisible(route.view === "explorer" && (typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 791px)").matches));
+      setTreeVisible(route.view === "explorer" && !route.searchQuery && (typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 791px)").matches));
+      if (route.searchQuery) {
+        explorerRequestRef.current?.abort();
+        setSelectedAssetId("");
+        setSnapshot(null);
+        setExplorerLoading(false);
+        setExplorerError("");
+      }
       if (route.assetId) void loadExplorerAsset(route.assetId);
       if (route.tenantId) void loadProjectsForTenant(route.tenantId, route.projectId, null);
     };
@@ -388,6 +473,9 @@ export default function App() {
     updateRoute({
       view: nextView,
       assetId: nextView === "explorer" ? selectedAssetId || undefined : undefined,
+      searchQuery: undefined,
+      resultType: undefined,
+      resultId: undefined,
     }, historyMode);
   }
 
@@ -395,10 +483,14 @@ export default function App() {
     showView(viewByNavigation[label]);
   }
 
+  function selectPlatformTenant(tenantId: string) {
+    if (!tenantId || tenantId === selectedTenantId) return;
+    void loadProjectsForTenant(tenantId, undefined, "push");
+  }
+
   function selectPlatformProject(projectId: string) {
-    if (!selectedTenantId) return;
-    workspaceRequestRef.current?.abort();
-    setWorkspace(null);
+    if (!selectedTenantId || projectId === platformContext?.projectId) return;
+    invalidateScopedData();
     setPlatformContext({ tenantId: selectedTenantId, projectId });
     setPlatformBootstrap({ status: "ready", message: `${selectedTenantId} / ${projectId}` });
     updateRoute({ tenantId: selectedTenantId, projectId });
@@ -418,13 +510,79 @@ export default function App() {
     else if (result.entityType === "matchingEvaluation") showView("matching");
     else if (result.entityType === "spatialAssetLink") showView("spatial");
     else if (result.entityType === "writebackRequest") showView("writeback");
+    else if (result.entityType === "audit") showView("audit");
     else notify(`${result.title} selected`);
+  }
+
+  function openDataExplorer(nextQuery: string, historyMode: AppRouteHistoryMode = "push") {
+    const searchQuery = nextQuery.trim();
+    if (!searchQuery) return;
+    explorerRequestRef.current?.abort();
+    setViewMode("explorer");
+    setQuery(searchQuery);
+    setTreeVisible(false);
+    setRelatedRailOpen(false);
+    setSelectedAssetId("");
+    setSnapshot(null);
+    setExplorerLoading(false);
+    setExplorerError("");
+    updateRoute({
+      view: "explorer",
+      assetId: undefined,
+      searchQuery,
+      resultType: undefined,
+      resultId: undefined,
+    }, historyMode);
+  }
+
+  function selectDataExplorerResult(result: PlatformSearchResult) {
+    const searchQuery = routeRef.current.searchQuery;
+    if (!searchQuery) return;
+    updateRoute({
+      view: "explorer",
+      assetId: undefined,
+      searchQuery,
+      resultType: result.entityType,
+      resultId: result.entityId,
+    }, "replace");
+  }
+
+  function clearDataExplorer() {
+    const fallbackAssetId = assets[0]?.externalId;
+    setQuery("");
+    setTreeVisible(typeof window.matchMedia !== "function" || window.matchMedia("(min-width: 791px)").matches);
+    if (fallbackAssetId) {
+      openAsset(fallbackAssetId, "replace");
+      return;
+    }
+    updateRoute({
+      view: "explorer",
+      assetId: undefined,
+      searchQuery: undefined,
+      resultType: undefined,
+      resultId: undefined,
+    }, "replace");
   }
 
   if (viewMode === "canvas") {
     return (
       <>
-        <CanvasWorkspace snapshot={snapshot} workspace={workspace} platformContext={platformContext} onWorkspaceUpdated={acceptWorkspace} onOpenExplorer={() => showView("explorer")} onNotify={notify} />
+        <CanvasWorkspace
+          snapshot={snapshot}
+          workspace={workspace}
+          platformContext={platformContext}
+          tenants={platformTenants}
+          projects={platformProjects}
+          selectedTenantId={selectedTenantId}
+          platformState={platformBootstrap}
+          onTenantChange={selectPlatformTenant}
+          onProjectChange={selectPlatformProject}
+          onRetryProjectDiscovery={() => void retryPlatformBootstrap()}
+          onWorkspaceUpdated={acceptWorkspace}
+          onOpenExplorer={() => showView("explorer")}
+          onNavigate={navigate}
+          onNotify={notify}
+        />
         {toast ? <div className="toast" role="status">{toast}</div> : null}
       </>
     );
@@ -432,14 +590,41 @@ export default function App() {
 
   const activeNavigation = navigationByView[viewMode];
   const sectionView = viewMode !== "explorer";
+  const dataExplorerQuery = viewMode === "explorer" ? route.searchQuery ?? "" : "";
+  const dataExplorerActive = Boolean(dataExplorerQuery);
 
   return (
-    <div className={`app-shell${treeVisible && viewMode === "explorer" ? "" : " tree-collapsed"}${sectionView ? " section-shell" : ""}${navigationCollapsed ? " navigation-collapsed" : ""}`}>
+    <div className={`app-shell${treeVisible && viewMode === "explorer" && !dataExplorerActive ? "" : " tree-collapsed"}${sectionView ? " section-shell" : ""}${navigationCollapsed ? " navigation-collapsed" : ""}`}>
       <Sidebar active={activeNavigation} collapsed={navigationCollapsed} collapseLocked={compactNavigation} onNavigate={navigate} onToggleCollapsed={() => setNavigationCollapsed((collapsed) => !collapsed)} />
-      <Topbar query={query} onQueryChange={setQuery} onResultSelect={selectSearchResult} apiOnline={apiOnline} platformContext={platformContext} platformStatus={platformBootstrap.status} activeSection={activeNavigation} onSectionChange={navigate} />
-      {sectionView ? <PlatformContextBar tenants={platformTenants} projects={platformProjects} selectedTenantId={selectedTenantId} context={platformContext} state={platformBootstrap} onTenantChange={(tenantId) => { updateRoute({ tenantId, projectId: undefined }); void loadProjectsForTenant(tenantId, undefined, "replace"); }} onProjectChange={selectPlatformProject} onRetry={() => void retryPlatformBootstrap()} /> : null}
+      <Topbar
+        query={query}
+        onQueryChange={setQuery}
+        onResultSelect={selectSearchResult}
+        onSearchSubmit={openDataExplorer}
+        apiOnline={apiOnline}
+        platformContext={platformContext}
+        tenants={platformTenants}
+        projects={platformProjects}
+        selectedTenantId={selectedTenantId}
+        platformState={platformBootstrap}
+        activeSection={activeNavigation}
+        onTenantChange={selectPlatformTenant}
+        onProjectChange={selectPlatformProject}
+        onRetry={() => void retryPlatformBootstrap()}
+        onSectionChange={navigate}
+      />
+      {sectionView ? <PlatformContextBar tenants={platformTenants} projects={platformProjects} selectedTenantId={selectedTenantId} context={platformContext} state={platformBootstrap} onTenantChange={selectPlatformTenant} onProjectChange={selectPlatformProject} onRetry={() => void retryPlatformBootstrap()} /> : null}
       {viewMode === "explorer" ? (
-        <>
+        dataExplorerActive ? (
+          <DataExplorerWorkspace
+            context={platformContext}
+            query={dataExplorerQuery}
+            selected={route.resultType && route.resultId ? { entityType: route.resultType, entityId: route.resultId } : null}
+            onSelect={selectDataExplorerResult}
+            onOpen={selectSearchResult}
+            onClear={clearDataExplorer}
+          />
+        ) : <>
           {treeVisible ? (
             <AssetTree assets={assets} total={assetTotal} selectedExternalId={selectedAssetId} loading={assetsLoading} loadingMore={assetsLoadingMore} error={assetsError} onCollapse={() => setTreeVisible(false)} onSelect={(asset) => openAsset(asset.externalId)} onRetry={() => void reloadAssets()} onLoadMore={() => void loadMoreAssets()} />
           ) : <button className="show-tree-button" type="button" onClick={() => setTreeVisible(true)} aria-label="Show asset hierarchy"><PanelLeftOpen size={20} /></button>}
@@ -449,6 +634,7 @@ export default function App() {
           <RelatedRail snapshot={explorerLoading ? null : snapshot} onAction={notify} open={relatedRailOpen} onClose={() => setRelatedRailOpen(false)} />
         </>
       ) : null}
+      {viewMode === "overview" ? <ProjectOverviewWorkspace key={platformContext ? `${platformContext.tenantId}:${platformContext.projectId}` : "no-project"} context={platformContext} onNavigate={navigate} /> : null}
       {viewMode === "context" ? <PlatformContextWorkspace context={platformContext} onOpenAsset={openAsset} /> : null}
       {viewMode === "audit" ? <AuditWorkspace context={platformContext} /> : null}
       {viewMode === "sources" ? <SourcesWorkspace context={platformContext} /> : null}

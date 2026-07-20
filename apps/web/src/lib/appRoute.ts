@@ -1,5 +1,6 @@
 export const APP_VIEWS = [
   "canvas",
+  "overview",
   "explorer",
   "sources",
   "pipelines",
@@ -17,6 +18,9 @@ export type AppViewMode = (typeof APP_VIEWS)[number];
 export interface AppRoute {
   view: AppViewMode;
   assetId?: string;
+  searchQuery?: string;
+  resultType?: string;
+  resultId?: string;
   tenantId?: string;
   projectId?: string;
 }
@@ -43,12 +47,17 @@ export function readAppRoute(input: string | URL | Location = window.location): 
     ? requestedView as AppViewMode
     : "canvas";
   const assetId = optionalParameter(url.searchParams.get("asset"));
+  const searchQuery = optionalParameter(url.searchParams.get("q"));
+  const resultType = optionalParameter(url.searchParams.get("resultType"));
+  const resultId = optionalParameter(url.searchParams.get("result"));
   const tenantId = optionalParameter(url.searchParams.get("tenant"));
   const projectId = optionalParameter(url.searchParams.get("project"));
 
   return {
     view,
-    ...(view === "explorer" && assetId ? { assetId } : {}),
+    ...(view === "explorer" && assetId && !searchQuery ? { assetId } : {}),
+    ...(view === "explorer" && searchQuery ? { searchQuery } : {}),
+    ...(view === "explorer" && searchQuery && resultType && resultId ? { resultType, resultId } : {}),
     ...(tenantId ? { tenantId } : {}),
     ...(tenantId && projectId ? { projectId } : {}),
   };
@@ -58,8 +67,19 @@ export function appRouteHref(current: string | URL | Location, route: AppRoute):
   const url = routeUrl(current);
   url.searchParams.set("view", route.view);
 
+  url.searchParams.delete("asset");
+  url.searchParams.delete("q");
+  url.searchParams.delete("resultType");
+  url.searchParams.delete("result");
+
   if (route.view === "explorer" && route.assetId) url.searchParams.set("asset", route.assetId);
-  else url.searchParams.delete("asset");
+  if (route.view === "explorer" && route.searchQuery) {
+    url.searchParams.set("q", route.searchQuery);
+    if (route.resultType && route.resultId) {
+      url.searchParams.set("resultType", route.resultType);
+      url.searchParams.set("result", route.resultId);
+    }
+  }
 
   if (route.tenantId) url.searchParams.set("tenant", route.tenantId);
   else url.searchParams.delete("tenant");

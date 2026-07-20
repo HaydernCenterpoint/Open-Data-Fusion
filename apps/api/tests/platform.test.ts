@@ -333,6 +333,7 @@ describe('platform catalog API', () => {
       server.listen(0, '127.0.0.1', resolve);
     });
 
+    let cancelStream: (() => Promise<void>) | undefined;
     try {
       const address = server.address();
       if (!address || typeof address === 'string') throw new Error('SSE test server did not bind a TCP port');
@@ -349,8 +350,29 @@ describe('platform catalog API', () => {
       expect(response.status).toBe(200);
       const reader = response.body?.getReader();
       if (!reader) throw new Error('SSE response did not include a body');
-      const firstChunk = await reader.read();
-      expect(new TextDecoder().decode(firstChunk.value)).toContain(': connected');
+      cancelStream = () => reader.cancel().catch(() => undefined);
+      const decoder = new TextDecoder();
+      const readSseChunk = async (errorMessage: string) => {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([
+            reader.read(),
+            new Promise<never>((_resolve, reject) => {
+              timeout = setTimeout(() => reject(new Error(errorMessage)), 2_000);
+              timeout.unref();
+            }),
+          ]);
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+      };
+      let initialFrames = '';
+      while (!initialFrames.includes('event: presence.updated')) {
+        const initialChunk = await readSseChunk('Scoped SQLite SSE did not publish initial presence');
+        if (initialChunk.done) throw new Error('Scoped SQLite SSE closed before initial presence');
+        initialFrames += decoder.decode(initialChunk.value);
+      }
+      expect(initialFrames).toContain(': connected');
 
       database.database.prepare(`
         DELETE FROM platform_project_members
@@ -363,15 +385,10 @@ describe('platform catalog API', () => {
         changeSummary: 'Remote update after revocation',
       });
 
-      const closed = await Promise.race([
-        reader.read(),
-        new Promise<never>((_resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error('Scoped SQLite SSE did not close after revocation')), 2_000);
-          timeout.unref();
-        }),
-      ]);
+      const closed = await readSseChunk('Scoped SQLite SSE did not close after revocation');
       expect(closed.done).toBe(true);
     } finally {
+      await cancelStream?.();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
@@ -427,6 +444,13 @@ describe('platform catalog API', () => {
       id: 'unsafe', name: 'Unsafe', sourceId: 'opcua-north', type: 'opcua', configuration: { password: 'plaintext' },
     });
     expect(inlineSecret.status).toBe(400);
+
+    const unsafePipeline = await scope(authorize(
+      request(app).post('/api/v1/platform/pipelines'),
+      'riley.chen',
+      ['data:ingest'],
+    )).send({ id: 'unsafe-pipeline', name: 'Unsafe pipeline', definition: { auth: { credential: 'plaintext' } } });
+    expect(unsafePipeline.status).toBe(400);
 
     const versionOne = await scope(authorize(
       request(app).post('/api/v1/platform/data-models/equipment/versions'),
@@ -506,6 +530,16 @@ describe('platform catalog API', () => {
   });
 
   it('searches existing assets and newly projected platform entities', async () => {
+    const ingest = await scope(authorize(
+      request(app).post('/api/v1/ingest/bundle'),
+      'riley.chen',
+      ['data:ingest'],
+    )).send({
+      source: { system: 'search-test', runId: 'search-test-pump' },
+      assets: [{ externalId: 'P-101', name: 'Pump P-101', type: 'Pump' }],
+    });
+    expect(ingest.status).toBe(201);
+
     await scope(authorize(
       request(app).post('/api/v1/platform/datasets'),
       'riley.chen',
@@ -513,12 +547,15 @@ describe('platform catalog API', () => {
     )).send({ id: 'maintenance-insights', name: 'Maintenance Insights', description: 'Pump maintenance analytics' });
 
     const assetSearch = await scope(authorize(
-      request(app).get('/api/v1/platform/search').query({ q: 'Pump P-101' }),
+      request(app).get('/api/v1/platform/search').query({ q: 'Pump' }),
       'samantha.lee',
       ['data:read'],
     ));
     expect(assetSearch.body.items).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityType: 'asset', entityId: 'P-101' }),
+    ]));
+    expect(assetSearch.body.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityType: 'asset', entityId: 'P-102' }),
     ]));
 
     const catalogSearch = await scope(authorize(
