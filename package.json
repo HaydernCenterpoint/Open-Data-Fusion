@@ -42,7 +42,7 @@
     }
   },
   "devDependencies": {
-    "concurrently": "^9.2.1",
+    "concurrently": "^9.2.4",
     "typescript": "^7.0.2"
   }
 }
