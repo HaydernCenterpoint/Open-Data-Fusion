@@ -20,8 +20,10 @@ COPY apps/web ./apps/web
 COPY packages/contracts ./packages/contracts
 ARG VITE_FII_SSO=
 ARG VITE_FII_LOGIN_URL=
+ARG VITE_FII_LOGOUT_URL=
 ENV VITE_FII_SSO=${VITE_FII_SSO}
 ENV VITE_FII_LOGIN_URL=${VITE_FII_LOGIN_URL}
+ENV VITE_FII_LOGOUT_URL=${VITE_FII_LOGOUT_URL}
 RUN npm run build --workspace @open-data-fusion/web
 
 FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime

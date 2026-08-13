@@ -69,6 +69,7 @@ const ENVIRONMENT_KEYS = [
   "VITE_OIDC_USER_CLAIM",
   "VITE_FII_SSO",
   "VITE_FII_LOGIN_URL",
+  "VITE_FII_LOGOUT_URL",
 ] as const;
 
 function configureOidc(): void {
@@ -315,5 +316,34 @@ describe("OIDC browser session", () => {
       authenticated: false,
       identity: null,
     });
+  });
+
+  it("rejects unsafe factory Operations URLs", async () => {
+    vi.stubEnv("VITE_FII_SSO", "true");
+    vi.stubEnv("VITE_FII_LOGIN_URL", "https://attacker.example.test/login");
+    let auth = await import("./auth");
+
+    await expect(auth.initialize()).rejects.toThrow("VITE_FII_LOGIN_URL must be an HTTP(S) URL");
+
+    vi.resetModules();
+    vi.stubEnv("VITE_FII_LOGIN_URL", "http://localhost:3001/login");
+    vi.stubEnv("VITE_FII_LOGOUT_URL", "javascript:alert(1)");
+    auth = await import("./auth");
+
+    await expect(auth.initialize()).rejects.toThrow("VITE_FII_LOGOUT_URL must be an HTTP(S) URL");
+  });
+
+  it("redirects factory sign-out through the Operations global logout route", async () => {
+    vi.stubEnv("VITE_FII_SSO", "true");
+    vi.stubEnv("VITE_FII_LOGIN_URL", "http://localhost:3001/login");
+    vi.stubEnv("VITE_FII_LOGOUT_URL", "http://localhost:3001/logout");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 401 })));
+    const assign = vi.fn();
+    vi.stubGlobal("window", { location: { hostname: "localhost", assign } });
+    const auth = await import("./auth");
+
+    await auth.signOut();
+
+    expect(assign).toHaveBeenCalledWith("http://localhost:3001/logout");
   });
 });

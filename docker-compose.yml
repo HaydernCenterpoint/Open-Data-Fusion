@@ -130,6 +130,7 @@ services:
       args:
         VITE_FII_SSO: "${VITE_FII_SSO:-false}"
         VITE_FII_LOGIN_URL: "${FII_MAIN_LOGIN_URL:-http://localhost:3001/login}"
+        VITE_FII_LOGOUT_URL: "${FII_MAIN_LOGOUT_URL:-http://localhost:3001/logout}"
     restart: unless-stopped
     ports:
       - "127.0.0.1:${ODF_WEB_PORT:-8088}:8080"

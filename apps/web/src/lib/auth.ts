@@ -31,6 +31,7 @@ interface FactoryConfiguration {
   enabled: true;
   mode: "factory";
   loginUrl: string;
+  logoutUrl: string;
 }
 
 interface EnabledConfiguration {
@@ -113,13 +114,21 @@ function localApplicationUrl(value: string, fallbackPath: string, label: string)
   }
 }
 
-function factoryLoginUrl(value: string): string {
+function factoryOperationsUrl(value: string, fallback: string, label: string): string {
   const currentWindow = browserWindow();
-  const url = new URL(value || "http://localhost:3001/login");
-  if (!["http:", "https:"].includes(url.protocol) || url.hostname !== currentWindow.location.hostname) {
-    throw new OidcConfigurationError("VITE_FII_LOGIN_URL must use the current application hostname");
+  try {
+    const url = new URL(value || fallback);
+    const localHostname = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+    if (!["http:", "https:"].includes(url.protocol) || url.hostname !== currentWindow.location.hostname) {
+      throw new Error("URL must use the current application hostname");
+    }
+    if (url.protocol === "http:" && !localHostname) {
+      throw new Error("Plain HTTP is allowed only for local Operations");
+    }
+    return url.toString();
+  } catch (error) {
+    throw new OidcConfigurationError(`${label} must be an HTTP(S) URL on the current application hostname: ${String(error)}`);
   }
-  return url.toString();
 }
 
 function readConfiguration(): BrowserAuthConfiguration {
@@ -131,7 +140,16 @@ function readConfiguration(): BrowserAuthConfiguration {
     return {
       enabled: true,
       mode: "factory",
-      loginUrl: factoryLoginUrl(environmentValue("VITE_FII_LOGIN_URL")),
+      loginUrl: factoryOperationsUrl(
+        environmentValue("VITE_FII_LOGIN_URL"),
+        "http://localhost:3001/login",
+        "VITE_FII_LOGIN_URL",
+      ),
+      logoutUrl: factoryOperationsUrl(
+        environmentValue("VITE_FII_LOGOUT_URL"),
+        "http://localhost:3001/logout",
+        "VITE_FII_LOGOUT_URL",
+      ),
     };
   }
   const authority = environmentValue("VITE_OIDC_AUTHORITY");
@@ -422,7 +440,7 @@ async function signOutOnce(): Promise<void> {
   const config = getConfiguration();
   if (!config.enabled) throw new OidcConfigurationError("OIDC authentication is not configured");
   if (config.mode === "factory") {
-    browserWindow().location.assign(config.loginUrl);
+    browserWindow().location.assign(config.logoutUrl);
     return;
   }
   const manager = await getManager(config);
